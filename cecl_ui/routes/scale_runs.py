@@ -24,10 +24,12 @@ from flask import (
     Blueprint, current_app, flash, redirect, render_template, request,
     session, url_for,
 )
+from werkzeug.utils import secure_filename
 
 from cecl_ui.routes.setup import STATE_KEY
 from cecl_ui.routes.scale_setup import _default_scale_block
 from cecl_ui.services.scale import (
+    impaired_loader,
     runner as scale_runner,
     runs_service,
     template_loader,
@@ -41,6 +43,26 @@ scale_runs_bp = Blueprint(
 
 def _workspace_root() -> str:
     return current_app.config["WORKSPACE_ROOT"]
+
+
+def _save_run_impaired_upload(
+    workspace_root: str, short_name: str, period: str, file_storage,
+) -> Path:
+    """Save an uploaded impaired-loans workbook alongside the quarter's
+    generated reports.
+
+    Lives at ``Generated_Reports/<short>/<period>/uploads/<filename>``
+    so it's archived with the report it was used to generate.
+    """
+    sub = (
+        Path(workspace_root) / "Generated_Reports" / short_name
+        / period / "uploads"
+    )
+    sub.mkdir(parents=True, exist_ok=True)
+    fn = secure_filename(file_storage.filename or "impaired.xlsx")
+    target = sub / fn
+    file_storage.save(target)
+    return target
 
 
 @scale_runs_bp.route("/", methods=["GET"])
@@ -87,6 +109,20 @@ def cu_dashboard(short_name: str):
     choices = _period_choices()
     default_target = _default_next_period(cu["latest_period"], choices)
 
+    # Surface the impaired file the wizard currently has saved (used
+    # as fallback when no per-run file is uploaded).
+    saved_impaired: dict[str, Any] = {}
+    if state:
+        imp = (state.get("scale") or {}).get("impaired_file") or {}
+        if imp.get("saved_path"):
+            parsed = imp.get("parsed") or {}
+            saved_impaired = {
+                "filename": imp.get("uploaded_filename") or "",
+                "row_count": parsed.get("row_count", 0),
+                "total_balance": parsed.get("total_balance", 0.0),
+                "period": parsed.get("period", ""),
+            }
+
     # List on-disk runs (one row per period) for the history panel.
     runs_root = Path(workspace_root) / "Generated_Reports" / short_name
     runs: list[dict[str, Any]] = []
@@ -111,6 +147,7 @@ def cu_dashboard(short_name: str):
         period_choices=choices,
         default_target=default_target,
         draft_present=draft_present,
+        saved_impaired=saved_impaired,
     )
 
 
@@ -154,6 +191,43 @@ def run(short_name: str):
     if variant:
         sc["report_variant"] = variant
 
+    # Optional per-run impaired-loans upload. When the user attaches a
+    # file on the New Run form, save it under the quarter's output
+    # folder and override sc["impaired_file"] for this run only — we
+    # do NOT persist the override into the wizard draft (the draft
+    # keeps whatever the SCALE wizard last saved).
+    impaired_override: dict[str, Any] | None = None
+    f = request.files.get("impaired_file")
+    if f and f.filename:
+        try:
+            target = _save_run_impaired_upload(
+                workspace_root, short_name, period, f,
+            )
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Impaired file save failed: {exc}", "error")
+            return redirect(url_for("scale_runs.cu_dashboard",
+                                    short_name=short_name))
+        parsed = impaired_loader.parse_file(target)
+        if not parsed.get("ok"):
+            flash(
+                f"Impaired file parse failed: {parsed.get('error') or 'unknown error'}. "
+                "Run aborted.",
+                "error",
+            )
+            return redirect(url_for("scale_runs.cu_dashboard",
+                                    short_name=short_name))
+        impaired_override = {
+            "saved_path": str(target),
+            "uploaded_filename": f.filename,
+            "parsed": parsed,
+        }
+        sc["impaired_file"] = impaired_override
+        flash(
+            f"Using uploaded impaired file ({parsed['row_count']} row(s), "
+            f"${parsed['total_balance']:,.2f}) for this run.",
+            "info",
+        )
+
     if mode == "refetch_all":
         result = scale_runner.run_multi_quarter(state, workspace_root,
                                                 quarters=quarters)
@@ -167,6 +241,7 @@ def run(short_name: str):
         "short_name": short_name,
         "mode": mode,
         "result": result,
+        "impaired_override": impaired_override,
     }
     session[STATE_KEY] = sess_state
 
