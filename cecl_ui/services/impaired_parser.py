@@ -436,8 +436,15 @@ def _coerce_member_part(v: Any) -> str:
 
 
 def _build_loan_index(loan_path: str | Path,
-                      state: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Build {member-suffix: {pool, grade, balance}} from a loan extract."""
+                      state: dict[str, Any],
+                      header_row: int | None = None) -> dict[str, dict[str, Any]]:
+    """Build {member-suffix: {pool, grade, balance}} from a loan extract.
+
+    ``header_row`` is the per-file 1-indexed header row stored on the
+    loan_data_files entry (e.g. ``2`` for AIRES extracts whose row 1 is
+    column position numbers and row 2 is the real header). When omitted
+    or <= 1 we fall back to pandas' default header=0.
+    """
     index: dict[str, dict[str, Any]] = {}
     p = Path(str(loan_path))
     if not p.exists():
@@ -450,13 +457,22 @@ def _build_loan_index(loan_path: str | Path,
     sample = state.get("sample") or {}
     has_header = bool(sample.get("has_header", True))
 
+    # Translate (has_header, header_row) into pandas' header= arg.
+    if has_header:
+        try:
+            hr_i = int(header_row) if header_row is not None else 0
+        except (TypeError, ValueError):
+            hr_i = 0
+        pd_header: int | None = hr_i - 1 if hr_i > 1 else 0
+    else:
+        pd_header = None
+
     suffix = (p.suffix or "").lower()
     try:
         if suffix in (".xlsx", ".xls", ".xlsm"):
-            df = pd.read_excel(p, header=0 if has_header else None,
-                               dtype=object)
+            df = pd.read_excel(p, header=pd_header, dtype=object)
         elif suffix == ".csv":
-            df = pd.read_csv(p, header=0 if has_header else None,
+            df = pd.read_csv(p, header=pd_header,
                              dtype=object, keep_default_na=False)
         else:
             return index
@@ -610,7 +626,13 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
         p = entry.get("path")
         if not p:
             continue
-        sub = _build_loan_index(p, state)
+        # Per-file header_row (1-indexed). AIRES-style extracts use
+        # header_row=2; conventional extracts use 1 (or absent).
+        try:
+            hr_entry = int(entry.get("header_row") or 0) or None
+        except (TypeError, ValueError):
+            hr_entry = None
+        sub = _build_loan_index(p, state, header_row=hr_entry)
         if sub:
             index.update(sub)
             sources.append(entry.get("name") or Path(p).name)

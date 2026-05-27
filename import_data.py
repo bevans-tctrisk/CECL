@@ -551,10 +551,18 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
 
     ext = os.path.splitext(file_path)[1].lower()
     if has_header:
+        # header_row is 1-indexed; pandas wants 0-indexed. 0/1/missing
+        # → default header=0. Required for AIRES-style extracts whose
+        # real headers live on row 2 (row 1 = column position numbers).
+        try:
+            hr_cfg = int(config.get('header_row') or 0)
+        except (TypeError, ValueError):
+            hr_cfg = 0
+        pd_header = hr_cfg - 1 if hr_cfg > 1 else 0
         if ext == '.csv':
-            df = pd.read_csv(file_path)
+            df = pd.read_csv(file_path, header=pd_header)
         else:
-            df = pd.read_excel(file_path)
+            df = pd.read_excel(file_path, header=pd_header)
         df.columns = [str(c).strip() for c in df.columns]
 
         required = ['member_number', 'current_balance']
@@ -973,6 +981,16 @@ def process_client(client_name, specific_file=None):
                 per_file_cfg['has_header'] = bool(
                     matched_extract.get('has_header')
                 )
+            # Per-file header_row override (1-indexed). Lets AIRES-style
+            # extracts (row 1 = position numbers, row 2 = real headers)
+            # coexist with conventional extracts in the same client.
+            if 'header_row' in matched_extract:
+                try:
+                    per_file_cfg['header_row'] = int(
+                        matched_extract.get('header_row') or 0
+                    )
+                except (TypeError, ValueError):
+                    per_file_cfg['header_row'] = 0
             label_txt = matched_extract.get('label') or '(unlabeled)'
             print(f"    Using extract mapping: {label_txt}")
         elif extracts:
