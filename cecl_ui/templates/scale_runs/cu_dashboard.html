@@ -17,6 +17,7 @@
 <h3>Run a new quarter</h3>
 <form method="post"
       action="{{ url_for('scale_runs.run', short_name=cu.short_name) }}"
+      enctype="multipart/form-data"
       class="card">
 
   <div class="form-row">
@@ -63,6 +64,33 @@
       <option value="vizo">Vizo only</option>
     </select>
   </div>
+
+  <fieldset class="form-row">
+    <legend>Impaired Loans report (this quarter)</legend>
+    {% if saved_impaired %}
+      <p class="muted" style="margin:0 0 0.5em 0;">
+        Wizard has saved: <code>{{ saved_impaired.filename }}</code>
+        &mdash; {{ saved_impaired.row_count }} row(s),
+        ${{ '{:,.2f}'.format(saved_impaired.total_balance) }}
+        {% if saved_impaired.period %}(period {{ saved_impaired.period }}){% endif %}.
+        Leave the field below blank to reuse it.
+      </p>
+    {% else %}
+      <p class="muted" style="margin:0 0 0.5em 0;">
+        No impaired-loans file is saved in the wizard draft.
+        Upload one below, or the run will proceed with zero impaired loans.
+      </p>
+    {% endif %}
+    <input type="file" name="impaired_file" id="impaired_file"
+           accept=".xlsx,.xlsm,.xls">
+    <small class="muted">
+      Optional. Standard SCALE Impaired Loans workbook
+      (sheet&nbsp;&ldquo;&nbsp;Impaired Loans ASC 310-10&rdquo;).
+      The file is archived under
+      <code>Generated_Reports/{{ cu.short_name }}/&lt;period&gt;/uploads/</code>
+      and used only for this run &mdash; the wizard draft is unchanged.
+    </small>
+  </fieldset>
 
   <div class="form-actions">
     <button type="submit" class="btn btn-primary">Run</button>
