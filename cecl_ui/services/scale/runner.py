@@ -679,6 +679,105 @@ def propagate_column_formulas(
     return result
 
 
+# Historical Data rows 139-142 are the four environmental factors
+# (unemployment, foreclosures, bankruptcies, population) that mirror
+# the CECL Migration Model's Step 7 (Economic Data) fetch. Carry-
+# history just clones the prior quarter's column, so the target column
+# either holds stale numeric values from the prior quarter or, when
+# the prior column was a "source-label" position, stray strings like
+# 'BLS' / 'Sofi' / 'EAFCR'. Always overwrite with fresh fetched
+# values; fall back to the prior column's numeric value when a fetch
+# fails or no API is available (foreclosures has no free federal
+# source).
+_ENV_FACTOR_ROW_MAP: list[tuple[int, str]] = [
+    (139, "unemployment_rate"),
+    (140, "foreclosures"),
+    (141, "bankruptcies"),
+    (142, "population"),
+]
+
+
+def apply_env_factors_to_historical_data(
+    workbook_path: str | Path,
+    target_col: str,
+    prior_col: str,
+    state_name: str,
+    county_name: str = "",
+    sheet: str = "Historical Data",
+) -> dict:
+    """Write fresh environmental-factor values into the new quarter
+    column on ``Historical Data`` rows 139-142.
+
+    Calls :func:`fetch_econ_data.fetch_economic_data` (same source as
+    the Migration Model) and writes results to ``{target_col}139``
+    (unemployment), ``{target_col}141`` (bankruptcies), and
+    ``{target_col}142`` (population). Foreclosures (``{target_col}140``)
+    has no federal API and always falls back to the prior column.
+    When a fetch fails for any other key, that row also falls back to
+    the prior column. Target cells are always overwritten (the
+    carry-clone may leave stale source-label strings there).
+    """
+    result: dict[str, Any] = {
+        "ok": False,
+        "target_col": target_col,
+        "prior_col": prior_col,
+        "state_name": state_name,
+        "county_name": county_name,
+        "fetched": {},
+        "fallback_rows": [],
+        "cells_written": [],
+        "error": "",
+    }
+    if not target_col or not _COL_LETTERS_RE.match(target_col):
+        result["error"] = f"invalid target_col {target_col!r}"
+        return result
+    if not prior_col or not _COL_LETTERS_RE.match(prior_col):
+        result["error"] = f"invalid prior_col {prior_col!r}"
+        return result
+    fetched: dict[str, Any] = {}
+    if state_name:
+        try:
+            import importlib
+            fed = importlib.import_module("fetch_econ_data")
+            fetched = fed.fetch_economic_data(state_name, county_name) or {}
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = f"fetch failed: {exc}"
+            fetched = {}
+    else:
+        result["error"] = "state_name empty; using prior column for all rows"
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"open failed: {exc}"
+        return result
+    if sheet not in wb.sheetnames:
+        result["error"] = f"sheet {sheet!r} missing"
+        return result
+    ws = wb[sheet]
+    cells_written: list[str] = []
+    for row, key in _ENV_FACTOR_ROW_MAP:
+        value = fetched.get(key)
+        # Coerce empty / missing / non-numeric to None so we fall back.
+        if isinstance(value, str):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                value = None
+        if value is None or value == 0:
+            prior_val = ws[f"{prior_col}{row}"].value
+            value = prior_val
+            result["fallback_rows"].append(row)
+        else:
+            result["fetched"][key] = value
+        coord = f"{target_col}{row}"
+        ws[coord] = value
+        cells_written.append(coord)
+    wb.save(workbook_path)
+    result["cells_written"] = cells_written
+    result["ok"] = True
+    return result
+
+
 def run_single_quarter(state: dict, workspace_root: str) -> dict:
     """Drive a one-quarter SCALE fill from wizard state.
 
@@ -1207,6 +1306,18 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         sheet="Historical Data", start_row=2,
     )
 
+    # Refresh the four environmental factors in the new column
+    # (Historical Data rows 139-142). Mirrors the Migration Model's
+    # Step 7 fetch. Falls back to the prior column's values for any
+    # missing fetched key (foreclosures has no federal API).
+    econ_state = (state.get("economic_data") or {})
+    env_state_name = str(econ_state.get("state") or "").strip()
+    env_county_name = str(econ_state.get("county") or "").strip()
+    env_factors_result = apply_env_factors_to_historical_data(
+        out_path, target_col, prior_col,
+        env_state_name, env_county_name,
+    )
+
     qf_entries = _qfactor_entries_from_state(state)
     qf_result = apply_qfactors(out_path, qf_entries)
 
@@ -1259,6 +1370,13 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "col_propagate_ok": propagate_result["ok"],
         "col_propagate_cells_written": propagate_result["cells_written"],
         "col_propagate_error": propagate_result["error"],
+        "col_env_ok": env_factors_result["ok"],
+        "col_env_fetched": env_factors_result["fetched"],
+        "col_env_fallback_rows": env_factors_result["fallback_rows"],
+        "col_env_cells_written": env_factors_result["cells_written"],
+        "col_env_state": env_factors_result["state_name"],
+        "col_env_county": env_factors_result["county_name"],
+        "col_env_error": env_factors_result["error"],
         "qfactor_applied": qf_result["applied"],
         "qfactor_total": qf_result["total"],
         "qfactor_missing_sheets": qf_result["missing_sheets"],
