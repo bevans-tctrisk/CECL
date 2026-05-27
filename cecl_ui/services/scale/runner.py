@@ -521,6 +521,263 @@ def shift_historical_data_column_refs(
     return result
 
 
+def _period_end_date(period: str) -> datetime | None:
+    """``"YYYY-MM"`` / ``"YYYY_MM"`` -> ``datetime`` at month-end.
+
+    Returns ``None`` if the period string can't be parsed.
+    """
+    import calendar
+    m = re.match(r"^(\d{4})[-_](\d{1,2})$", (period or "").strip())
+    if not m:
+        return None
+    y, mo = int(m.group(1)), int(m.group(2))
+    last = calendar.monthrange(y, mo)[1]
+    return datetime(y, mo, last)
+
+
+def seed_new_historical_data_column(
+    workbook_path: str | Path,
+    target_col: str,
+    period: str,
+) -> dict:
+    """Seed the row-1/2/3/4/5/8 cells in the new Historical Data column.
+
+    When ``run_quarter_carry_history`` copies the prior quarter's
+    workbook, the new period's data goes into a new column on the
+    Historical Data tab but the column's header/snapshot cells are
+    empty (the mapping CSV only covers the 5300 field rows, not the
+    metadata rows). That leaves ``{col}8`` (quarter-end date) and the
+    ``{col}2..{col}5`` Scale Calculation snapshot formulas blank, so
+    downstream tabs that reference them error out.
+
+    Mirrors what the manual workbook does when carried forward:
+      - ``{col}1``  = "Copy and paste values before adding new column"
+      - ``{col}2``  = ``='Scale Calculation'!U29``
+      - ``{col}3``  = ``='Scale Calculation'!U30``
+      - ``{col}4``  = ``='Scale Calculation'!U31``
+      - ``{col}5``  = ``='Scale Calculation'!U33``
+      - ``{col}8``  = the period-end date (e.g. ``3/31/2026``)
+
+    Only writes cells that are currently empty so the function is safe
+    to re-run.
+    """
+    result: dict[str, Any] = {
+        "ok": False, "target_col": target_col, "period": period,
+        "cells_written": [], "error": "",
+    }
+    if not target_col or not _COL_LETTERS_RE.match(target_col):
+        result["error"] = f"invalid target_col {target_col!r}"
+        return result
+    end_date = _period_end_date(period)
+    if end_date is None:
+        result["error"] = f"could not parse period {period!r}"
+        return result
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"open failed: {exc}"
+        return result
+    if "Historical Data" not in wb.sheetnames:
+        result["error"] = "Historical Data sheet missing"
+        return result
+    ws = wb["Historical Data"]
+    desired = [
+        ("1", "Copy and paste values before adding new column"),
+        ("2", "='Scale Calculation'!U29"),
+        ("3", "='Scale Calculation'!U30"),
+        ("4", "='Scale Calculation'!U31"),
+        ("5", "='Scale Calculation'!U33"),
+        ("8", end_date),
+    ]
+    written = []
+    for row, val in desired:
+        coord = f"{target_col}{row}"
+        cur = ws[coord].value
+        if cur not in (None, ""):
+            continue
+        ws[coord] = val
+        if row == "8":
+            # Use a date number-format so Excel renders it as a date
+            # rather than a serial number.
+            ws[coord].number_format = "m/d/yyyy"
+        written.append(coord)
+    if written:
+        wb.save(workbook_path)
+    result["ok"] = True
+    result["cells_written"] = written
+    return result
+
+
+def propagate_column_formulas(
+    workbook_path: str | Path,
+    prev_col: str,
+    target_col: str,
+    sheet: str = "Historical Data",
+    start_row: int = 2,
+) -> dict:
+    """Drag-fill formulas from ``prev_col`` into ``target_col``.
+
+    For every row >= ``start_row`` in ``sheet`` where the ``prev_col``
+    cell holds a formula AND the ``target_col`` cell is empty, copies
+    ``prev_col``'s formula into ``target_col`` and translates the
+    relative cell references (e.g. ``AY`` → ``AZ``, ``$C$9`` stays).
+    Mirrors Excel's "drag the fill handle one column right" behaviour.
+
+    Returns ``{ok, cells_written: [coords], error}``. Only rewrites
+    empty cells so it is safe to re-run.
+    """
+    from openpyxl.formula.translate import Translator
+    result: dict[str, Any] = {
+        "ok": False, "prev_col": prev_col, "target_col": target_col,
+        "cells_written": [], "error": "",
+    }
+    if (not prev_col or not target_col
+            or not _COL_LETTERS_RE.match(prev_col)
+            or not _COL_LETTERS_RE.match(target_col)):
+        result["error"] = (
+            f"invalid prev_col/target_col {prev_col!r}/{target_col!r}")
+        return result
+    if prev_col == target_col:
+        result["error"] = "prev_col == target_col, nothing to do"
+        return result
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"open failed: {exc}"
+        return result
+    if sheet not in wb.sheetnames:
+        result["error"] = f"sheet {sheet!r} missing"
+        return result
+    ws = wb[sheet]
+    written = []
+    skipped_errors = []
+    for row in range(start_row, ws.max_row + 1):
+        src = ws[f"{prev_col}{row}"].value
+        dst = ws[f"{target_col}{row}"].value
+        if dst not in (None, ""):
+            continue
+        if not (isinstance(src, str) and src.startswith("=")):
+            continue
+        try:
+            new_formula = Translator(
+                src, origin=f"{prev_col}{row}",
+            ).translate_formula(f"{target_col}{row}")
+        except Exception as exc:  # noqa: BLE001
+            skipped_errors.append((row, str(exc)))
+            continue
+        ws[f"{target_col}{row}"] = new_formula
+        written.append(f"{target_col}{row}")
+    if written:
+        wb.save(workbook_path)
+    result["ok"] = True
+    result["cells_written"] = written
+    if skipped_errors:
+        result["error"] = (
+            f"{len(skipped_errors)} formula(s) failed to translate; "
+            f"first: r{skipped_errors[0][0]} {skipped_errors[0][1]}"
+        )
+    return result
+
+
+# Historical Data rows 139-142 are the four environmental factors
+# (unemployment, foreclosures, bankruptcies, population) that mirror
+# the CECL Migration Model's Step 7 (Economic Data) fetch. Carry-
+# history just clones the prior quarter's column, so the target column
+# either holds stale numeric values from the prior quarter or, when
+# the prior column was a "source-label" position, stray strings like
+# 'BLS' / 'Sofi' / 'EAFCR'. Always overwrite with fresh fetched
+# values; fall back to the prior column's numeric value when a fetch
+# fails or no API is available (foreclosures has no free federal
+# source).
+_ENV_FACTOR_ROW_MAP: list[tuple[int, str]] = [
+    (139, "unemployment_rate"),
+    (140, "foreclosures"),
+    (141, "bankruptcies"),
+    (142, "population"),
+]
+
+
+def apply_env_factors_to_historical_data(
+    workbook_path: str | Path,
+    target_col: str,
+    prior_col: str,
+    state_name: str,
+    county_name: str = "",
+    sheet: str = "Historical Data",
+) -> dict:
+    """Write fresh environmental-factor values into the new quarter
+    column on ``Historical Data`` rows 139-142.
+
+    Calls :func:`fetch_econ_data.fetch_economic_data` (same source as
+    the Migration Model) and writes results to ``{target_col}139``
+    (unemployment), ``{target_col}141`` (bankruptcies), and
+    ``{target_col}142`` (population). Foreclosures (``{target_col}140``)
+    has no federal API and always falls back to the prior column.
+    When a fetch fails for any other key, that row also falls back to
+    the prior column. Target cells are always overwritten (the
+    carry-clone may leave stale source-label strings there).
+    """
+    result: dict[str, Any] = {
+        "ok": False,
+        "target_col": target_col,
+        "prior_col": prior_col,
+        "state_name": state_name,
+        "county_name": county_name,
+        "fetched": {},
+        "fallback_rows": [],
+        "cells_written": [],
+        "error": "",
+    }
+    if not target_col or not _COL_LETTERS_RE.match(target_col):
+        result["error"] = f"invalid target_col {target_col!r}"
+        return result
+    if not prior_col or not _COL_LETTERS_RE.match(prior_col):
+        result["error"] = f"invalid prior_col {prior_col!r}"
+        return result
+    fetched: dict[str, Any] = {}
+    if state_name:
+        try:
+            import importlib
+            fed = importlib.import_module("fetch_econ_data")
+            fetched = fed.fetch_economic_data(state_name, county_name) or {}
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = f"fetch failed: {exc}"
+            fetched = {}
+    else:
+        result["error"] = "state_name empty; using prior column for all rows"
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"open failed: {exc}"
+        return result
+    if sheet not in wb.sheetnames:
+        result["error"] = f"sheet {sheet!r} missing"
+        return result
+    ws = wb[sheet]
+    cells_written: list[str] = []
+    for row, key in _ENV_FACTOR_ROW_MAP:
+        value = fetched.get(key)
+        # Coerce empty / missing / non-numeric to None so we fall back.
+        if isinstance(value, str):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                value = None
+        if value is None or value == 0:
+            prior_val = ws[f"{prior_col}{row}"].value
+            value = prior_val
+            result["fallback_rows"].append(row)
+        else:
+            result["fetched"][key] = value
+        coord = f"{target_col}{row}"
+        ws[coord] = value
+        cells_written.append(coord)
+    wb.save(workbook_path)
+    result["cells_written"] = cells_written
+    result["ok"] = True
+    return result
+
+
 def run_single_quarter(state: dict, workspace_root: str) -> dict:
     """Drive a one-quarter SCALE fill from wizard state.
 
@@ -1028,6 +1285,39 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         out_path, prior_col, target_col,
     )
 
+    # Seed the new Historical Data column's header/snapshot cells
+    # ({col}1 label, {col}2..{col}5 Scale Calc snapshot formulas,
+    # {col}8 quarter-end date). The mapping CSV only covers the 5300
+    # data rows so these would otherwise be blank, causing #VALUE!/
+    # #REF! errors in downstream tabs that reference them (Calc tab,
+    # Executive Summary-Vizo, Cover, etc.).
+    seed_result = seed_new_historical_data_column(
+        out_path, target_col, period,
+    )
+
+    # Drag-fill prior column's formulas into the new column for rows
+    # below the 5300-mapped data band (Management Adjustments,
+    # Combined Balances, the per-pool SUMIFs in rows 162-245, etc.).
+    # The mapping CSV doesn't cover those rows; without this step they
+    # stay blank and Scale Calculation / Env Factor by Pool tabs that
+    # reference them error out.
+    propagate_result = propagate_column_formulas(
+        out_path, prior_col, target_col,
+        sheet="Historical Data", start_row=2,
+    )
+
+    # Refresh the four environmental factors in the new column
+    # (Historical Data rows 139-142). Mirrors the Migration Model's
+    # Step 7 fetch. Falls back to the prior column's values for any
+    # missing fetched key (foreclosures has no federal API).
+    econ_state = (state.get("economic_data") or {})
+    env_state_name = str(econ_state.get("state") or "").strip()
+    env_county_name = str(econ_state.get("county") or "").strip()
+    env_factors_result = apply_env_factors_to_historical_data(
+        out_path, target_col, prior_col,
+        env_state_name, env_county_name,
+    )
+
     qf_entries = _qfactor_entries_from_state(state)
     qf_result = apply_qfactors(out_path, qf_entries)
 
@@ -1074,6 +1364,19 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "col_shift_cells_updated": shift_result["cells_updated"],
         "col_shift_formulas_updated": shift_result["formulas_updated"],
         "col_shift_error": shift_result["error"],
+        "col_seed_ok": seed_result["ok"],
+        "col_seed_cells_written": seed_result["cells_written"],
+        "col_seed_error": seed_result["error"],
+        "col_propagate_ok": propagate_result["ok"],
+        "col_propagate_cells_written": propagate_result["cells_written"],
+        "col_propagate_error": propagate_result["error"],
+        "col_env_ok": env_factors_result["ok"],
+        "col_env_fetched": env_factors_result["fetched"],
+        "col_env_fallback_rows": env_factors_result["fallback_rows"],
+        "col_env_cells_written": env_factors_result["cells_written"],
+        "col_env_state": env_factors_result["state_name"],
+        "col_env_county": env_factors_result["county_name"],
+        "col_env_error": env_factors_result["error"],
         "qfactor_applied": qf_result["applied"],
         "qfactor_total": qf_result["total"],
         "qfactor_missing_sheets": qf_result["missing_sheets"],
