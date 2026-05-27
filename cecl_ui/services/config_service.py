@@ -266,6 +266,16 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             ),
             "has_header": bool(lf.get("has_header")),
         }
+        # Per-file header_row (1-indexed). Some AIRES-style extracts use
+        # row 1 as column position numbers and row 2 as the real headers;
+        # the wizard's Sample step stores the right value per file. Only
+        # emit when > 1 so the YAML stays clean for the common case.
+        try:
+            hr_lf = int(lf.get("header_row") or 0)
+        except (TypeError, ValueError):
+            hr_lf = 0
+        if hr_lf > 1:
+            entry["header_row"] = hr_lf
         extracts_block.append(entry)
     if extracts_block:
         cfg["loan_data_extracts"] = extracts_block
