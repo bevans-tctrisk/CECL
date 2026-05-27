@@ -608,6 +608,77 @@ def seed_new_historical_data_column(
     return result
 
 
+def propagate_column_formulas(
+    workbook_path: str | Path,
+    prev_col: str,
+    target_col: str,
+    sheet: str = "Historical Data",
+    start_row: int = 2,
+) -> dict:
+    """Drag-fill formulas from ``prev_col`` into ``target_col``.
+
+    For every row >= ``start_row`` in ``sheet`` where the ``prev_col``
+    cell holds a formula AND the ``target_col`` cell is empty, copies
+    ``prev_col``'s formula into ``target_col`` and translates the
+    relative cell references (e.g. ``AY`` → ``AZ``, ``$C$9`` stays).
+    Mirrors Excel's "drag the fill handle one column right" behaviour.
+
+    Returns ``{ok, cells_written: [coords], error}``. Only rewrites
+    empty cells so it is safe to re-run.
+    """
+    from openpyxl.formula.translate import Translator
+    result: dict[str, Any] = {
+        "ok": False, "prev_col": prev_col, "target_col": target_col,
+        "cells_written": [], "error": "",
+    }
+    if (not prev_col or not target_col
+            or not _COL_LETTERS_RE.match(prev_col)
+            or not _COL_LETTERS_RE.match(target_col)):
+        result["error"] = (
+            f"invalid prev_col/target_col {prev_col!r}/{target_col!r}")
+        return result
+    if prev_col == target_col:
+        result["error"] = "prev_col == target_col, nothing to do"
+        return result
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"open failed: {exc}"
+        return result
+    if sheet not in wb.sheetnames:
+        result["error"] = f"sheet {sheet!r} missing"
+        return result
+    ws = wb[sheet]
+    written = []
+    skipped_errors = []
+    for row in range(start_row, ws.max_row + 1):
+        src = ws[f"{prev_col}{row}"].value
+        dst = ws[f"{target_col}{row}"].value
+        if dst not in (None, ""):
+            continue
+        if not (isinstance(src, str) and src.startswith("=")):
+            continue
+        try:
+            new_formula = Translator(
+                src, origin=f"{prev_col}{row}",
+            ).translate_formula(f"{target_col}{row}")
+        except Exception as exc:  # noqa: BLE001
+            skipped_errors.append((row, str(exc)))
+            continue
+        ws[f"{target_col}{row}"] = new_formula
+        written.append(f"{target_col}{row}")
+    if written:
+        wb.save(workbook_path)
+    result["ok"] = True
+    result["cells_written"] = written
+    if skipped_errors:
+        result["error"] = (
+            f"{len(skipped_errors)} formula(s) failed to translate; "
+            f"first: r{skipped_errors[0][0]} {skipped_errors[0][1]}"
+        )
+    return result
+
+
 def run_single_quarter(state: dict, workspace_root: str) -> dict:
     """Drive a one-quarter SCALE fill from wizard state.
 
@@ -1125,6 +1196,17 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         out_path, target_col, period,
     )
 
+    # Drag-fill prior column's formulas into the new column for rows
+    # below the 5300-mapped data band (Management Adjustments,
+    # Combined Balances, the per-pool SUMIFs in rows 162-245, etc.).
+    # The mapping CSV doesn't cover those rows; without this step they
+    # stay blank and Scale Calculation / Env Factor by Pool tabs that
+    # reference them error out.
+    propagate_result = propagate_column_formulas(
+        out_path, prior_col, target_col,
+        sheet="Historical Data", start_row=2,
+    )
+
     qf_entries = _qfactor_entries_from_state(state)
     qf_result = apply_qfactors(out_path, qf_entries)
 
@@ -1174,6 +1256,9 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "col_seed_ok": seed_result["ok"],
         "col_seed_cells_written": seed_result["cells_written"],
         "col_seed_error": seed_result["error"],
+        "col_propagate_ok": propagate_result["ok"],
+        "col_propagate_cells_written": propagate_result["cells_written"],
+        "col_propagate_error": propagate_result["error"],
         "qfactor_applied": qf_result["applied"],
         "qfactor_total": qf_result["total"],
         "qfactor_missing_sheets": qf_result["missing_sheets"],
