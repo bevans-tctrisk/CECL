@@ -521,6 +521,93 @@ def shift_historical_data_column_refs(
     return result
 
 
+def _period_end_date(period: str) -> datetime | None:
+    """``"YYYY-MM"`` / ``"YYYY_MM"`` -> ``datetime`` at month-end.
+
+    Returns ``None`` if the period string can't be parsed.
+    """
+    import calendar
+    m = re.match(r"^(\d{4})[-_](\d{1,2})$", (period or "").strip())
+    if not m:
+        return None
+    y, mo = int(m.group(1)), int(m.group(2))
+    last = calendar.monthrange(y, mo)[1]
+    return datetime(y, mo, last)
+
+
+def seed_new_historical_data_column(
+    workbook_path: str | Path,
+    target_col: str,
+    period: str,
+) -> dict:
+    """Seed the row-1/2/3/4/5/8 cells in the new Historical Data column.
+
+    When ``run_quarter_carry_history`` copies the prior quarter's
+    workbook, the new period's data goes into a new column on the
+    Historical Data tab but the column's header/snapshot cells are
+    empty (the mapping CSV only covers the 5300 field rows, not the
+    metadata rows). That leaves ``{col}8`` (quarter-end date) and the
+    ``{col}2..{col}5`` Scale Calculation snapshot formulas blank, so
+    downstream tabs that reference them error out.
+
+    Mirrors what the manual workbook does when carried forward:
+      - ``{col}1``  = "Copy and paste values before adding new column"
+      - ``{col}2``  = ``='Scale Calculation'!U29``
+      - ``{col}3``  = ``='Scale Calculation'!U30``
+      - ``{col}4``  = ``='Scale Calculation'!U31``
+      - ``{col}5``  = ``='Scale Calculation'!U33``
+      - ``{col}8``  = the period-end date (e.g. ``3/31/2026``)
+
+    Only writes cells that are currently empty so the function is safe
+    to re-run.
+    """
+    result: dict[str, Any] = {
+        "ok": False, "target_col": target_col, "period": period,
+        "cells_written": [], "error": "",
+    }
+    if not target_col or not _COL_LETTERS_RE.match(target_col):
+        result["error"] = f"invalid target_col {target_col!r}"
+        return result
+    end_date = _period_end_date(period)
+    if end_date is None:
+        result["error"] = f"could not parse period {period!r}"
+        return result
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"open failed: {exc}"
+        return result
+    if "Historical Data" not in wb.sheetnames:
+        result["error"] = "Historical Data sheet missing"
+        return result
+    ws = wb["Historical Data"]
+    desired = [
+        ("1", "Copy and paste values before adding new column"),
+        ("2", "='Scale Calculation'!U29"),
+        ("3", "='Scale Calculation'!U30"),
+        ("4", "='Scale Calculation'!U31"),
+        ("5", "='Scale Calculation'!U33"),
+        ("8", end_date),
+    ]
+    written = []
+    for row, val in desired:
+        coord = f"{target_col}{row}"
+        cur = ws[coord].value
+        if cur not in (None, ""):
+            continue
+        ws[coord] = val
+        if row == "8":
+            # Use a date number-format so Excel renders it as a date
+            # rather than a serial number.
+            ws[coord].number_format = "m/d/yyyy"
+        written.append(coord)
+    if written:
+        wb.save(workbook_path)
+    result["ok"] = True
+    result["cells_written"] = written
+    return result
+
+
 def run_single_quarter(state: dict, workspace_root: str) -> dict:
     """Drive a one-quarter SCALE fill from wizard state.
 
@@ -1028,6 +1115,16 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         out_path, prior_col, target_col,
     )
 
+    # Seed the new Historical Data column's header/snapshot cells
+    # ({col}1 label, {col}2..{col}5 Scale Calc snapshot formulas,
+    # {col}8 quarter-end date). The mapping CSV only covers the 5300
+    # data rows so these would otherwise be blank, causing #VALUE!/
+    # #REF! errors in downstream tabs that reference them (Calc tab,
+    # Executive Summary-Vizo, Cover, etc.).
+    seed_result = seed_new_historical_data_column(
+        out_path, target_col, period,
+    )
+
     qf_entries = _qfactor_entries_from_state(state)
     qf_result = apply_qfactors(out_path, qf_entries)
 
@@ -1074,6 +1171,9 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "col_shift_cells_updated": shift_result["cells_updated"],
         "col_shift_formulas_updated": shift_result["formulas_updated"],
         "col_shift_error": shift_result["error"],
+        "col_seed_ok": seed_result["ok"],
+        "col_seed_cells_written": seed_result["cells_written"],
+        "col_seed_error": seed_result["error"],
         "qfactor_applied": qf_result["applied"],
         "qfactor_total": qf_result["total"],
         "qfactor_missing_sheets": qf_result["missing_sheets"],
