@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Reports to Generate by Default</h2>
+  <p class="muted">Pick which reports the run page should pre-check for this
+    CU. You can always toggle individual reports per run \u2014 these are
+    just the defaults.</p>
+
+  <form method="post">
+    <fieldset class="radio-fieldset">
+      <legend>Standard quarterly reports</legend>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px;">
+        <input type="checkbox" name="tct"
+               {% if state.reports.tct %}checked{% endif %}>
+        <span>
+          <strong>TCT CECL-Migration Report</strong>
+          <div class="help">Full Franklin Trust format \u2014 the all-in-one
+            CECL workbook with migration, life-of-loan loss rates, ACL,
+            charge-off history, and management adjustments.</div>
+        </span>
+      </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px;">
+        <input type="checkbox" name="vizo"
+               {% if state.reports.vizo %}checked{% endif %}>
+        <span>
+          <strong>Vizo CECL-Migration Report</strong>
+          <div class="help">Vizo Financial format \u2014 the main quarterly
+            workbook delivered to Vizo subscriber CUs.</div>
+        </span>
+      </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px;">
+        <input type="checkbox" name="vizo_supp"
+               {% if state.reports.vizo_supp %}checked{% endif %}>
+        <span>
+          <strong>Vizo Supplemental Report</strong>
+          <div class="help">Historical-detail companion to the main Vizo
+            report. Usually generated alongside it.</div>
+        </span>
+      </label>
+    </fieldset>
+
+    <fieldset class="radio-fieldset" style="margin-top:16px;">
+      <legend>On-demand reports</legend>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px;">
+        <input type="checkbox" name="impdet"
+               {% if state.reports.impdet %}checked{% endif %}>
+        <span>
+          <strong>Improved / Deteriorated Loans Report</strong>
+          <div class="help">Quarter-over-quarter movement in credit grades.
+            Most CUs leave this <em>unchecked</em> as a default and trigger
+            it manually when needed.</div>
+        </span>
+      </label>
+    </fieldset>
+
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step8_mgmt_adj') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit">Next: Review &rarr;</button>
+    </div>
+  </form>
+</div>
+{% endblock %}
+

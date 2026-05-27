@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Historical Balances{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Historical Balances</h2>
+  <p class="muted">
+    Plant the WARM workbook into <code>Reports/</code> as the historical
+    baseline so the report engine can pull prior balances, charge-offs,
+    recoveries, and risk-change data straight from its tabs.
+  </p>
+</div>
+
+{% if not state.warm %}
+<div class="card">
+  <h3>No WARM workbook loaded</h3>
+  <p class="muted">
+    Go back to <a href="{{ url_for('setup.step1_identity') }}">Step 1
+    (CU Identity)</a> to upload a WARM workbook before importing it as
+    the historical baseline. You can still set the ACL Balance below.
+  </p>
+</div>
+{% else %}
+<div class="card">
+  <h3>Import as historical baseline</h3>
+  <p class="muted">
+    Source: <code>{{ state.warm.filename }}</code>
+    (as-of {{ state.warm.as_of_date or '(unknown)' }}).
+    The CECL report engine looks for a prior <code>CECL-Migration</code>
+    workbook in <code>Reports/</code> and pulls historical balances,
+    charge-offs, recoveries, and risk-change data straight from its tabs.
+    Importing this WARM workbook as the baseline plants it there under the
+    canonical filename so the very next report run for this CU has full
+    history available.
+  </p>
+  {% if state.warm.baseline_imported_to %}
+    <div class="alert alert-success" style="margin:8px 0;">
+      <strong>Baseline in place:</strong> <code>{{ state.warm.baseline_filename }}</code>
+      <div class="muted" style="margin-top:4px; word-break:break-all;">
+        {{ state.warm.baseline_imported_to }}
+      </div>
+    </div>
+    <form method="post" style="display:inline;">
+      <button class="btn btn-secondary" type="submit"
+              name="action" value="import_baseline_overwrite"
+              onclick="return confirm('Overwrite the existing baseline file with the currently-uploaded WARM workbook?');">
+        Re-import (overwrite)
+      </button>
+    </form>
+  {% else %}
+    <form method="post" style="display:inline;">
+      <button class="btn btn-primary" type="submit"
+              name="action" value="import_baseline"
+              {% if not state.warm.saved_path or not state.warm.as_of_date %}disabled{% endif %}>
+        Import historical baseline &rarr; Reports/
+      </button>
+    </form>
+    {% if not state.warm.as_of_date %}
+      <p class="muted" style="margin-top:6px;">
+        <em>Disabled: no as-of date detected in the workbook.</em>
+      </p>
+    {% endif %}
+  {% endif %}
+</div>
+{% endif %}
+
+{% set pmb = (state.warm or {}).get('pool_monthly_balances') or {} %}
+{% if pmb.pools %}
+<div class="card">
+  <h3>Total monthly balances by pool</h3>
+  <p class="muted">
+    Pulled from <code>BS Data</code> &mdash; the block to the right of
+    <em>Pool Order / Loan Pools</em>. These are the per-pool month-end
+    totals and are treated as the truth for historical balances.
+    {% if pmb.current_quarter %}
+      The {{ pmb.current_quarter|length }} month(s) in the establishing
+      quarter ({{ pmb.current_quarter|join(', ') }}) are <strong>excluded</strong>
+      from history &mdash; they will be calculated from the quarterly files
+      the credit union uploads for {{ pmb.as_of_date }}.
+    {% endif %}
+    Per-grade breakouts will be added in a later step.
+  </p>
+  <table style="border-collapse:collapse; font-size:13px;">
+    <thead>
+      <tr>
+        <th style="text-align:left;  padding:4px 10px; border-bottom:1px solid #ccc;">Pool</th>
+        <th style="text-align:right; padding:4px 10px; border-bottom:1px solid #ccc;">History months</th>
+        <th style="text-align:right; padding:4px 10px; border-bottom:1px solid #ccc;">Latest history date</th>
+        <th style="text-align:right; padding:4px 10px; border-bottom:1px solid #ccc;">Latest history balance</th>
+        <th style="text-align:right; padding:4px 10px; border-bottom:1px solid #ccc;">Quarterly months (skipped)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set ns = namespace(total=0.0, latest=None) %}
+      {# First pass: find the max latest-history date across pools. #}
+      {% for p in pmb.pools %}
+        {% set nz = p.history|selectattr('balance')|list %}
+        {% set lt = nz[-1] if nz else (p.history[-1] if p.history else none) %}
+        {% if lt and (ns.latest is none or lt.date > ns.latest) %}
+          {% set ns.latest = lt.date %}
+        {% endif %}
+      {% endfor %}
+      {# Second pass: sum each pool's balance on that shared date. #}
+      {% for p in pmb.pools %}
+        {% set non_zero = p.history|selectattr('balance')|list %}
+        {% set latest = non_zero[-1] if non_zero else (p.history[-1] if p.history else none) %}
+        {% set on_date = (p.history|selectattr('date','equalto',ns.latest)|list)[0] if ns.latest else none %}
+        {% if on_date and on_date.balance %}
+          {% set ns.total = ns.total + on_date.balance %}
+        {% endif %}
+        <tr>
+          <td style="padding:4px 10px;">{{ p.name }}</td>
+          <td style="padding:4px 10px; text-align:right;">{{ non_zero|length }}</td>
+          <td style="padding:4px 10px; text-align:right;">{{ latest.date if latest else '&mdash;'|safe }}</td>
+          <td style="padding:4px 10px; text-align:right;">
+            {% if latest %}${{ '{:,.2f}'.format(latest.balance) }}{% else %}&mdash;{% endif %}
+          </td>
+          <td style="padding:4px 10px; text-align:right;">{{ p.current_quarter|length }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr>
+        <th style="text-align:left;  padding:6px 10px; border-top:2px solid #888;">Total</th>
+        <td style="padding:6px 10px; border-top:2px solid #888;"></td>
+        <td style="padding:6px 10px; text-align:right; border-top:2px solid #888;">{{ ns.latest or '&mdash;'|safe }}</td>
+        <th style="text-align:right; padding:6px 10px; border-top:2px solid #888;">${{ '{:,.2f}'.format(ns.total) }}</th>
+        <td style="padding:6px 10px; border-top:2px solid #888;"></td>
+      </tr>
+    </tfoot>
+  </table>
+</div>
+{% endif %}
+
+<form method="post">
+  <div class="btn-row" style="margin-top:18px;">
+    <a class="btn btn-secondary" href="{{ url_for('setup.step3_balances') }}">&larr; Back</a>
+    <button class="btn btn-primary" type="submit" name="action" value="next">
+      Next &rarr;
+    </button>
+  </div>
+</form>
+{% endblock %}

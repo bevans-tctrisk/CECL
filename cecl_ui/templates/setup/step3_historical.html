@@ -1,0 +1,2809 @@
+{% extends "base.html" %}
+{% block title %}Historical Data{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+{# Renders a "what's loaded" month-by-loan-code matrix card identical in
+   style to the Balances history-matrix card. ``hv`` is the dict returned
+   by chargeoff_hist_processor.history_matrix or
+   recovery_hist_processor.history_matrix.  ``amount_label`` is shown in
+   the summary line (e.g. "charge-off" or "recovery"). #}
+{% macro amount_history_matrix(hv, cu_name, amount_label, empty_hint) %}
+  {% if hv and hv.row_count %}
+    <div style="margin-top:24px;">
+      <div style="display:flex; justify-content:space-between;
+                  align-items:center; flex-wrap:wrap; gap:8px;">
+        <h4 style="margin:0;">
+          {{ amount_label | capitalize }} database &mdash; what's loaded
+        </h4>
+      </div>
+      <p class="muted" style="margin:4px 0 8px;">
+        <strong>{{ hv.months | length }}</strong> month(s),
+        <strong>{{ hv.codes | length }}</strong> loan code(s),
+        <strong>{{ hv.row_count }}</strong> row(s) stored for
+        <strong>{{ cu_name }}</strong>.
+        Cells show <strong>total {{ amount_label }}</strong>;
+        <span style="background:#fff7d6; padding:0 4px;">NEW</span>
+        marks a code's first appearance,
+        <span style="background:#ffe1e1; padding:0 4px;">DROP</span>
+        marks the last month before it disappeared.
+      </p>
+      <div style="overflow-x:auto; max-height:520px; overflow-y:auto;
+                  border:1px solid #ccc; border-radius:4px;">
+        <table class="data-table"
+               style="border-collapse:separate; border-spacing:0;
+                      font-size:0.85em;">
+          <thead>
+            <tr style="position:sticky; top:0; z-index:2;
+                       background:#f3f3f3;">
+              <th style="position:sticky; left:0; z-index:3;
+                         background:#f3f3f3; min-width:110px;
+                         text-align:left;">Month</th>
+              {% for c in hv.codes %}
+                <th style="min-width:90px; text-align:right;">
+                  {{ c }}<br>
+                  <span class="muted" style="font-weight:400;
+                                             font-size:0.85em;">
+                    {{ hv.totals_by_code[c].months }} mo
+                  </span>
+                </th>
+              {% endfor %}
+              <th style="min-width:110px; text-align:right;
+                         background:#eef;">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for m in hv.months %}
+            {% set row = hv.cells.get(m) or {} %}
+            {% set tm  = hv.totals_by_month.get(m) or {} %}
+            {% set new_set  = hv.new_in_month.get(m) or [] %}
+            {% set drop_set = hv.dropped_after_month.get(m) or [] %}
+            <tr>
+              <td style="position:sticky; left:0; background:#fff;
+                         font-weight:600;">{{ m }}</td>
+              {% for c in hv.codes %}
+                {% set cell = row.get(c) %}
+                {% if cell %}
+                  <td style="text-align:right; background:#f4fff4;">
+                    {{ '{:,.0f}'.format(cell.amount) }}
+                    {% if c in new_set %}
+                      <div style="font-size:0.8em;
+                                  background:#fff7d6;
+                                  display:inline-block;
+                                  padding:0 4px;
+                                  margin-top:2px;">NEW</div>
+                    {% endif %}
+                    {% if c in drop_set %}
+                      <div style="font-size:0.8em;
+                                  background:#ffe1e1;
+                                  display:inline-block;
+                                  padding:0 4px;
+                                  margin-top:2px;">DROP</div>
+                    {% endif %}
+                  </td>
+                {% else %}
+                  <td style="text-align:center; color:#bbb;">&middot;</td>
+                {% endif %}
+              {% endfor %}
+              <td style="text-align:right; background:#eef;
+                         font-weight:600;">
+                {{ '{:,.0f}'.format(tm.amount or 0) }}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+          <tfoot>
+            <tr style="background:#eef; font-weight:600;">
+              <td style="position:sticky; left:0; background:#eef;">
+                Total
+              </td>
+              {% for c in hv.codes %}
+                {% set tc = hv.totals_by_code[c] %}
+                <td style="text-align:right;">
+                  {{ '{:,.0f}'.format(tc.amount) }}
+                </td>
+              {% endfor %}
+              <td style="text-align:right;">&mdash;</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+  {% elif hv is not none and hv.row_count == 0 %}
+    <p class="muted" style="margin-top:16px;">
+      <em>{{ empty_hint }}</em>
+    </p>
+  {% endif %}
+{% endmacro %}
+
+{% macro co_recov_scan_results(scan, kind_label, clear_action, ignore_action, unignore_action, columns_action=None) %}
+  {% if scan %}
+    {% set layouts = scan.get('layouts') or [] %}
+    {% set active = layouts | rejectattr('ignored') | list %}
+    {% set ignored = layouts | selectattr('ignored') | list %}
+    <div style="margin-top:16px; padding:8px 12px; border:1px solid #ddd;
+                border-radius:6px; background:#fafafa;">
+      <div style="display:flex; justify-content:space-between;
+                  align-items:center;">
+        <strong>Scan results</strong>
+        <form method="post" style="margin:0;">
+          <input type="hidden" name="action" value="{{ clear_action }}">
+          <button class="btn btn-secondary" type="submit">Clear results</button>
+        </form>
+      </div>
+      {% if scan.get('error') %}
+        <p class="muted" style="margin:6px 0; color:#a33;">
+          {{ scan.get('error') }}
+        </p>
+      {% else %}
+        <p class="muted" style="margin:6px 0;">
+          Scanned <strong>{{ scan.get('scanned', 0) }}</strong> file(s)
+          in <code>{{ scan.get('folder') }}</code> &mdash;
+          <strong>{{ scan.get('added_count', 0) }}</strong> added,
+          <strong>{{ scan.get('ignored_count', 0) }}</strong> ignored via
+          layouts,
+          <strong>{{ scan.get('skipped_count', 0) }}</strong> skipped,
+          <strong>{{ layouts | length }}</strong> distinct layout(s).
+        </p>
+      {% endif %}
+
+      {% if active %}
+      <div class="flash info" style="margin:8px 0;">
+        <strong>{{ active | length }} active layout(s)</strong>
+        &mdash; click <em>Ignore layout</em> to remove already-added
+        {{ kind_label }} files matching that header signature and skip
+        them on future scans.
+        <table class="data-table"
+               style="width:100%; margin-top:8px; background:#fff;">
+          <thead>
+            <tr>
+              <th>Sample file</th>
+              <th style="width:90px; text-align:right;">Files</th>
+              <th>Headers (first few)</th>
+              <th style="width:140px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for s in active %}
+            <tr>
+              <td>
+                <code>{{ s.sample_file }}</code>
+                <br>
+                <span class="muted" style="font-size:11px;">
+                  sig <code>{{ s.signature }}</code>
+                </span>
+              </td>
+              <td style="text-align:right;">
+                <strong>{{ s.file_count or 0 }}</strong>
+              </td>
+              <td style="font-size:12px;">
+                {{ (s.sample_headers or [])[:6] | join(' | ') }}
+                {% if (s.sample_headers or []) | length > 6 %}&hellip;{% endif %}
+              </td>
+              <td>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;
+                            justify-content:flex-end;">
+                  {% if columns_action and s.sample_path %}
+                  <form method="post" style="margin:0;">
+                    <input type="hidden" name="action"
+                           value="{{ columns_action }}">
+                    <input type="hidden" name="sample_path"
+                           value="{{ s.sample_path }}">
+                    <button class="btn btn-primary btn-sm" type="submit"
+                            style="padding:2px 10px; font-size:12px;"
+                            title="Load this file into the {{ kind_label }} Column Mapping card below.">
+                      Column Mapping
+                    </button>
+                  </form>
+                  {% endif %}
+                  <form method="post" style="margin:0;"
+                        onsubmit="return confirm('Ignore all {{ kind_label }} files with this header layout? Already-added matches will be removed.');">
+                    <input type="hidden" name="action"
+                           value="{{ ignore_action }}">
+                    <input type="hidden" name="signature"
+                           value="{{ s.signature }}">
+                    <button class="btn btn-secondary btn-sm" type="submit"
+                            style="padding:2px 10px; font-size:12px;">
+                      Ignore layout
+                    </button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+
+      {% if ignored %}
+      <div class="flash" style="margin:8px 0; background:#f5f5f5; border:1px solid #ddd;">
+        <strong>{{ ignored | length }} ignored layout(s)</strong>
+        &mdash; files matching these header signatures are excluded from
+        {{ kind_label }} processing.
+        <table class="data-table"
+               style="width:100%; margin-top:8px; background:#fff;">
+          <thead>
+            <tr>
+              <th>Sample file</th>
+              <th style="width:90px; text-align:right;">Files</th>
+              <th>Headers (first few)</th>
+              <th style="width:140px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for s in ignored %}
+            <tr>
+              <td>
+                <code>{{ s.sample_file }}</code>
+                <br>
+                <span class="muted" style="font-size:11px;">
+                  sig <code>{{ s.signature }}</code>
+                </span>
+              </td>
+              <td style="text-align:right;">{{ s.file_count or 0 }}</td>
+              <td style="font-size:12px;">
+                {{ (s.sample_headers or [])[:6] | join(' | ') }}
+                {% if (s.sample_headers or []) | length > 6 %}&hellip;{% endif %}
+              </td>
+              <td>
+                <form method="post" style="margin:0;">
+                  <input type="hidden" name="action"
+                         value="{{ unignore_action }}">
+                  <input type="hidden" name="signature"
+                         value="{{ s.signature }}">
+                  <button class="btn btn-secondary btn-sm" type="submit"
+                          style="padding:2px 10px; font-size:12px;">
+                    Unignore
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+  {% endif %}
+{% endmacro %}
+
+<div class="card">
+  <h2>Historical Data</h2>
+  <p class="muted">
+    Upload the historical files for this credit union. These cover the full
+    historical period used by the CECL model for trending, loss-rate
+    calibration, and comparison reporting.
+  </p>
+  <p class="muted">
+    <strong>Balances</strong> and <strong>Charge-offs</strong> are required.
+    <strong>Recoveries</strong> are optional &mdash; check the box below if
+    this CU has no recovery history.
+  </p>
+</div>
+
+{# â”€â”€ 1. Historical Balances â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ #}
+{% set hist_source = state.hist_balance_source or 'single_workbook' %}
+<div class="card">
+  <h3>1. Historical Loan Balances by Pool / Type
+    <span class="badge-required">Required</span>
+  </h3>
+  <p class="muted">
+    Choose how this credit union will provide its monthly historical loan
+    balances. Pick one of the three options below.
+  </p>
+
+  <form method="post" style="margin-top:8px;">
+    <input type="hidden" name="action" value="set_hist_balance_source">
+    <div class="radio-group" style="display:flex; flex-direction:column; gap:10px;">
+      <label class="radio-option" style="display:flex; gap:8px; align-items:flex-start;">
+        <input type="radio" name="hist_balance_source" value="single_workbook"
+               onchange="this.form.submit()"
+               {% if hist_source == 'single_workbook' %}checked{% endif %}>
+        <span>
+          <strong>Single historical balances workbook</strong><br>
+          <span class="muted">One spreadsheet that already contains every
+          historical month's loan balances broken out by pool or loan type
+          (e.g. <code>Balance_History_-_Tongass_FCU.xlsx</code>).</span>
+        </span>
+      </label>
+      <label class="radio-option" style="display:flex; gap:8px; align-items:flex-start;">
+        <input type="radio" name="hist_balance_source" value="monthly_loan_extracts"
+               onchange="this.form.submit()"
+               {% if hist_source == 'monthly_loan_extracts' %}checked{% endif %}>
+        <span>
+          <strong>Monthly loan-data extract files</strong><br>
+          <span class="muted">One loan-level extract per month (e.g. AIRES
+          files). The wizard will roll each month's extract up into pool
+          balances and build the historical database for you.</span>
+        </span>
+      </label>
+      <label class="radio-option" style="display:flex; gap:8px; align-items:flex-start;">
+        <input type="radio" name="hist_balance_source" value="monthly_balance_sheets"
+               onchange="this.form.submit()"
+               {% if hist_source == 'monthly_balance_sheets' %}checked{% endif %}>
+        <span>
+          <strong>Monthly balance sheet files</strong><br>
+          <span class="muted">One balance sheet per month. The wizard will
+          pull pool balances out of each balance sheet to build the
+          historical database.</span>
+        </span>
+      </label>
+    </div>
+    <noscript>
+      <button class="btn btn-secondary" type="submit" style="margin-top:8px;">
+        Save Source Choice
+      </button>
+    </noscript>
+  </form>
+
+  {% if hist_source == 'single_workbook' %}
+    {% set bal_files = (state.hist_scan or {}).get('monthly_files', []) %}
+    {% if bal_files %}
+      <div class="upload-status-list" style="margin-top:16px;">
+        {% for f in bal_files %}
+          <div class="upload-status-item">
+            <span class="upload-status-icon">&#10003;</span>
+            <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+      <label>Historical balances file
+        <input type="file" name="balance_history_file" accept=".xlsx,.xlsm,.xls,.csv">
+        <span class="help">e.g. <code>Balance_History_-_Tongass_FCU.xlsx</code></span>
+      </label>
+      <button class="btn btn-secondary" type="submit" name="action"
+              value="upload_balance_history" style="margin-top:8px;">
+        Upload Balances File
+      </button>
+    </form>
+  {% elif hist_source == 'monthly_loan_extracts' %}
+    {% set he = state.hist_extracts or {} %}
+    {% set anchors = he.get('anchor_files') or [] %}
+    {% set profiles = he.get('profiles') or [] %}
+
+    {# Target reporting period + history depth #}
+    <form method="post" style="margin-top:16px;">
+      <input type="hidden" name="action" value="set_hist_extract_target">
+      <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end;">
+        <label style="flex:1; min-width:220px;">
+          Target reporting period
+          <input type="date" name="target_period" id="hist_target_period"
+                 value="{{ he.get('target_period') or '' }}">
+          <span class="help">Files dated AFTER this will be ignored. Pick the
+          last day of the month you're reporting on (e.g. 2026-03-31).</span>
+        </label>
+        <label style="flex:0 0 160px;">
+          History depth (months)
+          <input type="number" name="history_months" min="1" max="240"
+                 value="{{ he.get('history_months') or 84 }}">
+          <span class="help">Default 84 (7 years).</span>
+        </label>
+        <button class="btn btn-secondary" type="submit"
+                style="margin-bottom:18px;">Save</button>
+      </div>
+    </form>
+
+    {# Anchor file uploader #}
+    <div style="margin-top:18px;">
+      <h4 style="margin-bottom:4px;">Anchor extract file(s)</h4>
+      <p class="muted" style="margin-top:0;">
+        Upload one (or more) loan-data extract files for the target reporting
+        month. The wizard will detect the as-of date and learn each file's
+        column layout. Re-uploads with the same column layout reuse the same
+        mapping &mdash; you only have to map columns once per layout.
+      </p>
+
+      {% if anchors %}
+      <table class="data-table" style="width:100%; margin-top:8px;">
+        <thead>
+          <tr>
+            <th>File</th>
+            <th style="width:170px;">Detected as-of</th>
+            <th style="width:170px;">Override (YYYY-MM-DD)</th>
+            <th style="width:170px;">Column profile</th>
+            <th style="width:90px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for entry in anchors %}
+          {% set prof_label = '' %}
+          {% set prof_mapped = 0 %}
+          {% for p in profiles %}
+            {% if p.id == entry.profile_id %}
+              {% set prof_label = p.label %}
+              {% set prof_mapped = (p.column_mappings or {}) | length %}
+            {% endif %}
+          {% endfor %}
+          <tr>
+            <td><code>{{ entry.name }}</code></td>
+            <td>
+              {% if entry.detected_date %}
+                {{ entry.detected_date }}
+                <br><span class="muted">({{ entry.detected_source }} &middot; {{ entry.detected_confidence }})</span>
+              {% else %}
+                <span class="muted">(not detected)</span>
+              {% endif %}
+            </td>
+            <td>
+              <form method="post" style="display:flex; gap:4px;">
+                <input type="hidden" name="action" value="set_extract_date">
+                <input type="hidden" name="anchor_name" value="{{ entry.name }}">
+                <input type="date" name="override_date"
+                       value="{{ entry.override_date or '' }}"
+                       style="flex:1;">
+                <button class="btn btn-secondary" type="submit" title="Save override">&#10003;</button>
+              </form>
+            </td>
+            <td>
+              <span title="{{ entry.signature }}">{{ prof_label or entry.profile_id }}</span>
+              <br>
+              {% if prof_mapped %}
+                <span class="muted">{{ prof_mapped }} columns mapped</span>
+              {% else %}
+                <span class="muted" style="color:#a55;">mapping pending</span>
+              {% endif %}
+            </td>
+            <td>
+              <div style="display:flex; gap:4px;">
+                <form method="post"
+                      onsubmit="return confirm('Remove {{ entry.name }}?');">
+                  <input type="hidden" name="action" value="remove_hist_extract">
+                  <input type="hidden" name="anchor_name" value="{{ entry.name }}">
+                  <button class="btn btn-secondary" type="submit"
+                          title="Remove this anchor (files with the same layout will become unmapped).">&times;</button>
+                </form>
+                <form method="post"
+                      onsubmit="return confirm('Remove {{ entry.name }} and ignore every file with the same header layout? They will be skipped during Process &amp; Save.');">
+                  <input type="hidden" name="action" value="remove_extract_and_ignore">
+                  <input type="hidden" name="anchor_name" value="{{ entry.name }}">
+                  <button class="btn btn-secondary" type="submit"
+                          title="Remove this anchor AND ignore all files matching this header layout."
+                          style="font-size:11px;">&times;&nbsp;ignore</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+
+      <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+        <label>Add anchor extract
+          <input type="file" name="hist_extract_file"
+                 accept=".xlsx,.xlsm,.xls,.csv">
+          <span class="help">e.g. <code>LoanData_20260331.xlsx</code>,
+          <code>AIRES_2026-03.xlsx</code></span>
+        </label>
+        <button class="btn btn-secondary" type="submit" name="action"
+                value="upload_hist_extract" style="margin-top:8px;">
+          Upload Extract
+        </button>
+      </form>
+    </div>
+
+    {# Per-profile column mappings #}
+    {% if profiles %}
+    <div style="margin-top:24px;">
+      <h4 style="margin-bottom:4px;">Column profile mappings</h4>
+      <p class="muted" style="margin-top:0;">
+        Map each profile's actual headers to the system fields below. You
+        only have to do this once per distinct layout &mdash; every file with
+        the same header signature inherits the mapping.
+      </p>
+      {% for p in profiles %}
+        {% set cm = p.column_mappings or {} %}
+        {% set ma = p.member_account or {} %}
+        {% set ma_mode = ma.get('mode', 'fixed_suffix') %}
+        {% set ma_suffix = ma.get('suffix_length', 3) %}
+        {% set ma_delim = ma.get('delimiter', '-') %}
+        {% set mapped_count = cm | length %}
+        {% set is_open = mapped_count == 0 %}
+        <details {% if is_open %}open{% endif %}
+                 style="margin-top:12px; border:1px solid #ddd;
+                        border-radius:6px; padding:8px 12px;"
+                 data-profile-block="{{ p.id }}">
+          <summary style="cursor:pointer; font-weight:600;">
+            {{ p.label or p.id }}
+            {% if mapped_count %}
+              <span class="muted" style="font-weight:400;">
+                &mdash; {{ mapped_count }} columns mapped
+                ({{ ma_mode }})
+              </span>
+            {% else %}
+              <span style="color:#a55; font-weight:400;">
+                &mdash; mapping pending
+              </span>
+            {% endif %}
+          </summary>
+          <form method="post" style="margin-top:10px;"
+                data-profile-form="{{ p.id }}">
+            <input type="hidden" name="action"
+                   value="save_extract_profile_mapping">
+            <input type="hidden" name="profile_id" value="{{ p.id }}">
+
+            {# -- Member & Account number format ------------------------ #}
+            <h5 style="margin:6px 0 4px 0;">Member &amp; Account number</h5>
+            <p class="muted" style="margin-top:0;">
+              Pick the shape that matches this file's member &amp; account
+              numbers.
+            </p>
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <label style="display:flex; gap:8px; align-items:flex-start;">
+                <input type="radio" name="member_account_mode"
+                       value="fixed_suffix"
+                       {% if ma_mode == 'fixed_suffix' %}checked{% endif %}
+                       onchange="updateProfileMode('{{ p.id }}')">
+                <span><strong>Combined &mdash; fixed suffix length</strong>
+                  <span class="help" style="display:block;">One column. The
+                  last N characters are the account / suffix.</span>
+                </span>
+              </label>
+              <label style="display:flex; gap:8px; align-items:flex-start;">
+                <input type="radio" name="member_account_mode"
+                       value="delimiter"
+                       {% if ma_mode == 'delimiter' %}checked{% endif %}
+                       onchange="updateProfileMode('{{ p.id }}')">
+                <span><strong>Combined &mdash; separated by character</strong>
+                  <span class="help" style="display:block;">One column,
+                  split by a delimiter (e.g. <code>12345-001</code>).</span>
+                </span>
+              </label>
+              <label style="display:flex; gap:8px; align-items:flex-start;">
+                <input type="radio" name="member_account_mode"
+                       value="split"
+                       {% if ma_mode == 'split' %}checked{% endif %}
+                       onchange="updateProfileMode('{{ p.id }}')">
+                <span><strong>Separate columns</strong>
+                  <span class="help" style="display:block;">Member number
+                  and account / suffix are in two different columns.</span>
+                </span>
+              </label>
+            </div>
+
+            <div data-ma-extras="{{ p.id }}"
+                 style="margin-top:8px;
+                        {% if ma_mode == 'split' %}display:none;{% endif %}">
+              <label data-ma-suffix-len="{{ p.id }}"
+                     style="display:{% if ma_mode == 'fixed_suffix' %}inline-block{% else %}none{% endif %};
+                            margin-right:16px;">
+                Account suffix length
+                <input type="number" name="member_account_suffix_length"
+                       value="{{ ma_suffix }}" min="0" max="9"
+                       style="width:80px;">
+              </label>
+              <label data-ma-delim="{{ p.id }}"
+                     style="display:{% if ma_mode == 'delimiter' %}inline-block{% else %}none{% endif %};">
+                Delimiter character
+                <input type="text" name="member_account_delimiter"
+                       value="{{ ma_delim }}" maxlength="3" size="4">
+              </label>
+            </div>
+
+            {# -- Column field mappings -------------------------------- #}
+            <h5 style="margin:14px 0 4px 0;">Columns</h5>
+            {% set sys_fields = [
+              ('member_number',       'Member / combined member-account column', True,  ['fixed_suffix','delimiter','split']),
+              ('loan_suffix',         'Account / Suffix column',                 False, ['split']),
+              ('current_balance',     'Current balance',                         True,  ['fixed_suffix','delimiter','split']),
+              ('original_fico_score', 'Original FICO score',                     False, ['fixed_suffix','delimiter','split']),
+              ('loan_pool_code',      'Loan pool / type code',                   True,  ['fixed_suffix','delimiter','split']),
+            ] %}
+            <table class="data-table" style="width:100%;">
+              <thead>
+                <tr>
+                  <th style="width:40%;">System field</th>
+                  <th>Column in this file</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for fld, lbl, req, modes in sys_fields %}
+                <tr data-fld-row="{{ p.id }}-{{ fld }}"
+                    data-show-modes="{{ modes | join(',') }}"
+                    {% if ma_mode not in modes %}style="display:none;"{% endif %}>
+                  <td>
+                    {{ lbl }}
+                    {% if req %}<span class="badge-required">Required</span>{% endif %}
+                  </td>
+                  <td>
+                    <select name="{{ fld }}" style="width:100%;">
+                      <option value="">&mdash; not mapped &mdash;</option>
+                      {% for h in p.headers %}
+                        <option value="{{ h }}"
+                          {% if cm.get(fld) == h %}selected{% endif %}>
+                          {{ h }}
+                        </option>
+                      {% endfor %}
+                    </select>
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+            <button class="btn btn-secondary" type="submit"
+                    style="margin-top:8px;">
+              Save Mapping
+            </button>
+          </form>
+          <form method="post" style="margin-top:8px; display:inline;"
+                onsubmit="return confirm('Remove this profile? Any anchor files attached to it will also be removed, and the matching scan files will reappear as an unmapped layout (where you can then click Ignore layout).');">
+            <input type="hidden" name="action" value="remove_profile">
+            <input type="hidden" name="profile_id" value="{{ p.id }}">
+            <button class="btn btn-secondary" type="submit"
+                    style="font-size:12px;"
+                    title="Drop this profile and any attached anchor files. The files come back as an unmapped layout in the scan results.">
+              Remove profile (move back to scan results)
+            </button>
+          </form>
+        </details>
+      {% endfor %}
+    </div>
+
+    <script>
+    function updateProfileMode(pid) {
+      var form = document.querySelector('[data-profile-form="' + pid + '"]');
+      if (!form) return;
+      var picked = form.querySelector(
+        'input[name="member_account_mode"]:checked'
+      );
+      var mode = picked ? picked.value : 'fixed_suffix';
+      var extras = document.querySelector('[data-ma-extras="' + pid + '"]');
+      var suffixLabel = document.querySelector(
+        '[data-ma-suffix-len="' + pid + '"]'
+      );
+      var delimLabel = document.querySelector(
+        '[data-ma-delim="' + pid + '"]'
+      );
+      if (extras) extras.style.display = (mode === 'split') ? 'none' : '';
+      if (suffixLabel)
+        suffixLabel.style.display =
+          (mode === 'fixed_suffix') ? 'inline-block' : 'none';
+      if (delimLabel)
+        delimLabel.style.display =
+          (mode === 'delimiter') ? 'inline-block' : 'none';
+      form.querySelectorAll('[data-fld-row]').forEach(function (row) {
+        var modes = (row.getAttribute('data-show-modes') || '').split(',');
+        row.style.display = (modes.indexOf(mode) >= 0) ? '' : 'none';
+      });
+    }
+
+    // Show/hide the suffix-length / delimiter / Account-column inputs for
+    // the per-file CO/Recov Column Mapping cards.  ``which`` is "co" or
+    // "recov".
+    function updateCoRecovMode(which) {
+      var picked = document.querySelector(
+        'input[name="' + which + '_member_account_mode"]:checked'
+      );
+      if (!picked) return;
+      var mode = picked.value;
+      var suffixLabel = document.getElementById(which + '-ma-suffix-len');
+      var delimLabel  = document.getElementById(which + '-ma-delim');
+      var accountFld  = document.getElementById(which + '-fld-account');
+      if (suffixLabel)
+        suffixLabel.style.display =
+          (mode === 'fixed_suffix') ? 'inline-block' : 'none';
+      if (delimLabel)
+        delimLabel.style.display =
+          (mode === 'delimiter') ? 'inline-block' : 'none';
+      if (accountFld)
+        accountFld.style.display = (mode === 'split') ? '' : 'none';
+    }
+    </script>
+    {% endif %}
+
+    {# Historical folder path (scan handler comes in the next slice) #}
+    <div style="margin-top:24px;">
+      <h4 style="margin-bottom:4px;">Folder with the rest of the history</h4>
+      <p class="muted" style="margin-top:0;">
+        Once your anchor file(s) are ready, point the wizard at the folder
+        that holds the rest of the monthly extracts. The wizard will walk
+        backwards from the target period, up to the history depth above.
+      </p>
+      <form method="post" id="hist_scan_form">
+        <label>Folder path (on this machine / mounted drive)
+          <input type="text" name="folder_path" id="hist_folder_path"
+                 value="{{ he.get('folder_path') or '' }}"
+                 placeholder="Z:\Shared\Credit Unions\ABC FCU\Loan Extracts"
+                 style="width:100%;">
+        </label>
+        <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
+          <button class="btn btn-secondary" type="submit"
+                  name="action" value="set_hist_extract_folder">
+            Save Folder Path
+          </button>
+          <button class="btn btn-primary" type="submit"
+                  id="hist_scan_btn"
+                  name="action" value="scan_hist_extract_folder">
+            <span id="hist_scan_btn_label">Scan Folder</span>
+          </button>
+          <span id="hist_scan_status" class="muted"
+                style="display:none; align-items:center; gap:6px;">
+            <span class="spinner" aria-hidden="true"
+                  style="display:inline-block; width:14px; height:14px;
+                         border:2px solid #ccc; border-top-color:#36c;
+                         border-radius:50%;
+                         animation:hist-spin 0.8s linear infinite;"></span>
+            <span>Scanning folder &mdash; this may take a moment…</span>
+          </span>
+        </div>
+        <div id="hist_scan_warning" class="flash error"
+             style="display:none; margin-top:8px;"></div>
+      </form>
+      <style>
+        @keyframes hist-spin { to { transform: rotate(360deg); } }
+        .hist-missing-highlight {
+          outline: 2px solid #c33;
+          outline-offset: 2px;
+          background-color: #fff3f3;
+        }
+      </style>
+      <script>
+      (function () {
+        var form    = document.getElementById('hist_scan_form');
+        var btn     = document.getElementById('hist_scan_btn');
+        var label   = document.getElementById('hist_scan_btn_label');
+        var status  = document.getElementById('hist_scan_status');
+        var warn    = document.getElementById('hist_scan_warning');
+        var period  = document.getElementById('hist_target_period');
+        var folder  = document.getElementById('hist_folder_path');
+        if (!form || !btn) return;
+
+        function clearHighlights() {
+          [period, folder].forEach(function (el) {
+            if (el) el.classList.remove('hist-missing-highlight');
+          });
+          warn.style.display = 'none';
+          warn.innerHTML = '';
+        }
+
+        function highlight(el, msg) {
+          if (!el) return;
+          el.classList.add('hist-missing-highlight');
+          el.focus({ preventScroll: false });
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        form.addEventListener('submit', function (ev) {
+          // Only validate when the Scan Folder button submitted the form.
+          var submitter = ev.submitter || document.activeElement;
+          var isScan = submitter && submitter.id === 'hist_scan_btn';
+          if (!isScan) { clearHighlights(); return; }
+
+          var missing = [];
+          if (!period || !period.value) missing.push('Target reporting period');
+          if (!folder || !folder.value.trim()) missing.push('Folder path');
+
+          if (missing.length) {
+            ev.preventDefault();
+            clearHighlights();
+            warn.innerHTML =
+              '<strong>Can\'t scan yet.</strong> Please fill in: ' +
+              missing.map(function (m) { return '<em>' + m + '</em>'; })
+                     .join(', ') + '.';
+            warn.style.display = 'block';
+            if (!period || !period.value) highlight(period);
+            else if (!folder || !folder.value.trim()) highlight(folder);
+            return;
+          }
+
+          // Valid — show the spinner and disable the button so the user
+          // sees that scanning is in progress.  We must inject a hidden
+          // <input name="action"> first; otherwise disabling the button
+          // strips its name/value from the form data, the server sees
+          // no action, and the wizard falls through to "next" and
+          // redirects to the next step.
+          clearHighlights();
+          if (!form.querySelector('input[name="action"][data-injected]')) {
+            var hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = 'action';
+            hidden.value = 'scan_hist_extract_folder';
+            hidden.setAttribute('data-injected', '1');
+            form.appendChild(hidden);
+          }
+          btn.disabled = true;
+          label.textContent = 'Scanning…';
+          status.style.display = 'inline-flex';
+        });
+
+        // If the user starts editing the highlighted fields, clear the
+        // warning so they aren't nagged after fixing it.
+        [period, folder].forEach(function (el) {
+          if (el) el.addEventListener('input', clearHighlights);
+        });
+      })();
+      </script>
+
+      {% set scan = he.get('scan_results') or None %}
+      {% if scan and scan.get('ok') %}
+        {% set summary = scan.get('summary') or {} %}
+        {% set new_sigs = scan.get('new_signatures') or [] %}
+        <div style="margin-top:16px; padding:8px 12px; border:1px solid #ddd;
+                    border-radius:6px; background:#fafafa;">
+          <div style="display:flex; justify-content:space-between;
+                      align-items:center;">
+            <strong>Scan results</strong>
+            <form method="post" style="margin:0;">
+              <input type="hidden" name="action"
+                     value="clear_hist_extract_scan">
+              <button class="btn btn-secondary" type="submit">
+                Clear results
+              </button>
+            </form>
+          </div>
+          <p class="muted" style="margin:6px 0;">
+            Scanned <strong>{{ summary.get('scanned', 0) }}</strong> file(s)
+            in <code>{{ scan.get('folder') }}</code> &mdash;
+            <strong>{{ summary.get('covered_months', 0) }}</strong> of
+            <strong>{{ scan.get('expected_months') | length }}</strong>
+            expected month(s) covered,
+            <strong>{{ summary.get('missing_months', 0) }}</strong> missing,
+            <strong>{{ summary.get('out_of_window', 0) }}</strong>
+            out-of-window file(s),
+            <strong>{{ summary.get('unreadable', 0) }}</strong> unreadable.
+          </p>
+
+          {% if new_sigs %}
+          <div class="flash info" style="margin:8px 0;">
+            <strong>{{ new_sigs | length }} unmapped column layout(s)</strong>
+            still need an anchor. Each layout below covers multiple files
+            &mdash; click <em>Use as anchor</em> to copy a sample into the
+            anchor list, then scroll up to map its columns. Once mapped,
+            every file sharing that layout becomes processable.
+            <table class="data-table"
+                   style="width:100%; margin-top:8px; background:#fff;">
+              <thead>
+                <tr>
+                  <th>Sample file</th>
+                  <th style="width:90px; text-align:right;">Files</th>
+                  <th style="width:120px; text-align:right;">In window</th>
+                  <th style="width:220px;"></th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for s in new_sigs %}
+                <tr>
+                  <td>
+                    <code>{{ s.sample_file }}</code>
+                    <br>
+                    <span class="muted" style="font-size:11px;">
+                      sig <code>{{ s.signature }}</code>
+                    </span>
+                  </td>
+                  <td style="text-align:right;">
+                    <strong>{{ s.file_count or 0 }}</strong>
+                  </td>
+                  <td style="text-align:right;">
+                    {% if (s.in_window_count or 0) > 0 %}
+                      <strong style="color:#2a7;">{{ s.in_window_count }}</strong>
+                    {% else %}
+                      <span class="muted">0</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                      {% if s.sample_path %}
+                      <form method="post" style="margin:0;">
+                        <input type="hidden" name="action"
+                               value="use_scan_file_as_anchor">
+                        <input type="hidden" name="sample_path"
+                               value="{{ s.sample_path }}">
+                        <button class="btn btn-primary btn-sm" type="submit"
+                                style="padding:2px 10px; font-size:12px;">
+                          Use as anchor
+                        </button>
+                      </form>
+                      {% endif %}
+                      <form method="post" style="margin:0;"
+                            onsubmit="return confirm('Ignore all files with this header layout? They will be skipped during Process &amp; Save.');">
+                        <input type="hidden" name="action"
+                               value="ignore_layout">
+                        <input type="hidden" name="signature"
+                               value="{{ s.signature }}">
+                        <button class="btn btn-secondary btn-sm" type="submit"
+                                style="padding:2px 10px; font-size:12px;"
+                                title="Skip these files for historical balances (they may still be used for charge-offs / recoveries separately).">
+                          Ignore layout
+                        </button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% endif %}
+
+          {% set ignored_layouts = scan.get('ignored_layouts') or [] %}
+          {% if ignored_layouts %}
+          <div class="flash" style="margin:8px 0; background:#f5f5f5; border:1px solid #ddd;">
+            <strong>{{ ignored_layouts | length }} ignored layout(s)</strong>
+            &mdash; files matching these header signatures are excluded from
+            historical balance processing.
+            <table class="data-table"
+                   style="width:100%; margin-top:8px; background:#fff;">
+              <thead>
+                <tr>
+                  <th>Sample file</th>
+                  <th style="width:90px; text-align:right;">Files</th>
+                  <th style="width:120px; text-align:right;">In window</th>
+                  <th style="width:140px;"></th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for s in ignored_layouts %}
+                <tr>
+                  <td>
+                    <code>{{ s.sample_file }}</code>
+                    <br>
+                    <span class="muted" style="font-size:11px;">
+                      sig <code>{{ s.signature }}</code>
+                    </span>
+                  </td>
+                  <td style="text-align:right;">{{ s.file_count or 0 }}</td>
+                  <td style="text-align:right;">{{ s.in_window_count or 0 }}</td>
+                  <td>
+                    <form method="post" style="margin:0;">
+                      <input type="hidden" name="action"
+                             value="unignore_layout">
+                      <input type="hidden" name="signature"
+                             value="{{ s.signature }}">
+                      <button class="btn btn-secondary btn-sm" type="submit"
+                              style="padding:2px 10px; font-size:12px;">
+                        Unignore
+                      </button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% endif %}
+
+          <h5 style="margin:12px 0 4px 0;">Months in window</h5>
+          <table class="data-table" style="width:100%;">
+            <thead>
+              <tr>
+                <th style="width:120px;">Month</th>
+                <th style="width:100px;">Status</th>
+                <th>File(s)</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for ym in scan.get('expected_months') or [] %}
+              {% set mb = (scan.get('months') or {}).get(ym) or {} %}
+              {% set st = mb.get('status', 'missing') %}
+              <tr>
+                <td><code>{{ ym }}</code></td>
+                <td>
+                  {% if st == 'ok' %}
+                    <span style="color:#2a7;">&#10003; ok</span>
+                  {% elif st == 'missing' %}
+                    <span style="color:#a33;">missing</span>
+                  {% elif st == 'multiple' %}
+                    <span style="color:#c70;">multiple</span>
+                  {% else %}
+                    <span class="muted">{{ st }}</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% for fname in mb.get('files') or [] %}
+                    <code>{{ fname }}</code><br>
+                  {% endfor %}
+                  {% if not (mb.get('files') or []) %}
+                    <span class="muted">&mdash;</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+
+          {% set oow = [] %}
+          {% for f in scan.get('files') or [] %}
+            {% if not f.in_window %}{% set _ = oow.append(f) %}{% endif %}
+          {% endfor %}
+          {% if oow %}
+          <details style="margin-top:10px;">
+            <summary style="cursor:pointer;">
+              {{ oow | length }} file(s) outside the target window
+            </summary>
+            <table class="data-table" style="width:100%; margin-top:6px;">
+              <thead>
+                <tr>
+                  <th>File</th>
+                  <th style="width:140px;">Detected</th>
+                  <th style="width:160px;">Profile</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for f in oow %}
+                <tr>
+                  <td><code>{{ f.name }}</code>
+                    {% if f.error %}
+                      <br><span style="color:#a33;">{{ f.error }}</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if f.detected_date %}{{ f.detected_date }}
+                      <br><span class="muted">({{ f.detected_confidence }})</span>
+                    {% else %}<span class="muted">(not detected)</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if f.profile_label %}{{ f.profile_label }}
+                    {% elif f.signature %}
+                      <span style="color:#a55;">new layout</span>
+                    {% else %}<span class="muted">&mdash;</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </details>
+          {% endif %}
+
+          {# ---- Process & Save (Slice 3) ---- #}
+          {% set processed = scan.get('processed') or None %}
+          {% set in_window_files = [] %}
+          {% for f in scan.get('files') or [] %}
+            {% if f.in_window %}{% set _ = in_window_files.append(f) %}{% endif %}
+          {% endfor %}
+          {% set unmapped = [] %}
+          {% for f in in_window_files %}
+            {% if not f.profile_id %}{% set _ = unmapped.append(f) %}{% endif %}
+          {% endfor %}
+          {% set mapped_in_window = (in_window_files | length) - (unmapped | length) %}
+          <div style="margin-top:14px; padding:8px 12px; border:1px dashed #cbd;
+                      border-radius:6px; background:#fff;">
+            <div style="display:flex; justify-content:space-between;
+                        align-items:center;">
+              <strong>Process &amp; save to history database</strong>
+              <form method="post" style="margin:0;">
+                <input type="hidden" name="action"
+                       value="process_hist_extracts">
+                <button class="btn btn-primary" type="submit"
+                  {% if not in_window_files or not mapped_in_window %}disabled{% endif %}>
+                  Process &amp; Save {% if mapped_in_window %}({{ mapped_in_window }} file{{ '' if mapped_in_window == 1 else 's' }}){% endif %}
+                </button>
+              </form>
+            </div>
+            {% if not in_window_files %}
+              <p class="muted" style="margin:6px 0 0;">
+                No in-window files to process yet.
+              </p>
+            {% else %}
+              <p class="muted" style="margin:6px 0 0;">
+                <strong>{{ mapped_in_window }}</strong> of
+                <strong>{{ in_window_files | length }}</strong>
+                in-window file(s) are mapped and ready to process
+                {% if unmapped %}
+                  &mdash; <strong style="color:#a55;">{{ unmapped | length }}</strong>
+                  still need anchors covering
+                  <strong>{{ new_sigs | length }}</strong>
+                  unmapped layout(s) (see panel above).
+                  {% if mapped_in_window %}
+                    You can Process &amp; Save now and add more anchors later.
+                  {% endif %}
+                {% else %}
+                  &mdash; will roll up per-loan-code balances + FICO
+                  histograms into <code>loan_code_history</code> for
+                  <strong>{{ state.credit_union or '(no CU set)' }}</strong>.
+                {% endif %}
+              </p>
+            {% endif %}
+
+            {% if processed %}
+              {% if processed.get('ok') %}
+                <p style="margin:8px 0 4px;">
+                  Last run: wrote
+                  <strong>{{ processed.get('rows_written', 0) }}</strong>
+                  row(s) across
+                  <strong>{{ (processed.get('months_processed') or []) | length }}</strong>
+                  month(s) covering
+                  <strong>{{ processed.get('loan_codes_total', 0) }}</strong>
+                  distinct loan code(s).
+                </p>
+                {% if processed.get('months_processed') %}
+                <details style="margin-top:4px;">
+                  <summary style="cursor:pointer;">Per-month detail</summary>
+                  <table class="data-table" style="width:100%; margin-top:6px;">
+                    <thead><tr>
+                      <th style="width:120px;">Month</th>
+                      <th style="width:120px;">As-of</th>
+                      <th>File</th>
+                      <th style="width:90px;">Codes</th>
+                      <th style="width:90px;">Rows</th>
+                    </tr></thead>
+                    <tbody>
+                    {% for m in processed.get('months_processed') %}
+                      <tr>
+                        <td><code>{{ m.period }}</code></td>
+                        <td>{{ m.as_of_date }}</td>
+                        <td><code>{{ m.name }}</code>
+                          {% if m.extras %}
+                            <span class="muted">
+                              (+{{ m.extras }} other file(s) ignored)
+                            </span>
+                          {% endif %}
+                        </td>
+                        <td>{{ m.loan_codes }}</td>
+                        <td>{{ m.rows_written }}</td>
+                      </tr>
+                    {% endfor %}
+                    </tbody>
+                  </table>
+                </details>
+                {% endif %}
+                {% if processed.get('months_skipped') %}
+                <div class="flash warning" style="margin-top:8px;">
+                  <strong>{{ processed.get('months_skipped') | length }}
+                  month(s) skipped:</strong>
+                  <ul style="margin:4px 0 0 20px;">
+                  {% for s in processed.get('months_skipped') %}
+                    <li>
+                      <code>{{ s.period }}</code>
+                      {% if s.name %}&mdash; <code>{{ s.name }}</code>{% endif %}
+                      &mdash; {{ s.reason }}
+                    </li>
+                  {% endfor %}
+                  </ul>
+                </div>
+                {% endif %}
+              {% else %}
+                <div class="flash error" style="margin-top:8px;">
+                  Processing failed:
+                  {{ processed.get('error') or 'unknown error' }}
+                </div>
+              {% endif %}
+            {% endif %}
+          </div>
+        </div>
+      {% elif scan and scan.get('error') %}
+        <div class="flash error" style="margin-top:16px;">
+          Scan failed: {{ scan.get('error') }}
+        </div>
+      {% else %}
+        <p class="muted" style="margin-top:10px;">
+          <em>Scan results will appear here after you click
+          &ldquo;Scan Folder&rdquo;.</em>
+        </p>
+      {% endif %}
+
+      {# -- History database coverage matrix --------------------------- #}
+      {% if history_view and history_view.row_count %}
+        {% set hv = history_view %}
+        {% set is_count = (matrix_view == 'count') %}
+        <div style="margin-top:24px;">
+          <div style="display:flex; justify-content:space-between;
+                      align-items:center; flex-wrap:wrap; gap:8px;">
+            <h4 style="margin:0;">
+              History database &mdash; what's loaded
+            </h4>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <span class="muted" style="font-size:0.9em;">Show:</span>
+              <a class="btn btn-secondary"
+                 href="{{ url_for('setup.step3_historical') }}?matrix_view=balance"
+                 style="{% if not is_count %}background:#e8f0fe;
+                        border-color:#36c;{% endif %}">Balance</a>
+              <a class="btn btn-secondary"
+                 href="{{ url_for('setup.step3_historical') }}?matrix_view=count"
+                 style="{% if is_count %}background:#e8f0fe;
+                        border-color:#36c;{% endif %}">Loan count</a>
+            </div>
+          </div>
+          <p class="muted" style="margin:4px 0 8px;">
+            <strong>{{ hv.months | length }}</strong> month(s),
+            <strong>{{ hv.codes | length }}</strong> loan code(s),
+            <strong>{{ hv.row_count }}</strong> row(s) stored for
+            <strong>{{ state.credit_union }}</strong>.
+            Cells show <strong>{{ 'loan count' if is_count else
+            'total balance' }}</strong>;
+            <span style="background:#fff7d6; padding:0 4px;">NEW</span>
+            marks a code's first appearance,
+            <span style="background:#ffe1e1; padding:0 4px;">DROP</span>
+            marks the last month before it disappeared.
+          </p>
+          <div style="overflow-x:auto; max-height:520px; overflow-y:auto;
+                      border:1px solid #ccc; border-radius:4px;">
+            <table class="data-table"
+                   style="border-collapse:separate; border-spacing:0;
+                          font-size:0.85em;">
+              <thead>
+                <tr style="position:sticky; top:0; z-index:2;
+                           background:#f3f3f3;">
+                  <th style="position:sticky; left:0; z-index:3;
+                             background:#f3f3f3; min-width:110px;
+                             text-align:left;">Month</th>
+                  {% for c in hv.codes %}
+                    <th style="min-width:90px; text-align:right;">
+                      {{ c }}<br>
+                      <span class="muted" style="font-weight:400;
+                                                 font-size:0.85em;">
+                        {{ hv.totals_by_code[c].months }} mo
+                      </span>
+                    </th>
+                  {% endfor %}
+                  <th style="min-width:110px; text-align:right;
+                             background:#eef;">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for m in hv.months %}
+                {% set row = hv.cells.get(m) or {} %}
+                {% set tm  = hv.totals_by_month.get(m) or {} %}
+                {% set new_set    = hv.new_in_month.get(m) or [] %}
+                {% set drop_set   = hv.dropped_after_month.get(m) or [] %}
+                <tr>
+                  <td style="position:sticky; left:0; background:#fff;
+                             font-weight:600;">{{ m }}</td>
+                  {% for c in hv.codes %}
+                    {% set cell = row.get(c) %}
+                    {% if cell %}
+                      <td style="text-align:right; background:#f4fff4;">
+                        {% if is_count %}
+                          {{ '{:,}'.format(cell.count) }}
+                        {% else %}
+                          {{ '{:,.0f}'.format(cell.balance) }}
+                        {% endif %}
+                        {% if c in new_set %}
+                          <div style="font-size:0.8em;
+                                      background:#fff7d6;
+                                      display:inline-block;
+                                      padding:0 4px;
+                                      margin-top:2px;">NEW</div>
+                        {% endif %}
+                        {% if c in drop_set %}
+                          <div style="font-size:0.8em;
+                                      background:#ffe1e1;
+                                      display:inline-block;
+                                      padding:0 4px;
+                                      margin-top:2px;">DROP</div>
+                        {% endif %}
+                      </td>
+                    {% else %}
+                      <td style="text-align:center; color:#bbb;">&middot;</td>
+                    {% endif %}
+                  {% endfor %}
+                  <td style="text-align:right; background:#eef;
+                             font-weight:600;">
+                    {% if is_count %}
+                      {{ '{:,}'.format(tm.count or 0) }}
+                    {% else %}
+                      {{ '{:,.0f}'.format(tm.balance or 0) }}
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+              <tfoot>
+                <tr style="background:#eef; font-weight:600;">
+                  <td style="position:sticky; left:0; background:#eef;">
+                    Total
+                  </td>
+                  {% for c in hv.codes %}
+                    {% set tc = hv.totals_by_code[c] %}
+                    <td style="text-align:right;">
+                      {% if is_count %}
+                        {{ '{:,}'.format(tc.count) }}
+                      {% else %}
+                        {{ '{:,.0f}'.format(tc.balance) }}
+                      {% endif %}
+                    </td>
+                  {% endfor %}
+                  <td style="text-align:right;">&mdash;</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      {% elif history_view is not none and history_view.row_count == 0 %}
+        <p class="muted" style="margin-top:16px;">
+          <em>Nothing in the history database yet for this CU.  Click
+          <strong>Process &amp; Save</strong> above to load the first
+          month(s).</em>
+        </p>
+      {% endif %}
+
+      {# Option 2 (5300 balance backfill) moved out below so it works
+         for every hist_source choice, not just monthly_loan_extracts. #}
+
+      {# Option 2b (5300 charge-off backfill) moved to Card 2 below. #}
+
+    </div>
+  {% elif hist_source == 'monthly_balance_sheets' %}
+    <div class="flash info" style="margin-top:16px;">
+      <strong>Monthly balance-sheet uploader &mdash; coming soon.</strong><br>
+      You'll be able to drop in one balance sheet per month and the wizard
+      will pull pool balances out of each one to build the historical database.
+    </div>
+  {% endif %}
+</div>
+
+{# -- 1a. NCUA 5300 backfill (works for ALL three source choices) -- #}
+{% set sb = (state.hist_extracts or {}).get('solr_backfill') or {} %}
+{% set sb_test = sb.get('last_test') %}
+{% set sb_run = sb.get('last_run') %}
+{% set cmap = solr_canonical_map or [] %}
+<div class="card" style="border:1px solid #c9d6e8; background:#f4f8ff;">
+  <h3 style="margin-top:0;">
+    1a. Fill missing months from NCUA 5300
+    <span class="muted" style="font-weight:normal;">(automatic, optional)</span>
+  </h3>
+  <p class="muted" style="margin-top:0;">
+    For any quarter-end (Mar/Jun/Sep/Dec) inside the lookback window that
+    has <strong>no row</strong> in this CU's historical balance table,
+    pull the credit union's 5300 call report from the TCT NCUA Solr index
+    and write one row per canonical 5300 loan-type bucket. Because 5300
+    reports are quarterly, the quarter-end balances are
+    <strong>also copied to the two prior month-ends</strong>
+    (e.g. Q1's March balance fills January and February too), but only
+    for months that aren't already loaded. Existing rows are
+    <strong>never overwritten</strong> &mdash; this is purely a
+    gap-filler. The new loan codes are seeded into the
+    <strong>Loan Code Mapping</strong> step so you can assign each one
+    to a pool for this credit union. FICO histograms are <em>not</em>
+    available from 5300 data &mdash; those columns will be empty for
+    backfilled months.
+  </p>
+  {% set _ch = state.charter_number or '' %}
+  {% if not _ch %}
+    <div class="flash warning" style="margin:8px 0;">
+      Set the credit union's <strong>charter number</strong> on the
+      Identity step before using this option.
+    </div>
+  {% endif %}
+
+  <form method="post" style="margin:0;">
+    <div style="display:flex; gap:16px; flex-wrap:wrap;
+          align-items:flex-end; margin-bottom:8px;">
+      <div style="flex:2; min-width:280px;">
+        <label><strong>Solr URL</strong></label>
+        <input type="text" name="solr_url"
+          value="{{ sb.get('solr_url', '') }}"
+          style="width:100%;">
+      </div>
+      <div style="flex:1; min-width:120px;">
+        <label><strong>Core</strong></label>
+        <input type="text" name="solr_core"
+          value="{{ sb.get('core', 'ncua') }}"
+          style="width:100%;">
+      </div>
+      <div style="flex:1; min-width:140px;">
+        <label class="muted">Charter #</label>
+        <input type="text" value="{{ _ch }}" disabled
+          style="width:100%;">
+      </div>
+    </div>
+
+    <div style="margin-top:10px;">
+      <strong>Canonical 5300 &rarr; loan-code map</strong>
+      <span class="muted">
+        (app-wide, read-only here &mdash; edit
+        <code>cecl_ui/data/ncua_5300_loan_codes.csv</code> to
+        change)
+      </span>
+      {% if not cmap %}
+        <div class="flash error" style="margin-top:6px;">
+          Canonical map CSV is empty or missing.
+        </div>
+      {% else %}
+        <details style="margin-top:6px;">
+          <summary style="cursor:pointer;">
+            Show {{ cmap | length }} canonical entries
+          </summary>
+          <table class="data-table" style="width:100%; margin-top:6px;">
+            <thead><tr>
+              <th style="width:120px;">5300 code</th>
+              <th style="width:240px;">Loan code (bucket)</th>
+              <th>Description</th>
+            </tr></thead>
+            <tbody>
+            {% for e in cmap %}
+              <tr>
+                <td><code>{{ e.field_code }}</code></td>
+                <td>{{ e.loan_code }}</td>
+                <td class="muted">{{ e.description }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </details>
+      {% endif %}
+    </div>
+
+    <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="btn btn-secondary" type="submit"
+        name="action" value="save_solr_settings">
+        Save Solr settings
+      </button>
+      <button class="btn btn-secondary" type="submit"
+        formaction="{{ url_for('setup.step3_historical') }}"
+        name="action" value="test_solr_fetch"
+        {% if not _ch %}disabled{% endif %}>
+        Test Solr connection
+      </button>
+      <button class="btn btn-primary" type="submit"
+        formaction="{{ url_for('setup.step3_historical') }}"
+        name="action" value="run_solr_backfill"
+        {% if not _ch or not cmap %}disabled{% endif %}>
+        Backfill missing quarters
+      </button>
+    </div>
+  </form>
+
+  {% if sb_test %}
+    <div class="flash {{ 'success' if sb_test.get('ok') else 'error' }}"
+      style="margin-top:10px;">
+      {% if sb_test.get('ok') %}
+        <strong>Solr OK</strong> &mdash; got
+        <strong>{{ sb_test.get('field_count') }}</strong> field(s)
+        for charter <code>{{ sb_test.get('charter') }}</code> at
+        <code>{{ sb_test.get('period') }}</code>.
+        {% if sb_test.get('doc_keys_sample') %}
+          <details style="margin-top:4px;">
+            <summary style="cursor:pointer;">
+              Sample field codes ({{ sb_test.get('doc_keys_sample')
+              | length }} shown)
+            </summary>
+            <div style="margin-top:4px;">
+              {% for k in sb_test.get('doc_keys_sample') %}
+                <code>{{ k }}</code>{% if not loop.last %}, {% endif %}
+              {% endfor %}
+            </div>
+          </details>
+        {% endif %}
+      {% else %}
+        <strong>Solr test failed:</strong>
+        {{ sb_test.get('error') or 'unknown error' }}
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if sb_run %}
+    <div class="flash {{ 'success' if sb_run.get('ok')
+          and sb_run.get('months_filled') else 'warning' }}"
+      style="margin-top:10px;">
+      {% if sb_run.get('ok') %}
+        <strong>Last backfill:</strong>
+        filled
+        <strong>{{ (sb_run.get('months_filled') or []) | length }}</strong>
+        month(s) &mdash;
+        wrote <strong>{{ sb_run.get('rows_written', 0) }}</strong>
+        row(s);
+        <strong>{{ (sb_run.get('months_skipped') or []) | length }}</strong>
+        skipped;
+        <strong>{{ (sb_run.get('months_no_data') or []) | length }}</strong>
+        quarter(s) had no Solr doc.
+        {% if sb_run.get('months_filled') %}
+          <details style="margin-top:4px;">
+            <summary style="cursor:pointer;">Filled months</summary>
+            <ul style="margin:4px 0 0 18px;">
+              {% for m in sb_run.get('months_filled') %}
+                <li><code>{{ m.period }}</code>
+                  {% if m.quarter_end and m.quarter_end != m.period %}
+                    <span class="muted">(copied from
+                      <code>{{ m.quarter_end }}</code>)</span>
+                  {% endif %}
+                  &mdash; {{ m.rows_written }} row(s),
+                  {{ m.codes }} loan code(s)</li>
+              {% endfor %}
+            </ul>
+          </details>
+        {% endif %}
+        {% if sb_run.get('months_skipped') %}
+          <details style="margin-top:4px;">
+            <summary style="cursor:pointer;">Skipped</summary>
+            <ul style="margin:4px 0 0 18px;">
+              {% for s in sb_run.get('months_skipped') %}
+                <li><code>{{ s.period }}</code> &mdash; {{ s.reason }}</li>
+              {% endfor %}
+            </ul>
+          </details>
+        {% endif %}
+        {% if sb_run.get('months_no_data') %}
+          <details style="margin-top:4px;">
+            <summary style="cursor:pointer;">No Solr doc found</summary>
+            <div style="margin-top:4px;">
+              {% for p in sb_run.get('months_no_data') %}
+                <code>{{ p }}</code>{% if not loop.last %}, {% endif %}
+              {% endfor %}
+            </div>
+          </details>
+        {% endif %}
+      {% else %}
+        <strong>Backfill failed:</strong>
+        {{ sb_run.get('error') or 'unknown error' }}
+      {% endif %}
+    </div>
+  {% endif %}
+</div>
+
+{# -- 1b. Pool mapping for the historical balances file ----------- #}
+{% set hpm = state.hist_pool_map or {} %}
+{% if hist_source == 'single_workbook' and hpm.get('labels') %}
+<div class="card">
+  <h3>1b. Map loan types &rarr; pools
+    <span class="badge-required">Required</span>
+  </h3>
+  <p class="muted">
+    The historical balances file lists one loan type per row in column A.
+    Assign each label to the loan pool it belongs to. These pools drive how
+    balances roll up across the CECL model.
+    {% if hpm.get('source') == 'warm' %}
+      <br><strong>Pre-filled from the WARM <code>BS Data</code> tab.</strong>
+      Review and adjust if needed.
+    {% elif hpm.get('source') == 'auto' %}
+      <br><strong>Pre-filled by auto-matching</strong> against the loan-extract
+      pool map and known pool names. Review and fill in any blanks.
+    {% endif %}
+    <br>Pick from the pools you set up in Step 2, or choose
+    <strong>&laquo; ignore &raquo;</strong> to leave a row out of the
+    report (e.g. spacers, sub-totals).
+  </p>
+
+  <form method="post">
+    <input type="hidden" name="action" value="save_hist_pool_map">
+    <table class="data-table" style="width:100%; margin-top:8px;">
+      <thead>
+        <tr>
+          <th style="width:55%;">Loan type label (column A)</th>
+          <th>Pool</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for label in hpm.get('labels', []) %}
+        {% set current = (hpm.get('mapping') or {}).get(label, '') %}
+        {% set in_step2 = current and (current in (step2_pools or [])) %}
+        <tr>
+          <td>
+            <code>{{ label }}</code>
+            <input type="hidden" name="label_{{ loop.index0 }}" value="{{ label }}">
+          </td>
+          <td>
+            <select name="pool_for_{{ loop.index0 }}" style="width:100%;">
+              <option value="__ignore__"
+                      {% if not current %}selected{% endif %}>&laquo; ignore &raquo;</option>
+              {% for p in step2_pools or [] %}
+                <option value="{{ p }}"
+                        {% if in_step2 and current == p %}selected{% endif %}>{{ p }}</option>
+              {% endfor %}
+              {% if current and not in_step2 %}
+                {# Preserve a previously-saved value that doesn't match any
+                   current Step 2 pool (e.g. pool was renamed/removed) so
+                   the user doesn't lose data silently. #}
+                <option value="{{ current }}" selected>
+                  {{ current }} (not in Step 2 pools)
+                </option>
+              {% endif %}
+            </select>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div style="margin-top:10px;">
+      <button class="btn btn-primary" type="submit">Save Pool Mapping</button>
+      <span class="muted" style="margin-left:8px;">
+        Sheet read: <code>{{ hpm.get('sheet') or '(default)' }}</code>
+      </span>
+    </div>
+  </form>
+
+  {% set unmapped_ns = namespace(count=0) %}
+  {% for lbl, pool in (hpm.get('mapping') or {}).items() %}
+    {% if not pool %}{% set unmapped_ns.count = unmapped_ns.count + 1 %}{% endif %}
+  {% endfor %}
+  {% if unmapped_ns.count > 0 %}
+    <div class="flash error" style="margin-top:10px;">
+      {{ unmapped_ns.count }} loan type(s) still need a pool assignment.
+    </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{# -- 2. Historical Charge-Offs -------------------------------------------- #}
+{% set co_src = state.get('hist_co_source') or 'single_workbook' %}
+{% set co_files = (state.hist_scan or {}).get('co_files', []) %}
+{% set co_monthly = (state.hist_scan or {}).get('monthly_co_files', []) %}
+{% set co_sb = (state.hist_extracts or {}).get('co_solr_backfill') or {} %}
+{% set co_sb_run = co_sb.get('last_run') %}
+{% set co_cmap = co_canonical_map or [] %}
+{% set he = state.hist_extracts or {} %}
+{% set tgt_period = he.get('target_period') or '' %}
+{% set tgt_months = he.get('history_months') or '' %}
+<div class="card">
+  <h3>2. Historical Charge-Offs
+    <span class="badge-required">Required</span>
+  </h3>
+  <p class="muted">
+    Choose where this CU's historical charge-off data comes from. The same
+    <strong>target reporting period</strong> and <strong>history depth</strong>
+    set under Historical Balances (Section 1) are reused below.
+    {% if tgt_period %}
+      Currently set to <code>{{ tgt_period }}</code> with
+      <code>{{ tgt_months }}</code> months of history.
+    {% else %}
+      <span style="color:#a04;"><strong>Not yet set.</strong>
+      Configure them in Section 1 first to enable the 5300 backfill.</span>
+    {% endif %}
+  </p>
+
+  <form method="post" style="margin-bottom:10px;">
+    <fieldset style="border:1px solid #ddd; padding:10px 14px; border-radius:6px;">
+      <legend style="padding:0 6px;">Source</legend>
+      <label class="checkbox-label" style="display:block; margin:4px 0;">
+        <input type="radio" name="hist_co_source" value="single_workbook"
+               {% if co_src == 'single_workbook' %}checked{% endif %}
+               onchange="this.form.submit();">
+        <strong>Single historical workbook</strong>
+        <span class="muted">— one file with all months of CO history</span>
+      </label>
+      <label class="checkbox-label" style="display:block; margin:4px 0;">
+        <input type="radio" name="hist_co_source" value="monthly_files"
+               {% if co_src == 'monthly_files' %}checked{% endif %}
+               onchange="this.form.submit();">
+        <strong>Monthly charge-off files</strong>
+        <span class="muted">— one file per month (period detected from filename)</span>
+      </label>
+      <label class="checkbox-label" style="display:block; margin:4px 0;">
+        <input type="radio" name="hist_co_source" value="5300_backfill"
+               {% if co_src == '5300_backfill' %}checked{% endif %}
+               onchange="this.form.submit();">
+        <strong>NCUA 5300 backfill</strong>
+        <span class="muted">— auto-pull each quarter from Call Reports</span>
+      </label>
+      <input type="hidden" name="action" value="set_hist_co_source">
+      <noscript>
+        <button class="btn btn-secondary" type="submit" style="margin-top:6px;">
+          Apply
+        </button>
+      </noscript>
+    </fieldset>
+  </form>
+
+  {% if co_src == 'single_workbook' %}
+    {% if co_files %}
+      <div class="upload-status-list">
+        {% for f in co_files %}
+          <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
+            <span class="upload-status-icon">&#10003;</span>
+            <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+            <form method="post" style="display:inline; margin-left:auto;">
+              <input type="hidden" name="action" value="remove_co_workbook">
+              <input type="hidden" name="filename" value="{{ f.name }}">
+              <button class="btn btn-link" type="submit"
+                      style="color:#a04; padding:0 4px;"
+                      title="Remove">&times;</button>
+            </form>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+      <label>Historical charge-off workbook
+        <input type="file" name="co_file" accept=".xlsx,.xlsm,.xls,.csv">
+        <span class="help">e.g.
+          <code>Charge_Off_Tracking_Report_-_Tongass_FCU.xlsx</code></span>
+      </label>
+      <button class="btn btn-secondary" type="submit" name="action"
+              value="upload_co" style="margin-top:8px;">
+        Upload Charge-Off Workbook
+      </button>
+    </form>
+
+  {% elif co_src == 'monthly_files' %}
+    {% if co_monthly %}
+      <div class="upload-status-list">
+        {% for f in co_monthly %}
+          <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
+            <span class="upload-status-icon">&#10003;</span>
+            <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+            <form method="post" style="display:inline; margin-left:auto;">
+              <input type="hidden" name="action" value="remove_co_monthly">
+              <input type="hidden" name="filename" value="{{ f.name }}">
+              <button class="btn btn-link" type="submit"
+                      style="color:#a04; padding:0 4px;"
+                      title="Remove">&times;</button>
+            </form>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted" style="margin-top:8px;">
+        No monthly charge-off files uploaded yet.
+      </p>
+    {% endif %}
+    <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+      <label>Monthly charge-off files
+        <input type="file" name="co_monthly_files" multiple
+               accept=".xlsx,.xlsm,.xls,.csv">
+        <span class="help">Select one or more files. Period detected from
+          each filename.</span>
+      </label>
+      <button class="btn btn-secondary" type="submit" name="action"
+              value="upload_co_monthly" style="margin-top:8px;">
+        Upload Monthly Charge-Off Files
+      </button>
+    </form>
+
+    {% set co_folder = (state.hist_scan or {}).get('monthly_co_folder') or '' %}
+    <form method="post" style="margin-top:12px;">
+      <label>Or scan a folder on this machine
+        <input type="text" name="co_monthly_folder"
+               value="{{ co_folder }}"
+               placeholder="e.g. Z:\Shared\TCT Files\Bridgeton\Monthly CO"
+               style="width:100%;">
+        <span class="help">Wizard will pick up every <code>*.xlsx</code> /
+          <code>*.xlsm</code> / <code>*.xls</code> / <code>*.csv</code> file
+          in the folder <strong>and any subfolders</strong>, copy each into
+          the wizard's working area, and detect the as-of date from the
+          filename.</span>
+      </label>
+      <button class="btn btn-secondary" type="submit" name="action"
+              value="scan_co_monthly_folder" style="margin-top:6px;">
+        Scan Folder for Charge-Off Files
+      </button>
+    </form>
+
+    {{ co_recov_scan_results(state.get('co_scan_data_monthly'),
+                              'charge-off',
+                              'clear_co_scan_monthly',
+                              'ignore_co_layout',
+                              'unignore_co_layout',
+                              'use_co_scan_file_as_columns') }}
+
+    {% set co_ins = state.get('co_inspect') %}
+    {% set co_cols = state.get('co_columns') or {} %}
+    {% set co_ma = co_cols.get('member_account') or {} %}
+    {% set co_ma_mode = co_ma.get('mode', 'fixed_suffix') %}
+    {% set co_ma_suffix = co_ma.get('suffix_length', 3) %}
+    {% set co_ma_delim = co_ma.get('delimiter', '-') %}
+    {% if co_ins %}
+      <div class="card" style="margin-top:12px; padding:10px;
+                               background:#f7faff;">
+        <strong>Column Mapping</strong>
+        <span class="muted">
+          (auto-detected from <code>{{ co_ins.filename }}</code>)
+        </span>
+        {% if co_ins.error %}
+          <div class="flash error" style="margin-top:6px;">
+            {{ co_ins.error }}
+          </div>
+        {% endif %}
+        <form method="post" style="margin-top:8px;" id="co-cols-form">
+
+          <h5 style="margin:6px 0 4px 0;">Member &amp; Account number</h5>
+          <p class="muted" style="margin-top:0;">
+            Pick the shape that matches this file's member &amp; account
+            numbers.
+          </p>
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <label style="display:flex; gap:8px; align-items:flex-start;">
+              <input type="radio" name="co_member_account_mode"
+                     value="fixed_suffix"
+                     {% if co_ma_mode == 'fixed_suffix' %}checked{% endif %}
+                     onchange="updateCoRecovMode('co')">
+              <span><strong>Combined &mdash; fixed suffix length</strong>
+                <span class="help" style="display:block;">One column. The
+                last N characters are the account / suffix.</span>
+              </span>
+            </label>
+            <label style="display:flex; gap:8px; align-items:flex-start;">
+              <input type="radio" name="co_member_account_mode"
+                     value="delimiter"
+                     {% if co_ma_mode == 'delimiter' %}checked{% endif %}
+                     onchange="updateCoRecovMode('co')">
+              <span><strong>Combined &mdash; separated by character</strong>
+                <span class="help" style="display:block;">One column,
+                split by a delimiter (e.g. <code>12345-001</code>).</span>
+              </span>
+            </label>
+            <label style="display:flex; gap:8px; align-items:flex-start;">
+              <input type="radio" name="co_member_account_mode"
+                     value="split"
+                     {% if co_ma_mode == 'split' %}checked{% endif %}
+                     onchange="updateCoRecovMode('co')">
+              <span><strong>Separate columns</strong>
+                <span class="help" style="display:block;">Member number
+                and account / suffix are in two different columns.</span>
+              </span>
+            </label>
+          </div>
+
+          <div id="co-ma-extras" style="margin-top:8px;">
+            <label id="co-ma-suffix-len"
+                   style="display:{% if co_ma_mode == 'fixed_suffix' %}inline-block{% else %}none{% endif %};
+                          margin-right:16px;">
+              Account suffix length
+              <input type="number" name="co_member_account_suffix_length"
+                     value="{{ co_ma_suffix }}" min="0" max="9"
+                     style="width:80px;">
+            </label>
+            <label id="co-ma-delim"
+                   style="display:{% if co_ma_mode == 'delimiter' %}inline-block{% else %}none{% endif %};">
+              Delimiter character
+              <input type="text" name="co_member_account_delimiter"
+                     value="{{ co_ma_delim }}" maxlength="3" size="4">
+            </label>
+          </div>
+
+          <h5 style="margin:14px 0 4px 0;">Columns</h5>
+          <div style="display:grid;
+                      grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+                      gap:12px;">
+            <label>Loan Code column
+              <select name="co_loan_code_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols.get('loan_code') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Charge-Off Amount column
+              <select name="co_amount_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols.get('amount') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Charge-Off Date column
+              <select name="co_date_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols.get('date') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <label id="co-fld-member">Member / combined member-account column
+              <select name="co_member_number_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols.get('member_number') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <label id="co-fld-account"
+                   style="{% if co_ma_mode != 'split' %}display:none;{% endif %}">
+              Account / Suffix column
+              <select name="co_loan_suffix_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols.get('loan_suffix') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+
+          <div style="margin-top:8px;">
+            <button class="btn btn-secondary" type="submit"
+                    name="action" value="save_co_columns">
+              Save Column Mapping
+            </button>
+            <button class="btn btn-link" type="submit"
+                    name="action" value="reinspect_co_monthly"
+                    style="margin-left:8px;"
+                    title="Re-read headers from the first file">
+              Re-inspect
+            </button>
+          </div>
+        </form>
+        {% if co_ins.preview_rows %}
+          <details style="margin-top:8px;">
+            <summary style="cursor:pointer;">Preview rows</summary>
+            <table class="data-table" style="margin-top:6px;">
+              <thead><tr>
+                {% for h in co_ins.headers %}<th>{{ h }}</th>{% endfor %}
+              </tr></thead>
+              <tbody>
+              {% for r in co_ins.preview_rows %}
+                <tr>
+                  {% for c in r %}<td>{{ c if c is not none else '' }}</td>{% endfor %}
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </details>
+        {% endif %}
+        <p class="muted" style="margin-top:8px;">
+          If the file has no charge-off rows, the month still records as a
+          zero-activity baseline in the database.
+        </p>
+      </div>
+    {% endif %}
+
+    <div style="margin-top:14px;">
+      {% set co_agg = state.get('monthly_co_aggregate') %}
+      <form method="post" style="display:inline;">
+        <button class="btn btn-primary" type="submit" name="action"
+                value="process_co_monthly"
+                {% if not co_monthly %}disabled{% endif %}>
+          Aggregate Monthly Charge-Off Files Into Database
+        </button>
+      </form>
+      {% if not co_monthly %}
+        <span class="muted" style="margin-left:8px;">
+          Upload at least one file first.
+        </span>
+      {% endif %}
+      {% if co_agg %}
+        <div class="card" style="margin-top:10px; padding:10px;">
+          <strong>Last aggregation:</strong>
+          {% if co_agg.ok %}
+            wrote <strong>{{ co_agg.total_rows_written }}</strong> row(s)
+            across <strong>{{ co_agg.months_written|length }}</strong>
+            month(s) &mdash; total
+            <strong>${{ '{:,.2f}'.format(co_agg.total_amount) }}</strong>.
+          {% else %}
+            <span style="color:#a04;">{{ co_agg.error or 'failed' }}</span>
+          {% endif %}
+          {% if co_agg.files %}
+            <details style="margin-top:6px;">
+              <summary style="cursor:pointer;">Per-file detail</summary>
+              <table class="data-table" style="margin-top:6px;">
+                <thead><tr>
+                  <th>File</th><th>As-Of</th>
+                  <th style="text-align:right;">Rows</th>
+                  <th style="text-align:right;">Amount</th>
+                  <th>Status</th>
+                </tr></thead>
+                <tbody>
+                {% for f in co_agg.files %}
+                  <tr>
+                    <td><code>{{ f.name }}</code></td>
+                    <td>{{ f.as_of_date or '\u2014' }}</td>
+                    <td style="text-align:right;">{{ f.rows }}</td>
+                    <td style="text-align:right;">
+                      ${{ '{:,.2f}'.format(f.amount or 0) }}
+                    </td>
+                    <td>
+                      {% if f.ok %}
+                        <span style="color:#2a6;">ok</span>
+                      {% else %}
+                        <span style="color:#a04;">{{ f.error }}</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </details>
+          {% endif %}
+        </div>
+      {% else %}
+        <p class="muted" style="margin-top:8px;">
+          Aggregation reads the <em>Charge off Amount</em> column from each
+          file, sums by Loan Code, and writes one row per
+          (loan code, as-of date) into
+          <code>loan_code_chargeoff_history</code>. Files sharing an as-of
+          date are merged before write.
+        </p>
+      {% endif %}
+    </div>
+
+  {% elif co_src == '5300_backfill' %}
+    <p class="muted" style="margin-top:10px;">
+      No monthly charge-off files needed for this credit union. Use the
+      <strong>2a</strong> card below to pull charge-off totals directly
+      from the NCUA 5300 call reports.
+    </p>
+  {% endif %}
+
+  {# -- 2a. NCUA 5300 backfill for missing CO quarter-ends -- #}
+  {% set sb = (state.hist_extracts or {}).get('solr_backfill') or {} %}
+  <div class="card" style="margin-top:24px;
+        border:1px solid #c9d6e8; background:#f4f8ff;">
+    <h3 style="margin-top:0;">
+      2a. Fill missing months from NCUA 5300 (charge-offs)
+      <span class="muted" style="font-weight:normal;">(automatic, optional)</span>
+    </h3>
+    <p class="muted" style="margin-top:0;">
+      For any quarter-end (Mar/Jun/Sep/Dec) inside the lookback window
+      that has <strong>no row</strong> in the charge-off history table
+      above, pull the credit union's 5300 call report from the TCT NCUA
+      Solr index and write one row per canonical 5300 charge-off bucket
+      below.
+      <br><strong>YTD differencing:</strong> 5300 charge-offs are
+      reported year-to-date. The amount written at each quarter-end is
+      the quarter-only net charge-off, computed as
+      <code>QTR_YTD &minus; prior&nbsp;QTR&nbsp;YTD</code> within the
+      same calendar year (March = Q1 YTD; June = Q2 YTD &minus; Q1 YTD;
+      September = Q3 YTD &minus; Q2 YTD; December = Q4 YTD &minus; Q3
+      YTD). Non-quarter month-ends (Jan/Feb/Apr/May/Jul/Aug/Oct/Nov)
+      are left empty &mdash; downstream consumers treat absence as
+      zero charge-offs for the month.
+    </p>
+    {% set _ch = state.charter_number or '' %}
+    {% if not _ch %}
+      <div class="flash warning" style="margin:8px 0;">
+        Set the credit union's <strong>charter number</strong> on the
+        Identity step before using this option.
+      </div>
+    {% endif %}
+    {% if not tgt_period %}
+      <div class="flash warning" style="margin:8px 0;">
+        Set the <strong>target reporting period</strong> in Section 1
+        first &mdash; the backfill uses the same period and lookback
+        window.
+      </div>
+    {% endif %}
+    {% if not sb.get('solr_url') %}
+      <div class="flash warning" style="margin:8px 0;">
+        Solr connection isn't configured yet. Set the
+        <strong>Solr URL</strong> and <strong>Core</strong> in
+        Section 1a's card &mdash; the charge-off backfill
+        reuses those settings.
+      </div>
+    {% else %}
+      <p class="muted" style="margin:6px 0;">
+        Using Solr
+        <code>{{ sb.get('solr_url') }}</code> &middot; core
+        <code>{{ sb.get('core') or 'ncua' }}</code> &middot; charter
+        <code>{{ _ch or '—' }}</code> &middot; target
+        <code>{{ tgt_period or '—' }}</code> &middot; lookback
+        <strong>{{ he.get('history_months') or 84 }}</strong> month(s).
+      </p>
+    {% endif %}
+
+    <div style="margin-top:10px;">
+      <strong>Canonical 5300 charge-off &rarr; loan-code map</strong>
+      <span class="muted">
+        (app-wide, read-only here &mdash; edit
+        <code>cecl_ui/data/ncua_5300_chargeoff_codes.csv</code> to
+        change)
+      </span>
+      {% if not co_cmap %}
+        <div class="flash error" style="margin-top:6px;">
+          Canonical charge-off map CSV is empty or missing.
+        </div>
+      {% else %}
+        <details style="margin-top:6px;">
+          <summary style="cursor:pointer;">
+            Show {{ co_cmap | length }} canonical entries
+          </summary>
+          <table class="data-table" style="width:100%; margin-top:6px;">
+            <thead><tr>
+              <th style="width:120px;">5300 code</th>
+              <th style="width:240px;">Loan code (bucket)</th>
+              <th>Description</th>
+            </tr></thead>
+            <tbody>
+            {% for e in co_cmap %}
+              <tr>
+                <td><code>{{ e.field_code }}</code></td>
+                <td>{{ e.loan_code }}</td>
+                <td class="muted">{{ e.description }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </details>
+      {% endif %}
+    </div>
+
+    <form method="post" style="margin-top:10px;">
+      <button class="btn btn-primary" type="submit"
+              formaction="{{ url_for('setup.step3_historical') }}"
+              name="action" value="run_solr_co_backfill"
+              {% if not _ch or not tgt_period or not sb.get('solr_url')
+                    or not co_cmap %}disabled{% endif %}>
+        Backfill missing charge-off quarters
+      </button>
+    </form>
+
+    {% if co_sb_run %}
+      <div class="flash {{ 'success' if co_sb_run.get('ok')
+            and co_sb_run.get('months_filled') else 'warning' }}"
+           style="margin-top:10px;">
+        {% if co_sb_run.get('ok') %}
+          <strong>Last charge-off backfill:</strong>
+          filled
+          <strong>{{ (co_sb_run.get('months_filled') or []) | length }}</strong>
+          month(s) &mdash; wrote
+          <strong>{{ co_sb_run.get('rows_written', 0) }}</strong> row(s);
+          <strong>{{ (co_sb_run.get('months_skipped') or []) | length }}</strong>
+          skipped;
+          <strong>{{ (co_sb_run.get('months_no_data') or []) | length }}</strong>
+          quarter(s) had no Solr doc.
+          {% if co_sb_run.get('stale_rows_removed') %}
+            <br>Removed
+            <strong>{{ co_sb_run.get('stale_rows_removed') }}</strong>
+            stale row(s) for loan codes no longer in the canonical map.
+          {% endif %}
+          {% if co_sb_run.get('months_filled') %}
+            <details style="margin-top:4px;">
+              <summary style="cursor:pointer;">Filled months</summary>
+              <ul style="margin:4px 0 0 18px;">
+                {% for m in co_sb_run.get('months_filled') %}
+                  <li><code>{{ m.period }}</code>
+                    {% if m.quarter_end and m.quarter_end != m.period %}
+                      <span class="muted">(copied from
+                        <code>{{ m.quarter_end }}</code>)</span>
+                    {% endif %}
+                    &mdash; {{ m.rows_written }} row(s),
+                    {{ m.codes }} loan code(s)</li>
+                {% endfor %}
+              </ul>
+            </details>
+          {% endif %}
+          {% if co_sb_run.get('months_skipped') %}
+            <details style="margin-top:4px;">
+              <summary style="cursor:pointer;">Skipped</summary>
+              <ul style="margin:4px 0 0 18px;">
+                {% for s in co_sb_run.get('months_skipped') %}
+                  <li><code>{{ s.period }}</code> &mdash; {{ s.reason }}</li>
+                {% endfor %}
+              </ul>
+            </details>
+          {% endif %}
+          {% if co_sb_run.get('months_no_data') %}
+            <details style="margin-top:4px;">
+              <summary style="cursor:pointer;">No Solr doc found</summary>
+              <div style="margin-top:4px;">
+                {% for p in co_sb_run.get('months_no_data') %}
+                  <code>{{ p }}</code>{% if not loop.last %}, {% endif %}
+                {% endfor %}
+              </div>
+            </details>
+          {% endif %}
+        {% else %}
+          <strong>Charge-off backfill failed:</strong>
+          {{ co_sb_run.get('error') or 'unknown error' }}
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+
+  {{ amount_history_matrix(co_history_view|default(none), state.credit_union,
+        'charge-off',
+        'Nothing in the charge-off history database yet for this CU. '
+        'Click Aggregate above to load the first month(s).') }}
+</div>
+
+{# -- 3. Historical Recoveries ------------------------------------------- #}
+{% set recov_src = state.get('hist_recov_source') or 'single_workbook' %}
+{% set recov_files = (state.hist_scan or {}).get('recov_files', []) %}
+{% set recov_monthly = (state.hist_scan or {}).get('monthly_recov_files', []) %}
+{% set rec_sb = (state.hist_extracts or {}).get('recov_solr_backfill') or {} %}
+{% set rec_sb_run = rec_sb.get('last_run') %}
+{% set rec_cmap = recov_canonical_map or [] %}
+<div class="card">
+  <h3>3. Historical Recoveries
+    <span class="badge-optional">Optional</span>
+  </h3>
+  <p class="muted">
+    If this CU has no recovery history, check the box and skip the rest of
+    this section. Otherwise pick where the historical recoveries come from
+    (same period / depth as Section 1).
+  </p>
+
+  <form method="post" style="margin-bottom:10px;">
+    <label class="checkbox-label" style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" name="no_hist_recoveries" id="no-hist-recoveries-cb"
+             {% if state.no_hist_recoveries %}checked{% endif %}
+             onchange="document.getElementById('hist-recov-body').hidden = this.checked; this.form.submit();">
+      <strong>This credit union has no historical recoveries</strong>
+    </label>
+    <input type="hidden" name="action" value="toggle_no_recov">
+    <input type="hidden" name="recov_toggle_marker" value="1">
+    <noscript><button class="btn btn-secondary" type="submit"
+              style="margin-top:6px;">Apply</button></noscript>
+  </form>
+
+  <div id="hist-recov-body" {% if state.no_hist_recoveries %}hidden{% endif %}>
+    <form method="post" style="margin-bottom:10px;">
+      <fieldset style="border:1px solid #ddd; padding:10px 14px; border-radius:6px;">
+        <legend style="padding:0 6px;">Source</legend>
+        <label class="checkbox-label" style="display:block; margin:4px 0;">
+          <input type="radio" name="hist_recov_source" value="single_workbook"
+                 {% if recov_src == 'single_workbook' %}checked{% endif %}
+                 onchange="this.form.submit();">
+          <strong>Single historical workbook</strong>
+          <span class="muted">— one file with all months of recovery history</span>
+        </label>
+        <label class="checkbox-label" style="display:block; margin:4px 0;">
+          <input type="radio" name="hist_recov_source" value="monthly_files"
+                 {% if recov_src == 'monthly_files' %}checked{% endif %}
+                 onchange="this.form.submit();">
+          <strong>Monthly recoveries files</strong>
+          <span class="muted">— one file per month</span>
+        </label>
+        <label class="checkbox-label" style="display:block; margin:4px 0;">
+          <input type="radio" name="hist_recov_source" value="5300_backfill"
+                 {% if recov_src == '5300_backfill' %}checked{% endif %}
+                 onchange="this.form.submit();">
+          <strong>NCUA 5300 backfill</strong>
+          <span class="muted">— auto-pull recovery totals each quarter</span>
+        </label>
+        <input type="hidden" name="action" value="set_hist_recov_source">
+        <noscript>
+          <button class="btn btn-secondary" type="submit" style="margin-top:6px;">
+            Apply
+          </button>
+        </noscript>
+      </fieldset>
+    </form>
+
+    {% if recov_src == 'single_workbook' %}
+      {% if recov_files %}
+        <div class="upload-status-list">
+          {% for f in recov_files %}
+            <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
+              <span class="upload-status-icon">&#10003;</span>
+              <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+              <form method="post" style="display:inline; margin-left:auto;">
+                <input type="hidden" name="action" value="remove_recov_workbook">
+                <input type="hidden" name="filename" value="{{ f.name }}">
+                <button class="btn btn-link" type="submit"
+                        style="color:#a04; padding:0 4px;"
+                        title="Remove">&times;</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+        <label>Historical recoveries workbook
+          <input type="file" name="recov_file" accept=".xlsx,.xlsm,.xls,.csv">
+          <span class="help">e.g.
+            <code>Historical_Recoveries_-_Tongass_FCU.xlsx</code></span>
+        </label>
+        <button class="btn btn-secondary" type="submit" name="action"
+                value="upload_recov" style="margin-top:8px;">
+          Upload Recoveries Workbook
+        </button>
+      </form>
+
+    {% elif recov_src == 'monthly_files' %}
+      {% if recov_monthly %}
+        <div class="upload-status-list">
+          {% for f in recov_monthly %}
+            <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
+              <span class="upload-status-icon">&#10003;</span>
+              <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+              <form method="post" style="display:inline; margin-left:auto;">
+                <input type="hidden" name="action" value="remove_recov_monthly">
+                <input type="hidden" name="filename" value="{{ f.name }}">
+                <button class="btn btn-link" type="submit"
+                        style="color:#a04; padding:0 4px;"
+                        title="Remove">&times;</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="muted" style="margin-top:8px;">
+          No monthly recoveries files uploaded yet.
+        </p>
+      {% endif %}
+      <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+        <label>Monthly recoveries files
+          <input type="file" name="recov_monthly_files" multiple
+                 accept=".xlsx,.xlsm,.xls,.csv">
+          <span class="help">Select one or more files. Period detected from
+            each filename.</span>
+        </label>
+        <button class="btn btn-secondary" type="submit" name="action"
+                value="upload_recov_monthly" style="margin-top:8px;">
+          Upload Monthly Recoveries Files
+        </button>
+      </form>
+
+      {% set recov_folder = (state.hist_scan or {}).get('monthly_recov_folder') or '' %}
+      <form method="post" style="margin-top:12px;">
+        <label>Or scan a folder on this machine
+          <input type="text" name="recov_monthly_folder"
+                 value="{{ recov_folder }}"
+                 placeholder="e.g. Z:\Shared\TCT Files\Bridgeton\Monthly Recoveries"
+                 style="width:100%;">
+          <span class="help">Wizard will pick up every <code>*.xlsx</code> /
+            <code>*.xlsm</code> / <code>*.xls</code> / <code>*.csv</code>
+            file in the folder <strong>and any subfolders</strong>, copy
+            each into the wizard's working area, and detect the as-of date
+            from the filename.</span>
+        </label>
+        <button class="btn btn-secondary" type="submit" name="action"
+                value="scan_recov_monthly_folder" style="margin-top:6px;">
+          Scan Folder for Recoveries Files
+        </button>
+      </form>
+
+      {{ co_recov_scan_results(state.get('recov_scan_data_monthly'),
+                                'recoveries',
+                                'clear_recov_scan_monthly',
+                                'ignore_recov_layout',
+                                'unignore_recov_layout',
+                                'use_recov_scan_file_as_columns') }}
+
+      {% set recov_ins = state.get('recov_inspect') %}
+      {% set recov_cols = state.get('recov_columns') or {} %}
+      {% set recov_ma = recov_cols.get('member_account') or {} %}
+      {% set recov_ma_mode = recov_ma.get('mode', 'fixed_suffix') %}
+      {% set recov_ma_suffix = recov_ma.get('suffix_length', 3) %}
+      {% set recov_ma_delim = recov_ma.get('delimiter', '-') %}
+      {% if recov_ins %}
+        <div class="card" style="margin-top:12px; padding:10px;
+                                 background:#f7faff;">
+          <strong>Column Mapping</strong>
+          <span class="muted">
+            (auto-detected from <code>{{ recov_ins.filename }}</code>)
+          </span>
+          {% if recov_ins.error %}
+            <div class="flash error" style="margin-top:6px;">
+              {{ recov_ins.error }}
+            </div>
+          {% endif %}
+          <form method="post" style="margin-top:8px;" id="recov-cols-form">
+
+            <h5 style="margin:6px 0 4px 0;">Member &amp; Account number</h5>
+            <p class="muted" style="margin-top:0;">
+              Pick the shape that matches this file's member &amp; account
+              numbers.
+            </p>
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <label style="display:flex; gap:8px; align-items:flex-start;">
+                <input type="radio" name="recov_member_account_mode"
+                       value="fixed_suffix"
+                       {% if recov_ma_mode == 'fixed_suffix' %}checked{% endif %}
+                       onchange="updateCoRecovMode('recov')">
+                <span><strong>Combined &mdash; fixed suffix length</strong>
+                  <span class="help" style="display:block;">One column. The
+                  last N characters are the account / suffix.</span>
+                </span>
+              </label>
+              <label style="display:flex; gap:8px; align-items:flex-start;">
+                <input type="radio" name="recov_member_account_mode"
+                       value="delimiter"
+                       {% if recov_ma_mode == 'delimiter' %}checked{% endif %}
+                       onchange="updateCoRecovMode('recov')">
+                <span><strong>Combined &mdash; separated by character</strong>
+                  <span class="help" style="display:block;">One column,
+                  split by a delimiter (e.g. <code>12345-001</code>).</span>
+                </span>
+              </label>
+              <label style="display:flex; gap:8px; align-items:flex-start;">
+                <input type="radio" name="recov_member_account_mode"
+                       value="split"
+                       {% if recov_ma_mode == 'split' %}checked{% endif %}
+                       onchange="updateCoRecovMode('recov')">
+                <span><strong>Separate columns</strong>
+                  <span class="help" style="display:block;">Member number
+                  and account / suffix are in two different columns.</span>
+                </span>
+              </label>
+            </div>
+
+            <div id="recov-ma-extras" style="margin-top:8px;">
+              <label id="recov-ma-suffix-len"
+                     style="display:{% if recov_ma_mode == 'fixed_suffix' %}inline-block{% else %}none{% endif %};
+                            margin-right:16px;">
+                Account suffix length
+                <input type="number" name="recov_member_account_suffix_length"
+                       value="{{ recov_ma_suffix }}" min="0" max="9"
+                       style="width:80px;">
+              </label>
+              <label id="recov-ma-delim"
+                     style="display:{% if recov_ma_mode == 'delimiter' %}inline-block{% else %}none{% endif %};">
+                Delimiter character
+                <input type="text" name="recov_member_account_delimiter"
+                       value="{{ recov_ma_delim }}" maxlength="3" size="4">
+              </label>
+            </div>
+
+            <h5 style="margin:14px 0 4px 0;">Columns</h5>
+            <div style="display:grid;
+                        grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+                        gap:12px;">
+              <label>Loan Code column
+                <select name="recov_loan_code_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols.get('loan_code') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>Recovery Amount column
+                <select name="recov_amount_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols.get('amount') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>Recovery Date column
+                <select name="recov_date_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols.get('date') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label id="recov-fld-member">Member / combined member-account column
+                <select name="recov_member_number_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols.get('member_number') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label id="recov-fld-account"
+                     style="{% if recov_ma_mode != 'split' %}display:none;{% endif %}">
+                Account / Suffix column
+                <select name="recov_loan_suffix_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols.get('loan_suffix') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+            </div>
+
+            <div style="margin-top:8px;">
+              <button class="btn btn-secondary" type="submit"
+                      name="action" value="save_recov_columns">
+                Save Column Mapping
+              </button>
+              <button class="btn btn-link" type="submit"
+                      name="action" value="reinspect_recov_monthly"
+                      style="margin-left:8px;"
+                      title="Re-read headers from the first file">
+                Re-inspect
+              </button>
+            </div>
+          </form>
+          {% if recov_ins.preview_rows %}
+            <details style="margin-top:8px;">
+              <summary style="cursor:pointer;">Preview rows</summary>
+              <table class="data-table" style="margin-top:6px;">
+                <thead><tr>
+                  {% for h in recov_ins.headers %}<th>{{ h }}</th>{% endfor %}
+                </tr></thead>
+                <tbody>
+                {% for r in recov_ins.preview_rows %}
+                  <tr>
+                    {% for c in r %}<td>{{ c if c is not none else '' }}</td>{% endfor %}
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </details>
+          {% endif %}
+          <p class="muted" style="margin-top:8px;">
+            If the file has no recovery rows, the month still records as a
+            zero-activity baseline in the database.
+          </p>
+        </div>
+      {% endif %}
+
+      <div style="margin-top:14px;">
+        {% set recov_agg = state.get('monthly_recov_aggregate') %}
+        <form method="post" style="display:inline;">
+          <button class="btn btn-primary" type="submit" name="action"
+                  value="process_recov_monthly"
+                  {% if not recov_monthly %}disabled{% endif %}>
+            Aggregate Monthly Recoveries Files Into Database
+          </button>
+        </form>
+        {% if not recov_monthly %}
+          <span class="muted" style="margin-left:8px;">
+            Upload at least one file first.
+          </span>
+        {% endif %}
+        {% if recov_agg %}
+          <div class="card" style="margin-top:10px; padding:10px;">
+            <strong>Last aggregation:</strong>
+            {% if recov_agg.ok %}
+              wrote <strong>{{ recov_agg.total_rows_written }}</strong>
+              row(s) across
+              <strong>{{ recov_agg.months_written|length }}</strong>
+              month(s) &mdash; total
+              <strong>${{ '{:,.2f}'.format(recov_agg.total_amount) }}</strong>.
+            {% else %}
+              <span style="color:#a04;">{{ recov_agg.error or 'failed' }}</span>
+            {% endif %}
+            {% if recov_agg.files %}
+              <details style="margin-top:6px;">
+                <summary style="cursor:pointer;">Per-file detail</summary>
+                <table class="data-table" style="margin-top:6px;">
+                  <thead><tr>
+                    <th>File</th><th>As-Of</th>
+                    <th style="text-align:right;">Rows</th>
+                    <th style="text-align:right;">Amount</th>
+                    <th>Status</th>
+                  </tr></thead>
+                  <tbody>
+                  {% for f in recov_agg.files %}
+                    <tr>
+                      <td><code>{{ f.name }}</code></td>
+                      <td>{{ f.as_of_date or '\u2014' }}</td>
+                      <td style="text-align:right;">{{ f.rows }}</td>
+                      <td style="text-align:right;">
+                        ${{ '{:,.2f}'.format(f.amount or 0) }}
+                      </td>
+                      <td>
+                        {% if f.ok %}
+                          <span style="color:#2a6;">ok</span>
+                        {% else %}
+                          <span style="color:#a04;">{{ f.error }}</span>
+                        {% endif %}
+                      </td>
+                    </tr>
+                  {% endfor %}
+                  </tbody>
+                </table>
+              </details>
+            {% endif %}
+          </div>
+        {% else %}
+          <p class="muted" style="margin-top:8px;">
+            Aggregation reads the <em>Recovery Amount</em> column from each
+            file, sums by Loan Code, and writes one row per
+            (loan code, as-of date) into
+            <code>loan_code_recovery_history</code>. Files sharing an as-of
+            date are merged before write.
+          </p>
+        {% endif %}
+      </div>
+
+    {% elif recov_src == '5300_backfill' %}
+      <p class="muted" style="margin-top:10px;">
+        No monthly recoveries files needed for this credit union. Use the
+        <strong>3a</strong> card below to pull recovery totals directly
+        from the NCUA 5300 call reports.
+      </p>
+    {% endif %}
+
+    {# -- 3a. NCUA 5300 backfill for missing recovery quarter-ends -- #}
+    {% set sb = (state.hist_extracts or {}).get('solr_backfill') or {} %}
+    <div class="card" style="margin-top:24px;
+          border:1px solid #c9d6e8; background:#f4f8ff;">
+      <h3 style="margin-top:0;">
+        3a. Fill missing months from NCUA 5300 (recoveries)
+        <span class="muted" style="font-weight:normal;">(automatic, optional)</span>
+      </h3>
+      <p class="muted" style="margin-top:0;">
+        For any quarter-end (Mar/Jun/Sep/Dec) inside the lookback window
+        that has <strong>no row</strong> in the recovery history table
+        below, pull the credit union's 5300 call report from the TCT NCUA
+        Solr index and write one row per canonical 5300 recovery bucket
+        below.
+        <br><strong>YTD differencing:</strong> 5300 recoveries are
+        reported year-to-date. The amount written at each quarter-end is
+        the quarter-only recovery, computed as
+        <code>QTR_YTD &minus; prior&nbsp;QTR&nbsp;YTD</code> within the
+        same calendar year (March = Q1 YTD; June = Q2 YTD &minus; Q1 YTD;
+        September = Q3 YTD &minus; Q2 YTD; December = Q4 YTD &minus; Q3
+        YTD). Non-quarter month-ends (Jan/Feb/Apr/May/Jul/Aug/Oct/Nov)
+        are left empty &mdash; downstream consumers treat absence as
+        zero recoveries for the month.
+      </p>
+      {% set _ch = state.charter_number or '' %}
+      {% if not _ch %}
+        <div class="flash warning" style="margin:8px 0;">
+          Set the credit union's <strong>charter number</strong> on the
+          Identity step before using this option.
+        </div>
+      {% endif %}
+      {% if not tgt_period %}
+        <div class="flash warning" style="margin:8px 0;">
+          Set the <strong>target reporting period</strong> in Section 1
+          first &mdash; the backfill uses the same period and lookback
+          window.
+        </div>
+      {% endif %}
+      {% if not sb.get('solr_url') %}
+        <div class="flash warning" style="margin:8px 0;">
+          Solr connection isn't configured yet. Set the
+          <strong>Solr URL</strong> and <strong>Core</strong> in
+          Section 1a's card &mdash; the recovery backfill
+          reuses those settings.
+        </div>
+      {% else %}
+        <p class="muted" style="margin:6px 0;">
+          Using Solr
+          <code>{{ sb.get('solr_url') }}</code> &middot; core
+          <code>{{ sb.get('core') or 'ncua' }}</code> &middot; charter
+          <code>{{ _ch or '—' }}</code> &middot; target
+          <code>{{ tgt_period or '—' }}</code> &middot; lookback
+          <strong>{{ he.get('history_months') or 84 }}</strong> month(s).
+        </p>
+      {% endif %}
+
+      <div style="margin-top:10px;">
+        <strong>Canonical 5300 recovery &rarr; loan-code map</strong>
+        <span class="muted">
+          (app-wide, read-only here &mdash; edit
+          <code>cecl_ui/data/ncua_5300_recovery_codes.csv</code> to
+          change)
+        </span>
+        {% if not rec_cmap %}
+          <div class="flash error" style="margin-top:6px;">
+            Canonical recovery map CSV is empty or missing.
+          </div>
+        {% else %}
+          <details style="margin-top:6px;">
+            <summary style="cursor:pointer;">
+              Show {{ rec_cmap | length }} canonical entries
+            </summary>
+            <table class="data-table" style="width:100%; margin-top:6px;">
+              <thead><tr>
+                <th style="width:120px;">5300 code</th>
+                <th style="width:240px;">Loan code (bucket)</th>
+                <th>Description</th>
+              </tr></thead>
+              <tbody>
+              {% for e in rec_cmap %}
+                <tr>
+                  <td><code>{{ e.field_code }}</code></td>
+                  <td>{{ e.loan_code }}</td>
+                  <td class="muted">{{ e.description }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </details>
+        {% endif %}
+      </div>
+
+      <form method="post" style="margin-top:10px;">
+        <button class="btn btn-primary" type="submit"
+                formaction="{{ url_for('setup.step3_historical') }}"
+                name="action" value="run_solr_recov_backfill"
+                {% if not _ch or not tgt_period or not sb.get('solr_url')
+                      or not rec_cmap %}disabled{% endif %}>
+          Backfill missing recovery quarters
+        </button>
+      </form>
+
+      {% if rec_sb_run %}
+        <div class="flash {{ 'success' if rec_sb_run.get('ok')
+              and rec_sb_run.get('months_filled') else 'warning' }}"
+             style="margin-top:10px;">
+          {% if rec_sb_run.get('ok') %}
+            <strong>Last recovery backfill:</strong>
+            filled
+            <strong>{{ (rec_sb_run.get('months_filled') or []) | length }}</strong>
+            month(s) &mdash; wrote
+            <strong>{{ rec_sb_run.get('rows_written', 0) }}</strong> row(s);
+            <strong>{{ (rec_sb_run.get('months_skipped') or []) | length }}</strong>
+            skipped;
+            <strong>{{ (rec_sb_run.get('months_no_data') or []) | length }}</strong>
+            quarter(s) had no Solr doc.
+            {% if rec_sb_run.get('stale_rows_removed') %}
+              <br>Removed
+              <strong>{{ rec_sb_run.get('stale_rows_removed') }}</strong>
+              stale row(s) for loan codes no longer in the canonical map.
+            {% endif %}
+            {% if rec_sb_run.get('months_filled') %}
+              <details style="margin-top:4px;">
+                <summary style="cursor:pointer;">Filled months</summary>
+                <ul style="margin:4px 0 0 18px;">
+                  {% for m in rec_sb_run.get('months_filled') %}
+                    <li><code>{{ m.period }}</code>
+                      {% if m.quarter_end and m.quarter_end != m.period %}
+                        <span class="muted">(copied from
+                          <code>{{ m.quarter_end }}</code>)</span>
+                      {% endif %}
+                      &mdash; {{ m.rows_written }} row(s),
+                      {{ m.codes }} loan code(s)</li>
+                  {% endfor %}
+                </ul>
+              </details>
+            {% endif %}
+            {% if rec_sb_run.get('months_skipped') %}
+              <details style="margin-top:4px;">
+                <summary style="cursor:pointer;">Skipped</summary>
+                <ul style="margin:4px 0 0 18px;">
+                  {% for s in rec_sb_run.get('months_skipped') %}
+                    <li><code>{{ s.period }}</code> &mdash; {{ s.reason }}</li>
+                  {% endfor %}
+                </ul>
+              </details>
+            {% endif %}
+            {% if rec_sb_run.get('months_no_data') %}
+              <details style="margin-top:4px;">
+                <summary style="cursor:pointer;">No Solr doc found</summary>
+                <div style="margin-top:4px;">
+                  {% for p in rec_sb_run.get('months_no_data') %}
+                    <code>{{ p }}</code>{% if not loop.last %}, {% endif %}
+                  {% endfor %}
+                </div>
+              </details>
+            {% endif %}
+          {% else %}
+            <strong>Recovery backfill failed:</strong>
+            {{ rec_sb_run.get('error') or 'unknown error' }}
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {{ amount_history_matrix(recov_history_view|default(none), state.credit_union,
+        'recovery',
+        'Nothing in the recovery history database yet for this CU. '
+        'Click Aggregate above to load the first month(s).') }}
+</div>
+
+{# â”€â”€ Navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ #}
+<div class="card">
+  <form method="post">
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step_loan_pools') }}">&larr; Back</a>
+
+      {% set hist_scan = state.hist_scan or {} %}
+      {# Consider the step satisfied if EITHER file uploads completed OR
+         rows already exist in the history DB (e.g. populated via the
+         5300 backfill). #}
+      {% set has_balances = hist_scan.get('monthly_files')
+            or (history_view and history_view.row_count) %}
+      {% set has_co = hist_scan.get('co_files')
+            or (co_history_view and co_history_view.row_count) %}
+      {% set has_recov = hist_scan.get('recov_files')
+            or state.no_hist_recoveries
+            or (recov_history_view and recov_history_view.row_count) %}
+
+      {# Mapping is required once a balance file has been uploaded. #}
+      {% set hpm2 = state.hist_pool_map or {} %}
+      {% set mapping_required = hist_scan.get('monthly_files')
+            and (hpm2.get('labels') | length) > 0 %}
+      {% set ns = namespace(complete=True) %}
+      {% if mapping_required %}
+        {% for lbl in hpm2.get('labels', []) %}
+          {% if not (hpm2.get('mapping') or {}).get(lbl) %}
+            {% set ns.complete = False %}
+          {% endif %}
+        {% endfor %}
+      {% endif %}
+
+      {% if has_balances and has_co and has_recov and ns.complete %}
+        <button class="btn btn-primary" type="submit" name="action" value="next">
+          Save &amp; Next: Monthly Balance File &rarr;
+        </button>
+      {% else %}
+        <button class="btn btn-secondary" type="submit" name="action" value="skip">
+          Skip &mdash; upload files later &rarr;
+        </button>
+      {% endif %}
+    </div>
+  </form>
+</div>
+{% endblock %}

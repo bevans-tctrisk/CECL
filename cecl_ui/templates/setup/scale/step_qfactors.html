@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}SCALE — Q-Factors{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Qualitative Factor Overlays</h2>
+  <p class="muted">
+    Q-factors are written to the workbook <strong>after</strong> the 5300
+    fill, so they sit on top of the prior-quarter accumulation. Values
+    are entered in basis points (100&nbsp;bps&nbsp;=&nbsp;1.00%) and
+    written to the workbook as decimals (bps&nbsp;&divide;&nbsp;10000).
+  </p>
+
+  {% if not entries %}
+    <div class="info-block" style="padding:10px 14px; border:1px solid #c9d6e8; background:#f4f8ff;">
+      <p style="margin:4px 0;"><strong>No Q-factors configured.</strong></p>
+      <p style="margin:4px 0;" class="muted">
+        Add rows to <code>{{ defaults_path }}</code>
+        (one per Q-factor, columns
+        <code>sheet,cell,label,default_bps</code>) and they will appear
+        here. The runner safely no-ops when this list is empty.
+      </p>
+    </div>
+
+    <form method="post" style="margin-top:18px;">
+      <div class="btn-row" style="display:flex; gap:8px;">
+        <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_template_map') }}">&larr; Back</a>
+        <button type="submit" name="action" value="next" class="btn">Skip &amp; continue &rarr;</button>
+      </div>
+    </form>
+  {% else %}
+    <form method="post">
+      <table class="kv-table" style="width:100%; max-width:920px; margin-top:8px;">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Sheet / Cell</th>
+            <th>Label</th>
+            <th style="width:90px;">Default (bps)</th>
+            <th style="width:140px;">Override (bps)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in entries %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td><code>{{ r.sheet }}</code> &mdash; <code>{{ r.cell }}</code></td>
+              <td>{{ r.label }}</td>
+              <td class="muted">{{ '%.2f'|format(r.default_bps) }}</td>
+              <td>
+                <input type="hidden" name="qf_{{ loop.index0 }}_key" value="{{ r.key }}">
+                <input type="number" step="0.01" name="qf_{{ loop.index0 }}_bps"
+                  value="{{ '%.2f'|format(r.effective_bps) }}" style="width:120px;">
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <div class="btn-row" style="display:flex; gap:8px; margin-top:18px;">
+        <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_template_map') }}">&larr; Back</a>
+        <button type="submit" name="action" value="save" class="btn btn-secondary">Save</button>
+        <button type="submit" name="action" value="reset" class="btn btn-secondary"
+          onclick="return confirm('Reset all Q-factor overrides for this CU?');">Reset to defaults</button>
+        <button type="submit" name="action" value="next" class="btn">Continue &rarr;</button>
+      </div>
+    </form>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+{% block title %}Balance Adjustment{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Balance Adjustment</h2>
+  <p class="muted">
+    Side-by-side comparison of the per-pool balance from the
+    <strong>Monthly Balance file</strong> versus the sum of
+    <code>current_balance</code> in the <strong>Loan Data Extract(s)</strong>,
+    grouped by the same pool name. Use this to spot mis-mapped pool codes,
+    balance-format problems, or loans that fell into
+    &ldquo;Other/Uncategorized&rdquo; before generating a report.
+  </p>
+</div>
+
+{% if not comparison.ok %}
+  <div class="card" style="border-left:4px solid #c0392b;">
+    <strong>Couldn&rsquo;t build the full comparison.</strong>
+    <p class="muted" style="margin-top:6px;">{{ comparison.error }}</p>
+    <p class="muted" style="margin-top:6px;">
+      Finish the earlier steps first: upload the Monthly Balance file,
+      upload at least one Loan Data Extract, and set
+      <code>current_balance</code> + <code>loan_pool_code</code> on the
+      Column Mappings step.
+    </p>
+  </div>
+{% endif %}
+
+{# ── Per-pool comparison ─────────────────────────────────────── #}
+<div class="card">
+  <h3>Per-pool balance comparison
+    {% if comparison.period %}
+      <span class="muted" style="font-weight:normal;">as of {{ comparison.period }}</span>
+    {% endif %}
+  </h3>
+
+  {% if comparison.rows %}
+    <table class="table" style="margin-top:8px;">
+      <thead>
+        <tr>
+          <th>Pool</th>
+          <th style="text-align:right;">Monthly&nbsp;Balance&nbsp;file</th>
+          <th style="text-align:right;">Loan&nbsp;extract&nbsp;sum</th>
+          <th style="text-align:right;">Difference&nbsp;($)</th>
+          <th style="text-align:right;">Difference&nbsp;(%)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in comparison.rows %}
+          {% set pct_abs = (r.pct or 0) | abs %}
+          {% set warn = pct_abs >= 1.0 %}
+          {% set sev  = pct_abs >= 5.0 %}
+          <tr {% if sev %}style="background:#fdecea;"{% elif warn %}style="background:#fff8e1;"{% endif %}>
+            <td>
+              {% if r.loan_codes %}
+                <details>
+                  <summary style="cursor:pointer;"><strong>{{ r.pool }}</strong>
+                    <span class="muted" style="font-weight:normal;">({{ r.loan_codes|length }} code{{ '' if r.loan_codes|length == 1 else 's' }})</span>
+                  </summary>
+                  <table class="table" style="margin-top:6px; margin-bottom:0; background:#fafafa;">
+                    <thead>
+                      <tr>
+                        <th>Loan code</th>
+                        <th style="text-align:right;">Balance</th>
+                        <th>Reassign to pool</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                    {% for code, bal in r.loan_codes %}
+                      <tr>
+                        <td><code>{{ code }}</code></td>
+                        <td style="text-align:right;">${{ '{:,.2f}'.format(bal) }}</td>
+                        <td>
+                          <form method="post" style="display:flex; gap:6px; margin:0;">
+                            <input type="hidden" name="action" value="remap_code">
+                            <input type="hidden" name="code" value="{{ code }}">
+                            <select name="new_pool" style="min-width:180px;">
+                              {% for choice in pool_choices %}
+                                <option value="{{ choice }}"{% if choice == r.pool %} selected{% endif %}>{{ choice }}</option>
+                              {% endfor %}
+                              <option value="">(unmapped &mdash; use default)</option>
+                            </select>
+                            <button class="btn btn-secondary" type="submit" style="padding:2px 10px;">Save &amp; refresh</button>
+                          </form>
+                        </td>
+                        <td></td>
+                      </tr>
+                    {% endfor %}
+                    </tbody>
+                  </table>
+                </details>
+              {% else %}
+                <strong>{{ r.pool }}</strong>
+              {% endif %}
+            </td>
+            <td style="text-align:right;">
+              {% if r.monthly is not none %}${{ '{:,.2f}'.format(r.monthly) }}{% else %}<span class="muted">&mdash;</span>{% endif %}
+            </td>
+            <td style="text-align:right;">
+              {% if r.loans is not none %}${{ '{:,.2f}'.format(r.loans) }}{% else %}<span class="muted">&mdash;</span>{% endif %}
+            </td>
+            <td style="text-align:right;">
+              {% if r.diff is not none %}
+                {% if r.diff >= 0 %}+{% endif %}${{ '{:,.2f}'.format(r.diff) }}
+              {% else %}<span class="muted">&mdash;</span>{% endif %}
+            </td>
+            <td style="text-align:right;">
+              {% if r.pct is not none %}
+                {% if r.pct >= 0 %}+{% endif %}{{ '{:,.2f}'.format(r.pct) }}%
+              {% else %}<span class="muted">&mdash;</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr style="font-weight:bold;border-top:2px solid #333;">
+          <td>Totals</td>
+          <td style="text-align:right;">${{ '{:,.2f}'.format(comparison.totals.monthly) }}</td>
+          <td style="text-align:right;">${{ '{:,.2f}'.format(comparison.totals.loans) }}</td>
+          <td style="text-align:right;">
+            {% if comparison.totals.diff >= 0 %}+{% endif %}${{ '{:,.2f}'.format(comparison.totals.diff) }}
+          </td>
+          <td></td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <p class="muted" style="margin-top:8px;">
+      Rows highlighted yellow differ by 1% or more; red rows differ by 5% or more.
+      Expand a pool to see its loan codes and reassign any code that&rsquo;s
+      landed in the wrong pool. Each reassignment saves immediately and
+      refreshes the totals.
+    </p>
+
+    <form method="post" style="margin-top:12px; display:flex; gap:8px;">
+      <button class="btn btn-secondary" type="submit" name="action" value="refresh">
+        Refresh totals
+      </button>
+    </form>
+  {% else %}
+    <p class="muted">No pools to compare yet.</p>
+  {% endif %}
+</div>
+
+{# ── Loan-extract diagnostics ─────────────────────────────────── #}
+{% if comparison.loan_summary.file_count %}
+<div class="card">
+  <h3>Loan extract summary</h3>
+  <p class="muted">
+    Read {{ comparison.loan_summary.row_count }} loan(s) from
+    {{ comparison.loan_summary.file_count }} file(s).
+    {% if comparison.loan_summary.default_total %}
+      <strong>${{ '{:,.2f}'.format(comparison.loan_summary.default_total) }}</strong>
+      fell into the default <em>Other/Uncategorized</em> pool.
+    {% endif %}
+  </p>
+  <table class="table" style="margin-top:8px;">
+    <thead><tr><th>File</th><th style="text-align:right;">Rows</th><th style="text-align:right;">Total balance</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for f in comparison.loan_summary.files %}
+      <tr>
+        <td><code>{{ f.name }}</code></td>
+        <td style="text-align:right;">{{ f.rows }}</td>
+        <td style="text-align:right;">${{ '{:,.2f}'.format(f.total) }}</td>
+        <td>{% if f.error %}<span style="color:#c0392b;">{{ f.error }}</span>{% else %}OK{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if comparison.loan_summary.unmapped_codes %}
+    <h4 style="margin-top:16px;">Raw codes not in your pool map</h4>
+    <p class="muted">
+      Add these codes on the Loan Code Mapping step (or upload an updated
+      pool-map file there) so they roll up into the right pool.
+    </p>
+    <table class="table">
+      <thead><tr><th>Code</th><th style="text-align:right;">Balance</th></tr></thead>
+      <tbody>
+      {% for code, bal in comparison.loan_summary.unmapped_codes[:30] %}
+        <tr>
+          <td><code>{{ code }}</code></td>
+          <td style="text-align:right;">${{ '{:,.2f}'.format(bal) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if comparison.loan_summary.unmapped_codes|length > 30 %}
+      <p class="muted">&hellip; and {{ comparison.loan_summary.unmapped_codes|length - 30 }} more.</p>
+    {% endif %}
+  {% endif %}
+</div>
+{% endif %}
+
+{# ── Monthly file diagnostics ─────────────────────────────────── #}
+{% if comparison.monthly_summary.raw_rows %}
+<div class="card">
+  <h3>Monthly Balance file labels</h3>
+  <p class="muted">
+    What the parser found in the Monthly Balance file for
+    {{ comparison.period or 'the latest period' }}, with the pool each label
+    is mapped to. Adjust the mapping on the Monthly Balance File step.
+  </p>
+  <table class="table">
+    <thead><tr><th>Label</th><th style="text-align:right;">Balance</th><th>Mapped pool</th></tr></thead>
+    <tbody>
+    {% for r in comparison.monthly_summary.raw_rows %}
+      <tr>
+        <td>{{ r.label }}</td>
+        <td style="text-align:right;">
+          {% if r.balance is not none %}${{ '{:,.2f}'.format(r.balance) }}{% else %}<span class="muted">&mdash;</span>{% endif %}
+        </td>
+        <td>
+          {% if r.mapped_pool %}{{ r.mapped_pool }}{% else %}<span class="muted">(ignored)</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{# ── Nav ─────────────────────────────────────────────────────── #}
+<form method="post" style="margin-top:16px; display:flex; gap:8px; justify-content:space-between;">
+  <a class="btn btn-secondary" href="{{ url_for('setup.step4_pools') }}">&larr; Back</a>
+  <button class="btn btn-primary" type="submit" name="action" value="next">
+    Next: Charge-Offs &amp; Recoveries &rarr;
+  </button>
+</form>
+
+{% endblock %}

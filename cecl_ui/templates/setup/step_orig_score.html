@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}Step &mdash; Original Score Baseline{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Original Credit Score Baseline <span class="muted">(optional)</span></h2>
+  <p class="muted">
+    Some loan-data extracts &mdash; most commonly VISA / credit-card files &mdash;
+    don't carry the member's <em>original</em> credit score. If you've already
+    captured those baseline scores elsewhere (e.g. by hand on the WARM
+    workbook), upload a one-time spreadsheet here and the importer will use
+    it to fill in <code>original_fico_score</code> for any loan whose extract
+    is missing that field.
+  </p>
+  <p class="muted">
+    The file needs a header row with at least <strong>Member #</strong> and
+    <strong>Original FICO</strong>. A <strong>Loan Suffix</strong> column is
+    optional &mdash; if you provide one, the lookup is tightened to the
+    specific loan; otherwise every loan that member has will inherit the
+    same baseline score.
+  </p>
+
+  {% set osb = state.orig_score_baseline %}
+
+  {# ── Upload form ────────────────────────────────────────────── #}
+  <form method="post" enctype="multipart/form-data" style="margin-top:14px;">
+    {% if osb.uploaded_filename %}
+    <p style="margin:6px 0;">
+      Currently using: <code>{{ osb.uploaded_filename }}</code>
+      &mdash; <strong>{{ osb.row_count }}</strong> baseline score(s) parsed.
+      <button class="btn btn-secondary" type="submit" name="action" value="clear_baseline"
+              formnovalidate style="margin-left:12px;">Clear</button>
+    </p>
+    {% endif %}
+    <div class="form-row">
+      <div style="grid-column: 1 / -1;">
+        <label>Choose baseline file (.csv / .xlsx)
+          <input type="file" name="baseline_file" accept=".xlsx,.xls,.csv">
+        </label>
+      </div>
+    </div>
+    <button class="btn btn-secondary" type="submit" name="action" value="upload_baseline">
+      {% if osb.uploaded_filename %}Replace file{% else %}Upload file{% endif %}
+    </button>
+  </form>
+
+  {# ── Column picker + preview (only when a file is loaded) ────── #}
+  {% if osb.uploaded_filename and osb.headers %}
+  <h3 style="margin-top:24px;">Column mapping</h3>
+  <form method="post">
+    <div class="form-row">
+      <div><label>Member-# column
+        <select name="member_column">
+          <option value="">&mdash; choose column &mdash;</option>
+          {% for h in osb.headers %}
+            {% if h %}
+            <option value="{{ h }}" {% if osb.member_column == h %}selected{% endif %}>{{ h }}</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+      </label></div>
+      <div><label>Loan-suffix column <span class="muted">(optional)</span>
+        <select name="suffix_column">
+          <option value="">&mdash; none &mdash;</option>
+          {% for h in osb.headers %}
+            {% if h %}
+            <option value="{{ h }}" {% if osb.suffix_column == h %}selected{% endif %}>{{ h }}</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+      </label></div>
+      <div><label>Original FICO column
+        <select name="score_column">
+          <option value="">&mdash; choose column &mdash;</option>
+          {% for h in osb.headers %}
+            {% if h %}
+            <option value="{{ h }}" {% if osb.score_column == h %}selected{% endif %}>{{ h }}</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+      </label></div>
+    </div>
+
+    {# ── Pool scope ─────────────────────────────────────────────── #}
+    {% set pool_list = [] %}
+    {% for ps in state.pool_settings or [] %}
+      {% if ps.name and pool_list.append(ps.name) %}{% endif %}
+    {% endfor %}
+    {% if not pool_list %}
+      {% for p in (state.warm.pools if state.warm else []) or [] %}
+        {% if p and pool_list.append(p) %}{% endif %}
+      {% endfor %}
+    {% endif %}
+    {% if pool_list %}
+    <div style="margin-top:14px; padding:12px 14px; background:#fafbfc;
+                border:1px solid #d8dde2; border-radius:6px;">
+      <strong>Apply baseline to which pool(s)?</strong>
+      <div class="muted" style="font-size:12px; margin:4px 0 10px;">
+        Leave all unchecked to apply globally. Typical use: check only the
+        pool whose extract is missing original scores (e.g. Visa).
+      </div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:6px 14px;">
+        {% for p in pool_list %}
+        <label style="font-weight:normal;">
+          <input type="checkbox" name="apply_pools" value="{{ p }}"
+                 {% if p in (osb.pools or []) %}checked{% endif %}>
+          {{ p }}
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <button class="btn btn-secondary" type="submit" name="action" value="save_columns" style="margin-top:12px;">
+      Save column mapping &amp; pool scope
+    </button>
+  </form>
+
+  {% if osb.preview %}
+  <h4 style="margin-top:18px;">Preview <span class="muted">(first {{ osb.preview|length }} rows)</span></h4>
+  <div style="overflow:auto; max-width:100%;">
+    <table style="border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr>
+          {% for h in osb.headers %}
+            <th style="border:1px solid #ccc; padding:4px 8px; background:#f6f8fa; text-align:left;">{{ h }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in osb.preview %}
+        <tr>
+          {% for cell in row %}
+            <td style="border:1px solid #eee; padding:4px 8px;">{{ cell }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if osb.row_count %}
+  <div style="margin-top:16px; padding:12px 14px; background:#f0f7ea;
+              border:1px solid #b7d9a0; border-radius:6px; font-size:13px;">
+    <strong>{{ osb.row_count }}</strong> baseline score(s) will be applied at
+    import time to loans whose <code>original_fico_score</code> is blank
+    {% if osb.pools %}
+      in the pool(s): <strong>{{ osb.pools|join(', ') }}</strong>.
+    {% else %}
+      <em>across all pools</em> (no pool scope set).
+    {% endif %}
+    {% if not osb.suffix_column %}
+    <br><span class="muted">No suffix column mapped &mdash; the baseline
+    score will fill <em>every</em> loan for each listed member (within the
+    scoped pool(s)).</span>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {# ── Navigation ─────────────────────────────────────────────── #}
+  <form method="post" style="margin-top:24px;">
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step6_credit_pull') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit" name="action" value="next">
+        {% if osb.row_count %}
+          Next: Loan Data Extract(s) &rarr;
+        {% else %}
+          Skip &amp; continue &rarr;
+        {% endif %}
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

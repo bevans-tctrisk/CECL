@@ -1,0 +1,21 @@
+field_code,loan_code,description
+A681,Unsecured Credit Card,YTD recoveries — unsecured credit card loans
+A137,Payday Alternative Loans,YTD recoveries — payday alternative loans (PALs) (FCU only)
+A551T,Non-Federally Guaranteed Student,YTD recoveries — non-federally guaranteed student loans
+ACH0008,All Other Unsecured,YTD recoveries — all other unsecured loans / lines of credit
+A551C1,New Vehicles,YTD recoveries — new vehicle loans
+A551C2,Used Vehicles,YTD recoveries — used vehicle loans
+A551D,Leases Receivable,YTD recoveries — leases receivable
+ACH0016,All Other Secured Non-RE,YTD recoveries — all other secured non-real-estate loans / lines of credit
+ACH0018,First Liens,YTD recoveries — secured by first lien on a 1-4 family residential property
+ACH0020,Junior Liens,YTD recoveries — secured by junior lien on a 1-4 family residential property
+ACH0022,Other Real Estate,YTD recoveries — all other (non-commercial) real estate loans / lines of credit
+ACH0024,Construction and Development,YTD recoveries — construction and development loans
+ACH0026,Secured by Farmland,YTD recoveries — secured by farmland
+ACH0028,Secured by Multifamily,YTD recoveries — secured by multifamily property
+ACH0030,Owner-Occupied Non-Farm Non-Residential,YTD recoveries — secured by owner-occupied non-farm non-residential property
+ACH0032,Non-Owner-Occupied Non-Farm Non-Residential,YTD recoveries — secured by non-owner-occupied non-farm non-residential property
+ACH0034,Agricultural,YTD recoveries — loans to finance agricultural production and other loans to farmers
+ACH0036,Commercial and Industrial,YTD recoveries — commercial and industrial loans
+ACH0038,Unsecured Commercial,YTD recoveries — unsecured commercial loans
+ACH0040,Unsecured Revolving Commercial,YTD recoveries — unsecured revolving lines of credit for commercial purposes

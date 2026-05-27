@@ -1,0 +1,289 @@
+{% extends "base.html" %}
+{% block title %}Column Mappings{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Column Mappings</h2>
+  <p class="muted">Map each system field to the column in this CU's loan
+    file. <strong>Required</strong> fields are marked with <strong>*</strong>.
+    When you uploaded multiple loan-data extracts on the previous step,
+    each one gets its own mapping below.</p>
+
+  {% if not files_view %}
+    <p>
+      <em>No loan-data files have been uploaded yet.</em>
+      <a href="{{ url_for('setup.step2_sample') }}">Upload a loan-data
+        extract</a> first, then come back here to map columns.
+    </p>
+  {% else %}
+
+  <form method="post">
+
+    {% macro file_block(fv) %}
+      {% set prefix = "f" ~ fv.idx ~ "__" %}
+      {% set headers = fv.headers %}
+      {% set has_headers = headers | length > 0 %}
+      {% set suggestions = fv.suggestions %}
+      {% set mapping = fv.mapping %}
+      {% set learned_map = fv.learned %}
+      {% set header_detected = fv.has_header %}
+      {% set first_row = (fv.sample_rows[0] if fv.sample_rows else {}) %}
+      {% set ma = fv.member_account %}
+      {% set ma_mode = ma.get('mode', 'fixed_suffix') %}
+      {% set ma_suffix = ma.get('suffix_length', 3) %}
+      {% set ma_delim = ma.get('delimiter', '-') %}
+
+      {% macro hlabel(h) -%}
+        {%- if not header_detected and first_row.get(h) -%}
+          {{ h }} ({{ first_row.get(h) }})
+        {%- else -%}
+          {{ h }}
+        {%- endif -%}
+      {%- endmacro %}
+
+      {% macro field(name, label, required=False) %}
+        {% set current = mapping.get(name, '') %}
+        {% set suggested = suggestions.get(name, '') %}
+        {% set learned = (learned_map or {}).get(name, '') %}
+        {% set effective = current if current else (learned if learned else '') %}
+        {% set learned_active = (not current) and learned and (effective == learned) %}
+        <div>
+          <label>{{ label }}{% if required %} *{% endif %}
+            {% if has_headers %}
+              <select name="{{ prefix }}{{ name }}" {% if required %}required{% endif %}>
+                {% if not required %}<option value="">&mdash; none &mdash;</option>{% endif %}
+                {% for h in headers %}
+                  <option value="{{ h }}" {% if h == effective %}selected{% endif %}>{{ hlabel(h) }}</option>
+                {% endfor %}
+                {% if current and current not in headers %}
+                  <option value="{{ current }}" selected>{{ current }} (not in current sample)</option>
+                {% endif %}
+              </select>
+            {% else %}
+              <input type="text" name="{{ prefix }}{{ name }}" value="{{ effective }}"
+                     {% if required %}required{% endif %}>
+            {% endif %}
+            {% if suggested and suggested == current %}
+              <span class="help" style="color:#2a7;">&#10003; auto-suggested from sample</span>
+            {% elif learned_active %}
+              <span class="help" style="color:#26a;">&#9733; suggested from prior credit unions</span>
+            {% elif suggested %}
+              <span class="help">Suggested: <code>{{ suggested }}</code></span>
+            {% elif learned %}
+              <span class="help">Prior CUs commonly use: <code>{{ learned }}</code></span>
+            {% endif %}
+          </label>
+        </div>
+      {% endmacro %}
+
+      <h3>Loan-data extract format</h3>
+      <div class="form-row">
+        <div>
+          <label style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="{{ prefix }}has_header"
+                   {% if fv.has_header %}checked{% endif %}>
+            <strong>This file includes a header row</strong>
+          </label>
+          <span class="help">Reflects what was detected on the
+            <a href="{{ url_for('setup.step2_sample') }}">Loan Data Extract(s)</a>
+            step. To change <em>which</em> row is the header row, use the
+            per-file override on that previous step.</span>
+        </div>
+      </div>
+
+      <h3>Member &amp; Account number</h3>
+      <p class="muted">Pick the shape that matches this file's member /
+        account / suffix layout.</p>
+
+      <div class="form-row">
+        <div>
+          <label style="display:flex; align-items:flex-start; gap:8px;">
+            <input type="radio" name="{{ prefix }}member_account_mode" value="fixed_suffix"
+                   {% if ma_mode == 'fixed_suffix' %}checked{% endif %}
+                   onchange="updateMemberAccountMode({{ fv.idx }})">
+            <span><strong>Combined &mdash; fixed suffix length</strong>
+              <span class="help" style="display:block;">One column. The last
+                N characters are the account / suffix.</span>
+            </span>
+          </label>
+        </div>
+        <div>
+          <label style="display:flex; align-items:flex-start; gap:8px;">
+            <input type="radio" name="{{ prefix }}member_account_mode" value="delimiter"
+                   {% if ma_mode == 'delimiter' %}checked{% endif %}
+                   onchange="updateMemberAccountMode({{ fv.idx }})">
+            <span><strong>Combined &mdash; separated by character</strong>
+              <span class="help" style="display:block;">One column split by
+                a delimiter such as <code>-</code> or <code>L</code>.</span>
+            </span>
+          </label>
+        </div>
+        <div>
+          <label style="display:flex; align-items:flex-start; gap:8px;">
+            <input type="radio" name="{{ prefix }}member_account_mode" value="split"
+                   {% if ma_mode == 'split' %}checked{% endif %}
+                   onchange="updateMemberAccountMode({{ fv.idx }})">
+            <span><strong>Separate columns</strong>
+              <span class="help" style="display:block;">Member and account
+                live in two different columns.</span>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div class="form-row" id="ma-fields-fixed_suffix-{{ fv.idx }}"
+           style="{% if ma_mode != 'fixed_suffix' %}display:none;{% endif %}">
+        {{ field('member_number', 'Combined Member / Account column', required=True) }}
+        <div>
+          <label>Account suffix length *
+            <input type="number" name="{{ prefix }}member_account_suffix_length"
+                   value="{{ ma_suffix }}" min="0" max="9">
+            <span class="help">Trailing chars of the combined value
+              (typically 2&ndash;4).</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="form-row" id="ma-fields-delimiter-{{ fv.idx }}"
+           style="{% if ma_mode != 'delimiter' %}display:none;{% endif %}">
+        {{ field('member_number', 'Combined Member / Account column', required=True) }}
+        <div>
+          <label>Delimiter character *
+            <input type="text" name="{{ prefix }}member_account_delimiter"
+                   value="{{ ma_delim }}" maxlength="3" size="4">
+            <span class="help">The character that separates member from
+              account, e.g. <code>-</code> or <code>L</code>.</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="form-row" id="ma-fields-split-{{ fv.idx }}"
+           style="{% if ma_mode != 'split' %}display:none;{% endif %}">
+        {{ field('member_number', 'Member number column', required=True) }}
+        {{ field('loan_suffix', 'Account / Suffix / Loan Suffix / Note column', required=True) }}
+      </div>
+
+      <h3>Monthly filename pattern</h3>
+      <div class="form-row">
+        <div>
+          <label>Match monthly imports against this regex
+            <input type="text" name="{{ prefix }}file_pattern"
+                   value="{{ fv.file_pattern }}"
+                   placeholder="(?i)mortgages" style="width:320px;">
+            <span class="help">When you run a report, the importer scans
+              the loan-data folder and routes each file to the mapping
+              whose pattern matches the filename. The default seed comes
+              from your sample
+              {% if fv.sample_filename %}(<code>{{ fv.sample_filename }}</code>){% endif %};
+              edit it if monthly files use a different naming convention.
+              Use a Python regex; <code>(?i)</code> makes it case-insensitive.
+              Leave blank if this is your only file shape and you want the
+              top-level <strong>File Format</strong> pattern to match it.</span>
+          </label>
+        </div>
+      </div>
+
+      <h3>Required</h3>
+      <div class="form-row">
+        {{ field('current_balance',     'Current balance',         required=True) }}
+        {{ field('loan_pool_code',      'Loan pool code') }}
+        {{ field('days_delinquent',     'Days delinquent',         required=True) }}
+      </div>
+      <div class="form-row">
+        <div>
+          <label>...or a fixed loan pool code for every row in this file
+            <input type="text" name="{{ prefix }}loan_pool_code_static"
+                   value="{{ mapping.get('loan_pool_code_static', '') }}"
+                   placeholder="e.g. AUTO" style="width:160px;">
+            <span class="help">Use this when the file has no pool-code
+              column because every loan in it shares the same code.
+              The fixed value is matched against
+              <strong>Loan Code Mapping</strong> like any other code.
+              Leave blank if the column above is set.</span>
+          </label>
+        </div>
+      </div>
+
+      <h3>Optional <span class="muted">(improves report detail)</span></h3>
+      <div class="form-row">
+        {{ field('original_fico_score',    'Original FICO score') }}
+        {{ field('interest_rate',          'Interest rate') }}
+        {{ field('open_date',              'Open / origination date') }}
+        {{ field('original_loan_amount',   'Original loan amount') }}
+        {{ field('total_available_credit', 'Total available credit') }}
+      </div>
+
+      {% if fv.sample_rows %}
+        <details style="margin-top:12px;">
+          <summary><strong>Sample preview &mdash;
+            first {{ fv.sample_rows | length }} rows</strong></summary>
+          <div style="overflow-x:auto; margin-top:8px;">
+            <table>
+              <thead>
+                <tr>
+                  {% for h in headers %}<th><code>{{ h }}</code>{% if not header_detected and first_row.get(h) %} <span class="muted">({{ first_row.get(h) }})</span>{% endif %}</th>{% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in fv.sample_rows %}
+                  <tr>
+                    {% for h in headers %}<td>{{ row.get(h, '') }}</td>{% endfor %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      {% endif %}
+    {% endmacro %}
+
+    {% for fv in files_view %}
+      <details class="card" style="margin: 12px 0;" {% if loop.first %}open{% endif %}>
+        <summary>
+          <strong>File {{ loop.index }} of {{ files_view | length }}:</strong>
+          <code>{{ fv.name }}</code>
+          &mdash; {{ fv.headers | length }} columns
+          {% if fv.signature %}<span class="muted">&middot; sig
+            <code>{{ fv.signature[:8] }}</code></span>{% endif %}
+        </summary>
+        <div style="margin-top: 12px;">
+          {{ file_block(fv) }}
+        </div>
+      </details>
+    {% endfor %}
+
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step2_sample') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit">Save all &amp; Next: Loan Code Mapping &rarr;</button>
+    </div>
+  </form>
+
+  <script>
+    function updateMemberAccountMode(idx) {
+      var modes = ['fixed_suffix', 'delimiter', 'split'];
+      var picked = document.querySelector(
+        'input[name="f' + idx + '__member_account_mode"]:checked'
+      );
+      var current = picked ? picked.value : 'fixed_suffix';
+      modes.forEach(function (m) {
+        var el = document.getElementById('ma-fields-' + m + '-' + idx);
+        if (!el) return;
+        el.style.display = (m === current) ? '' : 'none';
+        el.querySelectorAll('input, select').forEach(function (ctrl) {
+          ctrl.disabled = (m !== current);
+        });
+      });
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+      document
+        .querySelectorAll('input[type="radio"][name$="__member_account_mode"]')
+        .forEach(function (r) {
+          var m = r.name.match(/^f(\d+)__/);
+          if (m) updateMemberAccountMode(parseInt(m[1], 10));
+        });
+    });
+  </script>
+  {% endif %}
+</div>
+{% endblock %}

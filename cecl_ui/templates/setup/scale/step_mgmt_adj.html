@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}SCALE — Management Adjustments{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Management Adjustments</h2>
+  <p class="muted">
+    These values are written to the <code>Management Adjustment</code>
+    tab of the SCALE workbook. Each loan pool can either use the
+    <strong>Default</strong> rate (admin-managed, currently
+    <strong>{{ '%.4f'|format(admin_default_pct * 100) }}%</strong>) or
+    a per-pool <strong>Hard Code</strong> rate. The workbook formula
+    only applies the default when the pool's
+    <em>CECL Lifetime Loss Rate</em> and any hard-code value are both
+    zero, mirroring the Migration model.
+  </p>
+
+  {% if template_missing %}
+    <div class="info-block" style="padding:10px 14px; border:1px solid #c9d6e8; background:#fff4e6;">
+      <p style="margin:4px 0;"><strong>Template not resolved yet.</strong></p>
+      <p style="margin:4px 0;" class="muted">
+        Pick a target period on the Solr step and confirm the template
+        on the Template &amp; Map step. Pool names are read from that
+        template's <code>Scale Calculation</code> sheet.
+      </p>
+    </div>
+    <form method="post" style="margin-top:18px;">
+      <div class="btn-row" style="display:flex; gap:8px;">
+        <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_qfactors') }}">&larr; Back</a>
+        <button type="submit" name="action" value="next" class="btn">Skip &amp; continue &rarr;</button>
+      </div>
+    </form>
+  {% else %}
+    <form method="post">
+      <div style="margin:14px 0; padding:10px 14px; border:1px solid #c9d6e8; background:#f4f8ff;">
+        <label for="default_pct" style="font-weight:600;">
+          Default Mgmt Adj (%)
+        </label>
+        <input type="number" id="default_pct" name="default_pct" step="0.0001"
+               value="{{ '%.4f'|format(default_pct * 100) }}"
+               style="width:120px; margin-left:8px;">
+        <span class="muted" style="margin-left:10px;">
+          Written to <code>Management Adjustment!D2</code>. Admin default:
+          <strong>{{ '%.4f'|format(admin_default_pct * 100) }}%</strong>.
+        </span>
+      </div>
+
+      <table class="kv-table" style="width:100%; max-width:1100px; margin-top:8px;">
+        <thead>
+          <tr>
+            <th style="width:32px;">#</th>
+            <th>Loan Pool</th>
+            <th style="width:170px;">Hard Code Mgmt Adj (%)</th>
+            <th style="width:130px; text-align:center;">Use Default</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in pool_rows %}
+            <tr>
+              <td class="muted">{{ loop.index }}</td>
+              <td>{{ p.name }}</td>
+              <td>
+                <input type="number" step="0.0001"
+                       name="pool_pct__{{ p.idx }}"
+                       value="{{ '%.4f'|format(p.hard_code_pct * 100) }}"
+                       style="width:140px;">
+              </td>
+              <td style="text-align:center;">
+                <input type="checkbox"
+                       name="pool_use_default__{{ p.idx }}"
+                       value="1"
+                       {% if p.use_default %}checked{% endif %}>
+              </td>
+            </tr>
+          {% endfor %}
+          {% if not pool_rows %}
+            <tr><td colspan="4" class="muted">
+              No pool names found in template's
+              <code>Scale Calculation</code> sheet.
+            </td></tr>
+          {% endif %}
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="4" style="padding-top:14px; font-weight:600;">
+              Whole-portfolio overlay
+              <span class="muted" style="font-weight:400;">
+                (Management Adjustment row 18 &mdash; applies to entire loan portfolio)
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <td class="muted">&mdash;</td>
+            <td>Management Adjustment for Historical Loss Experience</td>
+            <td>
+              <input type="number" step="0.0001" name="portfolio_pct"
+                     value="{{ '%.4f'|format(portfolio.hard_code_pct * 100) }}"
+                     style="width:140px;">
+            </td>
+            <td style="text-align:center;">
+              <input type="checkbox" name="portfolio_use_default" value="1"
+                     {% if portfolio.use_default %}checked{% endif %}>
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+
+      <p class="muted" style="margin-top:14px;">
+        Pool names read from <code>{{ template_path }}</code>.
+      </p>
+
+      <div class="btn-row" style="display:flex; gap:8px; margin-top:18px;">
+        <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_qfactors') }}">&larr; Back</a>
+        <button type="submit" name="action" value="save" class="btn btn-secondary">Save</button>
+        <button type="submit" name="action" value="reset" class="btn btn-secondary"
+          onclick="return confirm('Reset all Management Adjustment overrides for this CU?');">Reset to defaults</button>
+        <button type="submit" name="action" value="next" class="btn">Continue &rarr;</button>
+      </div>
+    </form>
+  {% endif %}
+</div>
+{% endblock %}

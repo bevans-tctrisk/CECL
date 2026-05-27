@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Economic Data{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Economic Data (Environmental Factors)</h2>
+  <p class="muted">These figures feed the CU's environmental-factor calculation
+    (the <em>Q-factor</em> overlay applied on top of the WARM baseline).
+    Pick a state and county, then click <strong>Auto-fetch</strong> to pull the
+    latest values from the BLS, Census Bureau, and U.S. Courts public APIs.
+    You can override anything by hand.</p>
+
+  <form method="post">
+    <div class="form-row">
+      <div>
+        <label>State *
+          <select name="state" id="state-select" required>
+            <option value="">— Select a state —</option>
+            {% for s in states %}
+              <option value="{{ s.name }}"
+                      {% if s.name == state.economic_data.state %}selected{% endif %}>
+                {{ s.name }}
+              </option>
+            {% endfor %}
+          </select>
+          <span class="help">Pre-filled from Step 1; change here only if the
+            CU's primary market is different.</span>
+        </label>
+      </div>
+      <div>
+        <label>County
+          <select name="county" id="county-select"
+                  data-current="{{ state.economic_data.county }}">
+            <option value="">— Select a state first —</option>
+          </select>
+          <span class="help" id="county-status"></span>
+        </label>
+      </div>
+    </div>
+
+    <h3 style="margin-top:24px;">Indicators</h3>
+    <div class="form-row">
+      <div>
+        <label>Unemployment rate (decimal)
+          <input type="number" step="0.001" min="0" max="1"
+                 name="unemployment_rate"
+                 value="{{ state.economic_data.unemployment_rate }}">
+          <span class="help">e.g., <code>0.038</code> = 3.8%.
+            Source: BLS LAUS (state-level annual average).</span>
+        </label>
+      </div>
+      <div>
+        <label>Population
+          <input type="number" min="0" name="population"
+                 value="{{ state.economic_data.population }}">
+          <span class="help">Source: U.S. Census ACS 1-year estimates
+            (state-level).</span>
+        </label>
+      </div>
+      <div>
+        <label>Bankruptcies (count)
+          <input type="number" min="0" name="bankruptcies"
+                 value="{{ state.economic_data.bankruptcies }}">
+          <span class="help">Source: U.S. Courts Table F-2 (state total,
+            most recent fiscal-year period).</span>
+        </label>
+      </div>
+      <div>
+        <label>Foreclosures (count)
+          <input type="number" min="0" name="foreclosures"
+                 value="{{ state.economic_data.foreclosures }}">
+          <span class="help"><strong>Manual entry.</strong> Federal APIs do
+            not publish foreclosure counts; pull a county-level figure from
+            your state recorder, ATTOM, or RealtyTrac if available.</span>
+        </label>
+      </div>
+    </div>
+
+    {% if fetched and 'error' not in fetched %}
+      <div class="flash info" style="margin-top:16px;">
+        <strong>Last auto-fetch result</strong>
+        {% if fetched.get('_sources') %}
+          <table style="margin-top:8px; width:100%; font-size:0.9em;">
+            <thead>
+              <tr>
+                <th style="text-align:left;">Field</th>
+                <th style="text-align:left;">Value</th>
+                <th style="text-align:left;">Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for k, src in fetched.get('_sources', {}).items() %}
+                <tr>
+                  <td>{{ k.replace('_', ' ') }}</td>
+                  <td>
+                    {% set v = fetched.get(k) %}
+                    {% if k == 'unemployment_rate' and v is not none %}
+                      {{ '%.3f'|format(v) }}
+                      <span class="muted">({{ '%.1f'|format(v * 100) }}%)</span>
+                    {% elif v is not none %}
+                      {{ '{:,}'.format(v) if v is number else v }}
+                    {% else %}
+                      <em class="muted">not available</em>
+                    {% endif %}
+                  </td>
+                  <td><code>{{ src }}</code></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <code>{{ fetched }}</code>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step6_credit_pull') }}">&larr; Back</a>
+      <div>
+        <button class="btn btn-secondary" type="submit" name="action" value="fetch">Auto-fetch from BLS / Census / Courts</button>
+        <button class="btn btn-primary"   type="submit" name="action" value="next">Next: Mgmt Adj &rarr;</button>
+      </div>
+    </div>
+  </form>
+</div>
+{% endblock %}
+

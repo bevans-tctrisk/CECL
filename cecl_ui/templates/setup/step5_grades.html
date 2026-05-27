@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}Credit Grades and Business Risk Ratings{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Credit Grades and Business Risk Ratings</h2>
+  <p class="muted">Each band defines a Credit Score range that loans in
+    that band will be classified under. Defaults shown are the standard
+    6-tier industry layout (A+ through E) &mdash; adjust as needed.
+    Not all credit unions use FICO &mdash; "Credit Score" here means
+    whichever bureau score this CU pulls.</p>
+
+  {% set warm_grades = (state.warm and state.warm.grades) or [] %}
+  {% if warm_grades %}
+    <div class="alert alert-info" style="margin-bottom:16px;">
+      <strong>WARM workbook supplied {{ warm_grades | length }} grade band(s).</strong>
+      They were seeded into this step automatically. Use the buttons below to
+      reload them if you've made changes you'd like to discard.
+    </div>
+  {% endif %}
+
+  {# Either the just-submitted draft (on validation error) or the saved state. #}
+  {% set rows = draft_grades if draft_grades is defined else state.credit_grades %}
+
+  <form method="post">
+    <div class="grade-row" style="font-weight:700;">
+      <div>Label</div>
+      <div>Min Credit Score</div>
+      <div>Max Credit Score</div>
+      <div></div>
+    </div>
+    <div id="grade-rows">
+      {% for g in rows %}
+      <div class="grade-row">
+        <input type="text"   name="grade_label" value="{{ g.label }}">
+        <input type="number" name="grade_min"   value="{{ g.min_score }}" min="0" max="900">
+        <input type="number" name="grade_max"   value="{{ g.max_score }}" min="0" max="900">
+        <button type="button" class="icon-btn" onclick="this.parentElement.remove()" title="Remove band">&times;</button>
+      </div>
+      {% endfor %}
+    </div>
+    <button type="button" class="btn btn-secondary" onclick="addGradeRow()" style="margin-top:8px;">+ Add grade</button>
+
+    <label style="margin-top:24px; display:block;">Label for missing / zero scores
+      <input type="text" name="no_score_label" value="{{ state.no_score_label }}">
+      <span class="muted" style="display:block; font-size:0.9em;">
+        Loans whose Credit Score falls in a gap above (or is missing entirely) get bucketed under this label.
+      </span>
+    </label>
+
+    {# ── Business Risk Ratings (optional) ───────────────────── #}
+    <h3 style="margin-top:24px; padding-top:14px; border-top:2px solid #ddd;">
+      Business Risk Ratings
+      <span class="badge-optional">Optional</span>
+    </h3>
+    <label class="checkbox-label" style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+      <input type="checkbox" name="uses_brr" id="uses-brr-cb"
+             {% if state.uses_brr %}checked{% endif %}
+             onchange="document.getElementById('brr-section').hidden = !this.checked;">
+      <strong>This credit union uses Business Risk Ratings</strong>
+    </label>
+    <div id="brr-section" {% if not state.uses_brr %}hidden{% endif %}>
+      <p class="muted">
+        Define each rating bucket the CU uses for business loans. The
+        <em>Label</em> is how the rating appears (e.g. <code>Good</code>,
+        <code>Watch</code>, <code>Substandard</code>). The
+        <em>Criteria</em> describes the value found in the loan-data
+        extract that maps a loan into this bucket (e.g. <code>1</code>,
+        <code>2 or 3</code>, <code>RR-4</code>).
+      </p>
+      <table id="brr-table" style="width:100%; border-collapse:collapse; font-size:13px;">
+        <thead>
+          <tr style="background:#eef; text-align:left;">
+            <th style="padding:6px 8px; width:30%;">Label</th>
+            <th style="padding:6px 8px;">Criteria (value in loan-data extract)</th>
+            <th style="padding:6px 8px; width:1%;"></th>
+          </tr>
+        </thead>
+        <tbody id="brr-tbody">
+          {% set brr_rows = state.business_risk_ratings or [] %}
+          {% if brr_rows %}
+            {% for r in brr_rows %}
+            <tr class="brr-row" style="border-bottom:1px solid #eee;">
+              <td style="padding:4px 8px;">
+                <input type="text" name="brr_label" value="{{ r.label or '' }}" style="width:100%;">
+              </td>
+              <td style="padding:4px 8px;">
+                <input type="text" name="brr_criteria" value="{{ r.criteria or '' }}" style="width:100%;">
+              </td>
+              <td style="padding:4px 8px;">
+                <button type="button" class="btn btn-secondary brr-remove"
+                        style="padding:2px 8px;">Remove</button>
+              </td>
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr class="brr-row" style="border-bottom:1px solid #eee;">
+              <td style="padding:4px 8px;">
+                <input type="text" name="brr_label" value="" style="width:100%;">
+              </td>
+              <td style="padding:4px 8px;">
+                <input type="text" name="brr_criteria" value="" style="width:100%;">
+              </td>
+              <td style="padding:4px 8px;">
+                <button type="button" class="btn btn-secondary brr-remove"
+                        style="padding:2px 8px;">Remove</button>
+              </td>
+            </tr>
+          {% endif %}
+        </tbody>
+      </table>
+      <div style="margin-top:10px;">
+        <button type="button" id="brr-add" class="btn btn-secondary">+ Add Business Risk Rating</button>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        function wireRow(row) {
+          var rm = row.querySelector('.brr-remove');
+          if (rm) rm.addEventListener('click', function () {
+            row.parentNode.removeChild(row);
+          });
+        }
+        document.querySelectorAll('#brr-tbody .brr-row').forEach(wireRow);
+        var addBtn = document.getElementById('brr-add');
+        if (addBtn) {
+          addBtn.addEventListener('click', function () {
+            var tbody = document.getElementById('brr-tbody');
+            var tr = document.createElement('tr');
+            tr.className = 'brr-row';
+            tr.style.borderBottom = '1px solid #eee';
+            tr.innerHTML =
+              '<td style="padding:4px 8px;"><input type="text" name="brr_label" value="" style="width:100%;"></td>' +
+              '<td style="padding:4px 8px;"><input type="text" name="brr_criteria" value="" style="width:100%;"></td>' +
+              '<td style="padding:4px 8px;"><button type="button" class="btn btn-secondary brr-remove" style="padding:2px 8px;">Remove</button></td>';
+            tbody.appendChild(tr);
+            wireRow(tr);
+          });
+        }
+      })();
+    </script>
+
+    <div class="btn-row" style="margin-top:24px;">
+      {% if state.has_warm_files == 'yes' %}
+      <a class="btn btn-secondary" href="{{ url_for('setup.step5_monthly_bal') }}">&larr; Back</a>
+      {% else %}
+      <a class="btn btn-secondary" href="{{ url_for('setup.step2_files') }}">&larr; Back</a>
+      {% endif %}
+      <button class="btn btn-secondary" type="submit" name="action" value="reset_defaults"
+              onclick="return confirm('Replace current grades with the 6-tier defaults?');">
+        Reset to defaults
+      </button>
+      {% if warm_grades %}
+      <button class="btn btn-secondary" type="submit" name="action" value="reset_warm"
+              onclick="return confirm('Replace current grades with the {{ warm_grades | length }} band(s) from the WARM workbook?');">
+        Reload from WARM
+      </button>
+      {% endif %}
+      <button class="btn btn-primary" type="submit" name="action" value="save">Next: Credit Pull &rarr;</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

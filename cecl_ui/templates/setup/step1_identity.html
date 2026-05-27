@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+{% block title %}CU Identity{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Credit Union Identity</h2>
+  <p class="muted">Basic identity for this CU. The short name becomes the YAML
+    file under <code>client_configs/</code> and the folder under
+    <code>Raw_Uploads/</code>.</p>
+  <form method="post">
+    <div class="form-row">
+      <div>
+        <label>Credit union legal name *
+          <input type="text" name="credit_union" id="cu-name-input"
+                 value="{{ state.credit_union }}" required
+                 placeholder="e.g., Sample Federal Credit Union">
+        </label>
+      </div>
+      <div>
+        <label>Short name (filename)
+          <input type="text" name="short_name" id="short-name-input"
+                 value="{{ state.short_name }}"
+                 data-user-edited="0"
+                 placeholder="auto-generated from CU name">
+          <span class="help">Lowercase, no spaces. Used as
+            <code>client_configs/&lt;short_name&gt;.yaml</code>. Auto-fills from
+            the legal name &mdash; edit it manually to lock your own value.</span>
+        </label>
+      </div>
+      <div>
+        <label>NCUA charter number
+          <input type="text" name="charter_number" id="charter-input"
+                 value="{{ state.charter_number }}"
+                 inputmode="numeric" pattern="[0-9]{1,7}"
+                 maxlength="7"
+                 placeholder="e.g., 12345">
+          <span class="help">1&ndash;7 digit NCUA charter number. Used later
+            to integrate peer / call-report data.</span>
+        </label>
+      </div>
+      <div>
+        <label>State
+          <select name="state" id="state-select">
+            <option value="">— Select a state —</option>
+            {% for s in states %}
+              <option value="{{ s.name }}"
+                      {% if s.name == state.economic_data.state %}selected{% endif %}>
+                {{ s.name }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <div>
+        <label>County
+          <select name="county" id="county-select"
+                  data-current="{{ state.economic_data.county }}">
+            <option value="">— Select a state first —</option>
+          </select>
+          <span class="help" id="county-status"></span>
+        </label>
+      </div>
+    </div>
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.start_warm_choice') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit">Next &rarr;</button>
+    </div>
+  </form>
+</div>
+
+{# ─────────────────────────────────────────────────────────────────
+   WARM workbook panel (moved from Step 2). Shown only when the user
+   said "yes I have a WARM file." Both forms POST back to the
+   step2_warm route since that's where the upload/clear logic lives.
+   ───────────────────────────────────────────────────────────────── #}
+{% if state.has_warm_files == "yes" %}
+<div class="card">
+  <h2>WARM Workbook</h2>
+  {% if state.warm %}
+    <p class="muted">
+      A WARM workbook is already loaded for this CU
+      (<code>{{ state.warm.filename }}</code>) &mdash; analysis below.
+      Use <strong>Replace</strong> only if you need to swap in a different
+      file.
+    </p>
+    <form method="post" enctype="multipart/form-data"
+          action="{{ url_for('setup.step2_warm') }}">
+      <details>
+        <summary class="muted" style="cursor:pointer;">Replace with a different WARM workbook</summary>
+        <div style="margin-top:8px;">
+          <label>WARM workbook (.xlsx)
+            <input type="file" name="warm_file" accept=".xlsx,.xlsm">
+            <span class="help">Parsed locally; not uploaded anywhere.</span>
+          </label>
+          <div style="margin-top:10px;">
+            <button class="btn btn-secondary" type="submit"
+                    name="action" value="upload">Replace &amp; re-analyze</button>
+            <button class="btn btn-secondary" type="submit"
+                    name="action" value="clear"
+                    onclick="return confirm('Clear the parsed WARM analysis and reset suggested fields to defaults?');">
+              Clear analysis
+            </button>
+          </div>
+        </div>
+      </details>
+    </form>
+  {% else %}
+    <p class="muted">
+      Upload the most recent quarterly <code>CECL-Migration-WARM</code> file
+      for this CU. We'll extract the pool list, credit grades, and historical
+      balances/charge-offs/recoveries from it &mdash; saving you from entering
+      those manually.
+    </p>
+    <form method="post" enctype="multipart/form-data"
+          action="{{ url_for('setup.step2_warm') }}">
+      <label>WARM workbook (.xlsx)
+        <input type="file" name="warm_file" accept=".xlsx,.xlsm">
+        <span class="help">e.g. <code>2026-03 CECL-Migration-WARM - YourCU.xlsx</code> &mdash;
+          the file is parsed locally and not uploaded anywhere.</span>
+      </label>
+      <div style="margin-top:10px;">
+        <button class="btn btn-primary" type="submit" name="action" value="upload">Analyze WARM File</button>
+      </div>
+    </form>
+  {% endif %}
+</div>
+
+{% if state.warm %}
+<div class="card">
+  <h3>Analysis: <code>{{ state.warm.filename }}</code></h3>
+  <table>
+    <tr><th>CU detected</th>          <td>{{ state.warm.cu_name or '(not found)' }}</td></tr>
+    <tr><th>As-of date</th>           <td>{{ state.warm.as_of_date or '(not found)' }}</td></tr>
+    <tr><th>Pools detected</th>       <td>{{ state.warm.pools | length }}</td></tr>
+    <tr><th>Credit grades</th>        <td>{{ state.warm.grades | length }}</td></tr>
+    <tr><th>History range</th>
+        <td>
+          {% if state.warm.history_start %}
+            {{ state.warm.history_start }} &rarr; {{ state.warm.history_end }}
+            ({{ state.warm.history_months }} months)
+          {% else %}(no history detected){% endif %}
+        </td></tr>
+    <tr><th>Pools with charge-off history</th><td>{{ state.warm.co_pools_with_data }}</td></tr>
+    <tr><th>Pools with recovery history</th>  <td>{{ state.warm.recov_pools_with_data }}</td></tr>
+  </table>
+
+  {% if state.warm.sheets_missing %}
+    <p class="muted" style="margin-top:6px;">
+      <strong>Optional sheets not present:</strong>
+      {% for s in state.warm.sheets_missing %}<code>{{ s }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+      &mdash; that's fine; we'll skip those data points.
+    </p>
+  {% endif %}
+
+  {% set bid = state.warm.baseline_identity or {} %}
+  {% if bid %}
+    <h3 style="margin-top:18px;">Identity &amp; Economic Baseline</h3>
+    <p class="muted">
+      Pulled from <code>BS CO DQ Data Enter</code>. These values were copied
+      into the Identity fields above and Step 9 (Economic) only when those
+      fields were still blank, so anything you've already typed wins.
+    </p>
+    <table>
+      <tr><th>Charter #</th>           <td>{{ bid.charter_number or '(blank)' }}</td>
+          <th>State</th>               <td>{{ bid.state or '(blank)' }}</td></tr>
+      <tr><th>Period ending</th>       <td>{{ bid.period_end_date or '(blank)' }}</td>
+          <th>County</th>              <td>{{ bid.county or '(blank)' }}</td></tr>
+      <tr><th>Credit union</th>        <td>{{ bid.cu_name or '(blank)' }}</td>
+          <th>Unemployment</th>
+          <td>{% if bid.unemployment_rate %}{{ '%.2f%%' | format(bid.unemployment_rate * 100) }}{% else %}(blank){% endif %}</td></tr>
+      <tr><th>Foreclosures / 100k</th> <td>{{ '{:,}'.format(bid.foreclosures) if bid.foreclosures else '(blank)' }}</td>
+          <th>Bankruptcies</th>        <td>{{ '{:,}'.format(bid.bankruptcies) if bid.bankruptcies else '(blank)' }}</td></tr>
+      <tr><th>Population</th>          <td colspan="3">{{ '{:,}'.format(bid.population) if bid.population else '(blank)' }}</td></tr>
+    </table>
+  {% endif %}
+</div>
+{% endif %}
+{% endif %}
+<script>
+(function () {
+  // Mirror of Python's config_service.slugify():
+  //   re.sub(r"[^A-Za-z0-9]+", "_", name.strip().lower()).strip("_") or "client"
+  function slugify(name) {
+    var s = (name || "").trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    return s;  // empty allowed; server falls back if blank
+  }
+  var cu = document.getElementById("cu-name-input");
+  var sn = document.getElementById("short-name-input");
+  var chr = document.getElementById("charter-input");
+  if (!cu || !sn) return;
+
+  // Treat the field as user-edited only when the user actually types in it.
+  // Pre-populated values from the server should still auto-update if they
+  // were just the previous auto-slug.
+  var lastAuto = slugify(cu.value);
+  if (sn.value && sn.value !== lastAuto) {
+    sn.dataset.userEdited = "1";
+  }
+
+  cu.addEventListener("input", function () {
+    if (sn.dataset.userEdited === "1") return;
+    sn.value = slugify(cu.value);
+    lastAuto = sn.value;
+  });
+  sn.addEventListener("input", function () {
+    // If the user blanks it, hand control back to auto-fill.
+    if (sn.value.trim() === "") {
+      sn.dataset.userEdited = "0";
+      sn.value = slugify(cu.value);
+    } else {
+      sn.dataset.userEdited = "1";
+    }
+  });
+  if (chr) {
+    chr.addEventListener("input", function () {
+      // Strip non-digits as the user types.
+      var v = chr.value.replace(/[^0-9]/g, "");
+      if (v !== chr.value) chr.value = v;
+    });
+  }
+
+  // ── State → County dropdown wiring ───────────────────────────────
+  // When the user picks a state, fetch its counties from
+  //   GET /setup/api/counties?state=<name>
+  // and rebuild the county <select>. Preserve any previously selected
+  // county (data-current on the element) so server-rendered values
+  // survive the async load.
+  var stSel = document.getElementById("state-select");
+  var coSel = document.getElementById("county-select");
+  var coStatus = document.getElementById("county-status");
+  function loadCounties(stateName, preselect) {
+    if (!coSel) return;
+    if (!stateName) {
+      coSel.innerHTML = '<option value="">— Select a state first —</option>';
+      if (coStatus) coStatus.textContent = "";
+      return;
+    }
+    coSel.innerHTML = '<option value="">Loading…</option>';
+    if (coStatus) coStatus.textContent = "Loading counties…";
+    fetch("{{ url_for('setup.api_counties') }}?state="
+          + encodeURIComponent(stateName))
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var counties = (data && data.counties) || [];
+        var html = '<option value="">— Select a county —</option>';
+        counties.forEach(function (c) {
+          var name = (typeof c === "string") ? c : (c.name || "");
+          if (!name) return;
+          var sel = (name === preselect) ? " selected" : "";
+          html += '<option value="' + name.replace(/"/g, "&quot;") + '"'
+                  + sel + ">" + name + "</option>";
+        });
+        coSel.innerHTML = html;
+        if (coStatus) {
+          coStatus.textContent = counties.length
+            ? (counties.length + " counties loaded")
+            : "No counties found for this state.";
+        }
+      })
+      .catch(function (err) {
+        coSel.innerHTML = '<option value="">(failed to load)</option>';
+        if (coStatus) coStatus.textContent = "Failed to load counties: " + err;
+      });
+  }
+  if (stSel) {
+    stSel.addEventListener("change", function () {
+      loadCounties(stSel.value, "");
+    });
+    // On page load: if a state is already selected (e.g. user is editing
+    // an existing draft, or just navigated back), populate the counties
+    // and re-select the previously-saved one.
+    if (stSel.value) {
+      loadCounties(stSel.value, (coSel && coSel.dataset.current) || "");
+    }
+  }
+})();
+</script>
+{% endblock %}

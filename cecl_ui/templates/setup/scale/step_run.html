@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}SCALE — Run{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Run SCALE for {{ state.scale.period }}</h2>
+  <p class="muted">
+    Fetches 5300 data from Solr and writes a workbook to
+    <code>Generated_Reports/{{ state.short_name }}/{{ state.scale.period }}/</code>.
+    The default run fills <strong>32 consecutive quarters</strong>
+    (newest &rarr; oldest) into the same workbook so prior-quarter
+    columns are populated. Quarters with no matching mapping CSV are
+    skipped and listed below.
+  </p>
+
+  <form method="post" style="display:flex; gap:8px; align-items:center;">
+    <button type="submit" name="action" value="run" class="btn">
+      Run SCALE (32 quarters)
+    </button>
+    <button type="submit" name="action" value="run_single" class="btn btn-secondary"
+            title="Fill only the selected target period; useful for debugging a single quarter">
+      Run single quarter only
+    </button>
+  </form>
+
+  {% if last_run %}
+    {% set is_multi = last_run.iterations is defined %}
+    <div style="margin-top:18px; padding:10px 14px; border:1px solid {{ '#0a7f3f' if last_run.ok else '#a01818' }}; background:{{ '#eef9f0' if last_run.ok else '#fdeeee' }};">
+      <h3 style="margin-top:0;">
+        Last run:
+        {% if last_run.ok %}
+          <span style="color:#0a7f3f;">OK</span>
+        {% else %}
+          <span style="color:#a01818;">FAILED</span>
+        {% endif %}
+        <span class="muted" style="font-weight:normal;">({{ last_run.ran_at or 'n/a' }})</span>
+      </h3>
+
+      {% if last_run.ok %}
+        {% if is_multi %}
+          <p>
+            Wrote <strong>{{ last_run.quarters_written }}</strong> of
+            {{ last_run.quarters_requested }} quarter(s) into the same
+            workbook.
+            {% if last_run.skipped %}
+              <span class="muted">({{ last_run.skipped|length }} skipped)</span>
+            {% endif %}
+          </p>
+          <p>Output: <code>{{ last_run.output_path }}</code></p>
+          {% if last_run.output_files and last_run.output_files|length > 1 %}
+            <ul class="muted" style="margin:4px 0 8px 20px;">
+              {% for of in last_run.output_files %}
+                <li><strong>{{ of.label }}</strong> ({{ of.theme }} theme):
+                  <code>{{ of.path }}</code></li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+          <p class="muted">
+            Starting template ({{ last_run.template_source }}):
+            <code>{{ last_run.template_path }}</code>
+            {% if last_run.template_message %} &mdash; {{ last_run.template_message }}{% endif %}
+          </p>
+
+          <details open>
+            <summary>{{ last_run.iterations|length }} quarter(s) filled</summary>
+            <table class="kv" style="margin-top:8px;">
+              <thead>
+                <tr>
+                  <th>#</th><th>Period</th><th>Applied / Total</th>
+                  <th>Missing fields</th><th>Sheet issues</th>
+                  <th>Write issues</th><th>Map source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for it in last_run.iterations %}
+                <tr>
+                  <td>{{ it.index }}</td>
+                  <td>{{ it.period }}</td>
+                  <td>{{ it.applied }} / {{ it.total_rows }}</td>
+                  <td>{{ it.missing_fields_count }}</td>
+                  <td>{{ it.missing_sheets_count }}</td>
+                  <td>{{ it.issues_count }}</td>
+                  <td>{{ it.map_source }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </details>
+
+          {% if last_run.skipped %}
+            <details style="margin-top:8px;">
+              <summary>{{ last_run.skipped|length }} quarter(s) skipped</summary>
+              <table class="kv" style="margin-top:8px;">
+                <thead><tr><th>Period</th><th>Reason</th></tr></thead>
+                <tbody>
+                  {% for s in last_run.skipped %}
+                  <tr><td>{{ s.period }}</td><td>{{ s.reason }}</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </details>
+          {% endif %}
+        {% else %}
+          {# single-quarter result shape #}
+          <p>
+            Applied <strong>{{ last_run.applied }}</strong> of
+            {{ last_run.total_rows }} mapping cells for
+            {{ last_run.period }}.
+          </p>
+          <p>Output: <code>{{ last_run.output_path }}</code></p>
+          {% if last_run.output_files and last_run.output_files|length > 1 %}
+            <ul class="muted" style="margin:4px 0 8px 20px;">
+              {% for of in last_run.output_files %}
+                <li><strong>{{ of.label }}</strong> ({{ of.theme }} theme):
+                  <code>{{ of.path }}</code></li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+
+          {% if last_run.missing_fields %}
+            <details>
+              <summary>{{ last_run.missing_fields|length }} field code(s) not in Solr doc</summary>
+              <pre style="max-height:200px; overflow:auto;">{{ last_run.missing_fields|join(', ') }}</pre>
+            </details>
+          {% endif %}
+          {% if last_run.missing_sheets %}
+            <details>
+              <summary>{{ last_run.missing_sheets|length }} sheet/field issue(s)</summary>
+              <pre style="max-height:200px; overflow:auto;">{{ last_run.missing_sheets|join('\n') }}</pre>
+            </details>
+          {% endif %}
+          {% if last_run.issues %}
+            <details>
+              <summary>{{ last_run.issues|length }} write issue(s)</summary>
+              <pre style="max-height:200px; overflow:auto;">{{ last_run.issues|join('\n') }}</pre>
+            </details>
+          {% endif %}
+        {% endif %}
+
+        {% if last_run.qfactor_total %}
+          <p style="margin-top:8px;">
+            Q-factor overlays applied:
+            <strong>{{ last_run.qfactor_applied }}</strong> of
+            {{ last_run.qfactor_total }}.
+            {% if last_run.qfactor_missing_sheets %}
+              <span style="color:#a01818;">
+                {{ last_run.qfactor_missing_sheets|length }} missing sheet(s).
+              </span>
+            {% endif %}
+          </p>
+          {% if last_run.qfactor_missing_sheets %}
+            <details>
+              <summary>Q-factor sheet/cell issues</summary>
+              <pre style="max-height:200px; overflow:auto;">{{ last_run.qfactor_missing_sheets|join('\n') }}{% if last_run.qfactor_issues %}
+{{ last_run.qfactor_issues|join('\n') }}{% endif %}</pre>
+            </details>
+          {% endif %}
+        {% endif %}
+
+        {% if last_run.impaired_applied is defined %}
+          <p style="margin-top:8px;">
+            Impaired loans written:
+            <strong>{{ last_run.impaired_applied }}</strong>
+            (cleared {{ last_run.impaired_cleared }} prior row(s)).
+            {% if last_run.impaired_error %}
+              <span style="color:#a01818;">{{ last_run.impaired_error }}</span>
+            {% elif last_run.impaired_applied == 0 %}
+              <span class="muted">&mdash; no impaired loans uploaded (optional step).</span>
+            {% endif %}
+          </p>
+        {% endif %}
+      {% else %}
+        <ul>
+          {% for err in last_run.errors %}
+            <li>{{ err }}</li>
+          {% endfor %}
+        </ul>
+        {% if is_multi and last_run.skipped %}
+          <details style="margin-top:8px;">
+            <summary>{{ last_run.skipped|length }} quarter(s) skipped</summary>
+            <table class="kv" style="margin-top:8px;">
+              <thead><tr><th>Period</th><th>Reason</th></tr></thead>
+              <tbody>
+                {% for s in last_run.skipped %}
+                <tr><td>{{ s.period }}</td><td>{{ s.reason }}</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </details>
+        {% endif %}
+      {% endif %}
+    </div>
+  {% endif %}
+
+  <div class="btn-row" style="margin-top:18px;">
+    <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_review') }}">&larr; Back</a>
+    <a class="btn btn-secondary" href="{{ url_for('home.index') }}">Done &mdash; Home</a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}{{ cu.credit_union }} &mdash; SCALE Runs{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('scale_runs.index') }}">&larr; All SCALE CUs</a></p>
+<h2>{{ cu.credit_union }} <small class="muted">({{ cu.short_name }})</small></h2>
+<p class="muted">Latest report on disk: <strong>{{ cu.latest_period }}</strong></p>
+
+{% if not draft_present %}
+  <div class="flash warning">
+    No saved wizard draft was found for this CU. Open the SCALE wizard
+    and save it once so a draft exists, otherwise running a new quarter
+    here will fail (the run needs Solr URL, q-factors, mgmt-adj,
+    impaired settings, etc.).
+  </div>
+{% endif %}
+
+<h3>Run a new quarter</h3>
+<form method="post"
+      action="{{ url_for('scale_runs.run', short_name=cu.short_name) }}"
+      class="card">
+
+  <div class="form-row">
+    <label for="period">Target period</label>
+    <select name="period" id="period">
+      {% for p in period_choices %}
+        <option value="{{ p }}"
+                {% if p == default_target %}selected{% endif %}>{{ p }}</option>
+      {% endfor %}
+    </select>
+    <small class="muted">YYYY-MM (quarter-end month). Defaults to one
+      quarter after the latest report on disk.</small>
+  </div>
+
+  <fieldset class="form-row">
+    <legend>Historical data source</legend>
+    <label>
+      <input type="radio" name="mode" value="carry" checked>
+      <strong>Carry from prior report</strong> &mdash; normal process.
+      Copies the previous quarter's SCALE workbook and overlays only
+      the new quarter's 5300 data. Fast.
+    </label>
+    <label>
+      <input type="radio" name="mode" value="refetch_all">
+      <strong>Re-pull all from 5300</strong> &mdash; full multi-quarter
+      run from a fresh template. Use this when the credit union has
+      amended older 5300 filings.
+    </label>
+  </fieldset>
+
+  <div class="form-row">
+    <label for="quarters">Quarters (refetch-all only)</label>
+    <input type="number" id="quarters" name="quarters"
+           value="32" min="1" max="80" style="width: 6em;">
+    <small class="muted">Ignored in carry mode.</small>
+  </div>
+
+  <div class="form-row">
+    <label for="report_variant">Report variant</label>
+    <select name="report_variant" id="report_variant">
+      <option value="">(keep wizard default)</option>
+      <option value="both">Both TCT + Vizo</option>
+      <option value="tct">TCT only</option>
+      <option value="vizo">Vizo only</option>
+    </select>
+  </div>
+
+  <div class="form-actions">
+    <button type="submit" class="btn btn-primary">Run</button>
+  </div>
+</form>
+
+<h3>Reports on disk</h3>
+{% if not runs %}
+  <p class="muted">No prior reports found.</p>
+{% else %}
+  <table class="data-table">
+    <thead>
+      <tr><th>Period</th><th>Files</th></tr>
+    </thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td>{{ r.period }}</td>
+        <td>
+          <ul class="bare-list">
+            {% for f in r.files %}
+              <li><code>{{ f.name }}</code></li>
+            {% endfor %}
+          </ul>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}SCALE — Solr & Period{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Solr connection &amp; target quarter</h2>
+  <p class="muted">
+    SCALE pulls all loan / charge-off / delinquency data from the NCUA 5300
+    Call Report via Solr. Confirm the connection and pick the quarter you want
+    to report on.
+  </p>
+
+  <form method="post">
+    <div class="form-grid">
+      <label>Solr URL
+        <input type="text" name="solr_url" value="{{ state.scale.solr_url }}"
+               placeholder="http://searchserver1.tctrisk.com:8983/solr">
+      </label>
+      <label>Core
+        <input type="text" name="solr_core" value="{{ state.scale.solr_core }}"
+               placeholder="ncua">
+      </label>
+      <label>Solr username <span class="muted">(optional)</span>
+        <input type="text" name="solr_user" value="{{ state.scale.solr_user }}">
+      </label>
+      <label>Solr password <span class="muted">(blank to keep)</span>
+        <input type="password" name="solr_pass" value="" autocomplete="off">
+      </label>
+      <label>Target period (YYYY-MM)
+        <select name="period">
+          <option value="">-- pick a quarter --</option>
+          {% for p in periods %}
+            <option value="{{ p }}" {% if state.scale.period == p %}selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <div class="muted">
+        Charter number: <strong>{{ state.charter_number or '(not set — go back to Identity)' }}</strong>
+      </div>
+    </div>
+
+    {% if state.scale.last_test %}
+      {% set lt = state.scale.last_test %}
+      <p class="muted" style="margin-top:8px;">
+        Last connection test:
+        <strong style="color:{{ '#0a7f3f' if lt.ok else '#a01818' }};">
+          {{ 'OK' if lt.ok else 'FAILED' }}
+        </strong>
+        {% if lt.message %} — {{ lt.message }}{% endif %}
+      </p>
+    {% endif %}
+
+    <div class="btn-row" style="margin-top:12px; display:flex; gap:8px;">
+      <button type="submit" name="action" value="test" class="btn btn-secondary">
+        Test connection
+      </button>
+      <button type="submit" name="action" value="save" class="btn btn-secondary">
+        Save
+      </button>
+      <button type="submit" name="action" value="next" class="btn">
+        Save &amp; continue &rarr;
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

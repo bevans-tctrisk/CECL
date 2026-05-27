@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}SCALE — Impaired Loans{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Impaired Loans (ASC 310-10)</h2>
+  <p class="muted">
+    Upload the credit union's completed
+    <code>CECL-SCALE Impaired Loans.xlsx</code> file. The data-entry
+    rows (columns A&ndash;J on the
+    <code>&nbsp;Impaired Loans ASC 310-10</code> tab) are copied into
+    the SCALE output workbook after the 5300 fill. The template's
+    calculation columns (K&ndash;Q) and summary block are left
+    untouched and will recompute automatically.
+  </p>
+  <p class="muted">
+    Pool names and impairment types are standardized across all credit
+    unions for SCALE, so no per-CU mapping is required.
+  </p>
+
+  <form method="post" enctype="multipart/form-data" style="margin-top:14px;">
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <input type="file" name="impaired_file" accept=".xlsx,.xlsm">
+      <button type="submit" name="action" value="upload" class="btn">Upload &amp; parse</button>
+      {% if imp.get('saved_path') %}
+        <button type="submit" name="action" value="clear" class="btn btn-secondary"
+                onclick="return confirm('Clear the uploaded impaired loans file?');">
+          Clear
+        </button>
+      {% endif %}
+    </div>
+  </form>
+
+  {% if imp.get('saved_path') %}
+    <div style="margin-top:18px; padding:10px 14px; border:1px solid #c9d6e8; background:#f4f8ff;">
+      <div><strong>File:</strong> {{ imp.get('uploaded_filename') or '(unknown)' }}</div>
+      <div class="muted" style="font-size:0.9em;">Saved to: <code>{{ imp.get('saved_path') }}</code></div>
+      {% if parsed.get('ok') %}
+        <div style="margin-top:6px;">
+          <strong>Sheet:</strong> <code>{{ parsed.get('sheet_used') }}</code>
+          &nbsp;&middot;&nbsp;
+          <strong>CU:</strong> {{ parsed.get('cu_name') or '(blank)' }}
+          &nbsp;&middot;&nbsp;
+          <strong>Period:</strong> {{ parsed.get('period') or '(blank)' }}
+        </div>
+        <div style="margin-top:4px;">
+          <strong>{{ parsed.get('row_count', 0) }}</strong> impaired loan(s)
+          totalling
+          <strong>${{ "{:,.2f}".format(parsed.get('total_balance', 0)) }}</strong>.
+        </div>
+      {% else %}
+        <div style="color:#a40000; margin-top:6px;">
+          <strong>Parse failed:</strong> {{ parsed.get('error') or 'Unknown error.' }}
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if preview %}
+    <h3 style="margin-top:18px;">Preview (first {{ preview|length }} of {{ parsed.get('row_count', 0) }})</h3>
+    <div style="overflow-x:auto;">
+      <table class="kv-table" style="width:100%; font-size:0.88em;">
+        <thead>
+          <tr>
+            <th>Impairment Type</th>
+            <th>Member-Suffix</th>
+            <th>Loan Pool</th>
+            <th style="text-align:right;">Current Balance</th>
+            <th style="text-align:right;">Days DQ</th>
+            <th style="text-align:right;">Collateral</th>
+            <th style="text-align:right;">Allowance</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in preview %}
+            <tr>
+              <td>{{ r.impairment_type }}</td>
+              <td>{{ r.member_suffix }}</td>
+              <td>{{ r.loan_pool }}</td>
+              <td style="text-align:right;">${{ "{:,.2f}".format(r.current_balance or 0) }}</td>
+              <td style="text-align:right;">{{ (r.days_delinquent or 0)|int }}</td>
+              <td style="text-align:right;">${{ "{:,.2f}".format(r.collateral_value or 0) }}</td>
+              <td style="text-align:right;">${{ "{:,.2f}".format(r.allowance_provided or 0) }}</td>
+              <td>{{ r.notes }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+
+  <form method="post" style="margin-top:18px;">
+    <div class="btn-row" style="display:flex; gap:8px;">
+      <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_mgmt_adj') }}">&larr; Back</a>
+      <button type="submit" name="action" value="next" class="btn">
+        {% if imp.get('saved_path') %}Continue &rarr;{% else %}Skip &amp; continue &rarr;{% endif %}
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

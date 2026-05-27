@@ -1,0 +1,720 @@
+{% extends "base.html" %}
+{% block title %}Charge-Offs &amp; Recoveries{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+{% macro co_recov_scan_results(scan, kind_label, clear_action, ignore_action, unignore_action) %}
+  {% if scan %}
+    {% set layouts = scan.get('layouts') or [] %}
+    {% set active = layouts | rejectattr('ignored') | list %}
+    {% set ignored = layouts | selectattr('ignored') | list %}
+    <div style="margin-top:16px; padding:8px 12px; border:1px solid #ddd;
+                border-radius:6px; background:#fafafa;">
+      <div style="display:flex; justify-content:space-between;
+                  align-items:center;">
+        <strong>Scan results</strong>
+        <form method="post" style="margin:0;">
+          <input type="hidden" name="action" value="{{ clear_action }}">
+          <button class="btn btn-secondary" type="submit">Clear results</button>
+        </form>
+      </div>
+      {% if scan.get('error') %}
+        <p class="muted" style="margin:6px 0; color:#a33;">
+          {{ scan.get('error') }}
+        </p>
+      {% else %}
+        <p class="muted" style="margin:6px 0;">
+          Scanned <strong>{{ scan.get('scanned', 0) }}</strong> file(s)
+          in <code>{{ scan.get('folder') }}</code> &mdash;
+          <strong>{{ scan.get('added_count', 0) }}</strong> added,
+          <strong>{{ scan.get('ignored_count', 0) }}</strong> ignored via
+          layouts,
+          <strong>{{ scan.get('skipped_count', 0) }}</strong> skipped,
+          <strong>{{ layouts | length }}</strong> distinct layout(s).
+        </p>
+      {% endif %}
+
+      {% if active %}
+      <div class="flash info" style="margin:8px 0;">
+        <strong>{{ active | length }} active layout(s)</strong>
+        &mdash; click <em>Ignore layout</em> to remove already-added
+        {{ kind_label }} files matching that header signature and skip
+        them on future scans.
+        <table class="data-table"
+               style="width:100%; margin-top:8px; background:#fff;">
+          <thead>
+            <tr>
+              <th>Sample file</th>
+              <th style="width:90px; text-align:right;">Files</th>
+              <th>Headers (first few)</th>
+              <th style="width:140px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for s in active %}
+            <tr>
+              <td>
+                <code>{{ s.sample_file }}</code>
+                <br>
+                <span class="muted" style="font-size:11px;">
+                  sig <code>{{ s.signature }}</code>
+                </span>
+              </td>
+              <td style="text-align:right;">
+                <strong>{{ s.file_count or 0 }}</strong>
+              </td>
+              <td style="font-size:12px;">
+                {{ (s.sample_headers or [])[:6] | join(' | ') }}
+                {% if (s.sample_headers or []) | length > 6 %}&hellip;{% endif %}
+              </td>
+              <td>
+                <form method="post" style="margin:0;"
+                      onsubmit="return confirm('Ignore all {{ kind_label }} files with this header layout? Already-added matches will be removed.');">
+                  <input type="hidden" name="action"
+                         value="{{ ignore_action }}">
+                  <input type="hidden" name="signature"
+                         value="{{ s.signature }}">
+                  <button class="btn btn-secondary btn-sm" type="submit"
+                          style="padding:2px 10px; font-size:12px;">
+                    Ignore layout
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+
+      {% if ignored %}
+      <div class="flash" style="margin:8px 0; background:#f5f5f5; border:1px solid #ddd;">
+        <strong>{{ ignored | length }} ignored layout(s)</strong>
+        &mdash; files matching these header signatures are excluded from
+        {{ kind_label }} processing.
+        <table class="data-table"
+               style="width:100%; margin-top:8px; background:#fff;">
+          <thead>
+            <tr>
+              <th>Sample file</th>
+              <th style="width:90px; text-align:right;">Files</th>
+              <th>Headers (first few)</th>
+              <th style="width:140px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for s in ignored %}
+            <tr>
+              <td>
+                <code>{{ s.sample_file }}</code>
+                <br>
+                <span class="muted" style="font-size:11px;">
+                  sig <code>{{ s.signature }}</code>
+                </span>
+              </td>
+              <td style="text-align:right;">{{ s.file_count or 0 }}</td>
+              <td style="font-size:12px;">
+                {{ (s.sample_headers or [])[:6] | join(' | ') }}
+                {% if (s.sample_headers or []) | length > 6 %}&hellip;{% endif %}
+              </td>
+              <td>
+                <form method="post" style="margin:0;">
+                  <input type="hidden" name="action"
+                         value="{{ unignore_action }}">
+                  <input type="hidden" name="signature"
+                         value="{{ s.signature }}">
+                  <button class="btn btn-secondary btn-sm" type="submit"
+                          style="padding:2px 10px; font-size:12px;">
+                    Unignore
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+  {% endif %}
+{% endmacro %}
+
+<div class="card">
+  <h2>Charge-Offs &amp; Recoveries</h2>
+  <p class="muted">
+    Upload the current period&rsquo;s charge-off tracking report and (if
+    applicable) the matching recoveries file, map their columns, then run
+    the loan-code validation. Codes that aren&rsquo;t in the loan-code map
+    yet must be assigned to a pool here so they flow into the report.
+  </p>
+</div>
+
+{% set su = state.sample_uploads or {} %}
+
+{# ───────────────────────────────────────────────────────────────
+   Macro: column-mapping form for a CO or recov file
+   kind: "co" or "recov"
+   cfg:  state.co_columns / state.recov_columns dict (may be {})
+   preview: dict from co_recov_parser.inspect_file (or None)
+   ─────────────────────────────────────────────────────────────── #}
+{% macro render_column_mapping(kind, cfg, preview) %}
+  {% if preview and preview.ok %}
+    <div class="card" style="margin-top:12px;">
+      <h4 style="margin-top:0;">File preview &amp; column mapping</h4>
+      <p class="muted" style="margin-top:4px;">
+        Showing the first {{ preview.rows|length }} rows of
+        <code>{{ preview.filename }}</code> ({{ preview.ncols }} columns).
+        Column letters (A, B, C&hellip;) match Excel&rsquo;s column letters.
+      </p>
+
+      <div style="overflow-x:auto; margin-bottom:10px;">
+        <table class="data-table" style="font-size:11px;">
+          <thead>
+            <tr>
+              <th>#</th>
+              {% for col in preview.columns %}
+                <th>{{ col.letter }} <span class="muted">({{ col.index }})</span></th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in preview.rows %}
+              <tr>
+                <td class="muted">{{ loop.index }}</td>
+                {% for v in row %}<td>{{ v }}</td>{% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {# Helper: index of currently-selected column for each role. We coerce
+         to int so int/string mismatches from session storage don't break
+         the "selected" highlight. #}
+      {% set sel_member  = cfg.get('member_col')  if cfg.get('member_col')  is not none else '' %}
+      {% set sel_account = cfg.get('account_col') if cfg.get('account_col') is not none else '' %}
+      {% set sel_code    = cfg.get('code_col')    if cfg.get('code_col')    is not none else '' %}
+      {% set sel_amount  = cfg.get('amount_col')  if cfg.get('amount_col')  is not none else '' %}
+      {% set sel_date    = cfg.get('date_col')    if cfg.get('date_col')    is not none else '' %}
+      {% set show_hdr    = cfg.get('has_header') %}
+      {% set ma          = cfg.get('member_account') or {} %}
+      {% set ma_mode     = ma.get('mode') or 'split' %}
+      {% set ma_suffix   = ma.get('suffix_length') if ma.get('suffix_length') is not none else 3 %}
+      {% set ma_delim    = ma.get('delimiter') or '-' %}
+      <form method="post">
+        <h5 style="margin:14px 0 4px;">Member &amp; Account number</h5>
+        <p class="muted" style="margin-top:0;">Pick the shape that matches
+          this file's member / account / suffix layout.</p>
+        <div class="form-row" style="display:flex; flex-direction:column; gap:6px;">
+          <label style="display:flex; align-items:flex-start; gap:8px;">
+            <input type="radio" name="{{ kind }}_member_account_mode" value="fixed_suffix"
+                   {% if ma_mode == 'fixed_suffix' %}checked{% endif %}
+                   onchange="updateCRMemberAccountMode('{{ kind }}')">
+            <span><strong>Combined &mdash; fixed suffix length</strong>
+              <span class="help" style="display:block;">One column. The last
+                N characters are the account / suffix.</span>
+            </span>
+          </label>
+          <label style="display:flex; align-items:flex-start; gap:8px;">
+            <input type="radio" name="{{ kind }}_member_account_mode" value="delimiter"
+                   {% if ma_mode == 'delimiter' %}checked{% endif %}
+                   onchange="updateCRMemberAccountMode('{{ kind }}')">
+            <span><strong>Combined &mdash; separated by character</strong>
+              <span class="help" style="display:block;">One column split by
+                a delimiter such as <code>-</code> or <code>L</code>.</span>
+            </span>
+          </label>
+          <label style="display:flex; align-items:flex-start; gap:8px;">
+            <input type="radio" name="{{ kind }}_member_account_mode" value="split"
+                   {% if ma_mode == 'split' %}checked{% endif %}
+                   onchange="updateCRMemberAccountMode('{{ kind }}')">
+            <span><strong>Separate columns</strong>
+              <span class="help" style="display:block;">Member and account
+                live in two different columns.</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="grid-2" style="gap:12px;">
+          {# Combined Member/Account column (fixed_suffix + delimiter modes) #}
+          <label id="cr-ma-combined-{{ kind }}"
+                 style="{% if ma_mode == 'split' %}display:none;{% endif %}">
+            Combined Member / Account column
+            {% if kind == 'recov' %}<span class="muted">(optional)</span>{% endif %}
+            <select name="{{ kind }}_combined_col" data-cr-ma-combined="1">
+              <option value="">&mdash; none &mdash;</option>
+              {% for col in preview.columns %}
+                <option value="{{ col.index }}"
+                  {% if sel_member != '' and sel_member|int == col.index %}selected{% endif %}>
+                  {% if show_hdr and col.header %}{{ col.header }}{% else %}{{ col.letter }}{% if col.header %} (sample: {{ col.header }}){% endif %}{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+
+          {# Suffix length (fixed_suffix only) #}
+          <label id="cr-ma-suffix-{{ kind }}"
+                 style="{% if ma_mode != 'fixed_suffix' %}display:none;{% endif %}">
+            Account suffix length *
+            <input type="number" name="{{ kind }}_member_account_suffix_length"
+                   value="{{ ma_suffix }}" min="0" max="9" data-cr-ma-fixed="1">
+            <span class="help">Trailing chars of the combined value
+              (typically 2&ndash;4).</span>
+          </label>
+
+          {# Delimiter (delimiter only) #}
+          <label id="cr-ma-delim-{{ kind }}"
+                 style="{% if ma_mode != 'delimiter' %}display:none;{% endif %}">
+            Delimiter character *
+            <input type="text" name="{{ kind }}_member_account_delimiter"
+                   value="{{ ma_delim }}" maxlength="3" size="4" data-cr-ma-delim="1">
+            <span class="help">Character that separates member from
+              account, e.g. <code>-</code> or <code>L</code>.</span>
+          </label>
+
+          {# Split-mode: Member# column #}
+          <label id="cr-ma-member-{{ kind }}"
+                 style="{% if ma_mode != 'split' %}display:none;{% endif %}">
+            Member # column
+            {% if kind == 'recov' %}<span class="muted">(optional)</span>{% endif %}
+            <select name="{{ kind }}_member_col" data-cr-ma-split="1">
+              <option value="">&mdash; none &mdash;</option>
+              {% for col in preview.columns %}
+                <option value="{{ col.index }}"
+                  {% if sel_member != '' and sel_member|int == col.index %}selected{% endif %}>
+                  {% if show_hdr and col.header %}{{ col.header }}{% else %}{{ col.letter }}{% if col.header %} (sample: {{ col.header }}){% endif %}{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+
+          {# Split-mode: Account/Suffix column #}
+          <label id="cr-ma-account-{{ kind }}"
+                 style="{% if ma_mode != 'split' %}display:none;{% endif %}">
+            Account / Suffix / Loan Suffix / Note column
+            {% if kind == 'recov' %}<span class="muted">(optional)</span>{% endif %}
+            <select name="{{ kind }}_account_col" data-cr-ma-split="1">
+              <option value="">&mdash; none &mdash;</option>
+              {% for col in preview.columns %}
+                <option value="{{ col.index }}"
+                  {% if sel_account != '' and sel_account|int == col.index %}selected{% endif %}>
+                  {% if show_hdr and col.header %}{{ col.header }}{% else %}{{ col.letter }}{% if col.header %} (sample: {{ col.header }}){% endif %}{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+
+        <h5 style="margin:14px 0 4px;">Other columns</h5>
+        <div class="grid-2" style="gap:12px;">
+          <label>
+            Loan-code column (required)
+            <select name="{{ kind }}_code_col" required>
+              <option value="">&mdash; select &mdash;</option>
+              {% for col in preview.columns %}
+                <option value="{{ col.index }}"
+                  {% if sel_code != '' and sel_code|int == col.index %}selected{% endif %}>
+                  {% if show_hdr and col.header %}{{ col.header }}{% else %}{{ col.letter }}{% if col.header %} (sample: {{ col.header }}){% endif %}{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            Amount column (required)
+            <select name="{{ kind }}_amount_col" required>
+              <option value="">&mdash; select &mdash;</option>
+              {% for col in preview.columns %}
+                <option value="{{ col.index }}"
+                  {% if sel_amount != '' and sel_amount|int == col.index %}selected{% endif %}>
+                  {% if show_hdr and col.header %}{{ col.header }}{% else %}{{ col.letter }}{% if col.header %} (sample: {{ col.header }}){% endif %}{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            Date column (optional)
+            <select name="{{ kind }}_date_col">
+              <option value="">&mdash; none &mdash;</option>
+              {% for col in preview.columns %}
+                <option value="{{ col.index }}"
+                  {% if sel_date != '' and sel_date|int == col.index %}selected{% endif %}>
+                  {% if show_hdr and col.header %}{{ col.header }}{% else %}{{ col.letter }}{% if col.header %} (sample: {{ col.header }}){% endif %}{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            Skip rows (before data)
+            <input type="number" name="{{ kind }}_skip_rows" min="0"
+                   value="{{ cfg.get('skip_rows') or 0 }}">
+          </label>
+          <label class="checkbox-label" style="display:flex; align-items:center; gap:8px;">
+            <input type="checkbox" name="{{ kind }}_has_header"
+                   class="cr-has-header" data-kind="{{ kind }}"
+                   {% if cfg.get('has_header') %}checked{% endif %}>
+            File has a header row
+          </label>
+        </div>
+        <button class="btn btn-primary" type="submit"
+                name="action" value="save_{{ kind }}_columns"
+                style="margin-top:10px;">
+          Save column mapping &amp; validate codes
+        </button>
+      </form>
+
+      {# Stash per-column header strings so the live toggle below can rebuild
+         the dropdown labels without a server round-trip. #}
+      <script type="application/json" id="cr-headers-{{ kind }}">
+        {{ preview.columns | map(attribute='header') | list | tojson }}
+      </script>
+    </div>
+  {% elif preview and preview.error %}
+    <div class="alert alert-error" style="margin-top:10px;">
+      Could not preview file: {{ preview.error }}
+    </div>
+  {% endif %}
+{% endmacro %}
+
+{# ───────────────────────────────────────────────────────────────
+   Macro: validation results block + per-code reassignment forms
+   ─────────────────────────────────────────────────────────────── #}
+{% macro render_validation(kind, validation, pool_choices) %}
+  {% if validation %}
+    <div class="card" style="margin-top:12px;">
+      <h4 style="margin-top:0;">Loan-code validation</h4>
+      {% if not validation.ok %}
+        <div class="alert alert-info">{{ validation.error }}</div>
+      {% else %}
+        <table class="data-table" style="font-size:12px;">
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Codes found</th>
+              <th>Mapped</th>
+              <th>Unmapped</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for f in validation.files %}
+              <tr>
+                <td><code>{{ f.name }}</code></td>
+                <td>{{ f.total_codes }}</td>
+                <td>{{ f.mapped_codes }}</td>
+                <td>
+                  {% if f.unmapped_codes %}
+                    <span class="badge-required">{{ f.unmapped_codes|length }}</span>
+                  {% else %}
+                    <span class="muted">0</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% if f.error %}
+                <tr><td colspan="4" class="alert alert-error">{{ f.error }}</td></tr>
+              {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+
+        {% if validation.unmapped_codes %}
+          <h5 style="margin-top:14px;">
+            Assign unmapped codes to a pool
+            <span class="badge-required">{{ validation.unmapped_codes|length }}</span>
+          </h5>
+          <p class="muted" style="margin-top:4px;">
+            These codes appear in the {{ "charge-off" if kind == "co" else "recovery" }}
+            file but aren&rsquo;t in the loan-code map yet. Assign each one to a
+            pool so its dollars flow into the report.
+          </p>
+          <table class="data-table" style="font-size:12px;">
+            <thead>
+              <tr><th>Loan code</th><th>Assign to pool</th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for code in validation.unmapped_codes %}
+                <tr>
+                  <td><code>{{ code }}</code></td>
+                  <td>
+                    <form method="post" style="display:flex; gap:6px; align-items:center; margin:0;">
+                      <input type="hidden" name="action" value="assign_code">
+                      <input type="hidden" name="code" value="{{ code }}">
+                      <select name="new_pool">
+                        <option value="">&mdash; leave unmapped (use default) &mdash;</option>
+                        {% for p in pool_choices %}
+                          <option value="{{ p }}">{{ p }}</option>
+                        {% endfor %}
+                      </select>
+                      <button class="btn btn-secondary" type="submit">Save</button>
+                    </form>
+                  </td>
+                  <td></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <p class="muted" style="margin-top:10px;">
+            &#10003; All codes in this file are mapped.
+          </p>
+        {% endif %}
+      {% endif %}
+    </div>
+  {% endif %}
+{% endmacro %}
+
+{# ── Charge-Off Tracking ─────────────────────────────────────── #}
+<div class="card">
+  <h3>Charge-Off Tracking File
+    <span class="badge-required">Required</span>
+  </h3>
+
+  {% if su.get('co_files') %}
+    <div class="upload-status-list">
+      {% for f in su['co_files'] %}
+        <div class="upload-status-item">
+          <span class="upload-status-icon">&#10003;</span>
+          <code>{{ f.name }}</code>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+    <label>Charge-off tracking file
+      <input type="file" name="sample_co_file" accept=".xlsx,.xlsm,.xls,.csv">
+      <span class="help">e.g. <code>Charge_Off_Tracking_Report_-_Tongass_FCU_Mar_2026.xlsx</code></span>
+    </label>
+    <button class="btn btn-secondary" type="submit" name="action"
+            value="upload_sample_co" style="margin-top:8px;">
+      Upload Charge-Off File
+    </button>
+  </form>
+
+  {% set co_folder = state.get('sample_co_folder') or '' %}
+  <form method="post" style="margin-top:12px;">
+    <label>Or scan a folder on this machine
+      <input type="text" name="sample_co_folder"
+             value="{{ co_folder }}"
+             placeholder="e.g. Z:\Shared\TCT Files\Bridgeton\Charge-Offs"
+             style="width:100%;">
+      <span class="help">Wizard will pick up every <code>*.xlsx</code> /
+        <code>*.xlsm</code> / <code>*.xls</code> / <code>*.csv</code> file
+        in the folder <strong>and any subfolders</strong>, and copy each
+        into the wizard's working area.</span>
+    </label>
+    <button class="btn btn-secondary" type="submit" name="action"
+            value="scan_sample_co_folder" style="margin-top:6px;">
+      Scan Folder for Charge-Off Files
+    </button>
+  </form>
+
+  {{ co_recov_scan_results(state.get('co_scan_data_sample'),
+                            'charge-off',
+                            'clear_sample_co_scan',
+                            'ignore_sample_co_layout',
+                            'unignore_sample_co_layout') }}
+</div>
+
+{{ render_column_mapping("co", co_cfg, co_preview) }}
+{{ render_validation("co", co_validation, pool_choices) }}
+
+{# ── Recoveries (optional) ───────────────────────────────────── #}
+<div class="card">
+  <h3>Recoveries File
+    <span class="badge-optional">Optional</span>
+  </h3>
+  <p class="muted">
+    Upload the current period&rsquo;s recoveries file, or check the box below
+    if this credit union has no recoveries.
+  </p>
+
+  <label class="checkbox-label" style="margin-bottom:14px; display:flex; align-items:center; gap:8px;">
+    <input type="checkbox" name="no_sample_recoveries" id="no-sample-recoveries-cb"
+           {% if su.get('no_recoveries') %}checked{% endif %}
+           onchange="document.getElementById('sample-recov-upload').hidden = this.checked;">
+    <strong>This credit union has no recoveries</strong>
+  </label>
+
+  <div id="sample-recov-upload" {% if su.get('no_recoveries') %}hidden{% endif %}>
+    {% if su.get('recov_files') %}
+      <div class="upload-status-list">
+        {% for f in su['recov_files'] %}
+          <div class="upload-status-item">
+            <span class="upload-status-icon">&#10003;</span>
+            <code>{{ f.name }}</code>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+      <label>Recoveries file
+        <input type="file" name="sample_recov_file" accept=".xlsx,.xlsm,.xls,.csv">
+        <span class="help">e.g. <code>Recoveries_-_Tongass_FCU_Mar_2026.xlsx</code></span>
+      </label>
+      <button class="btn btn-secondary" type="submit" name="action"
+              value="upload_sample_recov" style="margin-top:8px;">
+        Upload Recoveries File
+      </button>
+    </form>
+
+    {% set recov_folder = state.get('sample_recov_folder') or '' %}
+    <form method="post" style="margin-top:12px;">
+      <label>Or scan a folder on this machine
+        <input type="text" name="sample_recov_folder"
+               value="{{ recov_folder }}"
+               placeholder="e.g. Z:\Shared\TCT Files\Bridgeton\Recoveries"
+               style="width:100%;">
+        <span class="help">Wizard will pick up every <code>*.xlsx</code> /
+          <code>*.xlsm</code> / <code>*.xls</code> / <code>*.csv</code> file
+          in the folder <strong>and any subfolders</strong>, and copy each
+          into the wizard's working area.</span>
+      </label>
+      <button class="btn btn-secondary" type="submit" name="action"
+              value="scan_sample_recov_folder" style="margin-top:6px;">
+        Scan Folder for Recoveries Files
+      </button>
+    </form>
+
+    {{ co_recov_scan_results(state.get('recov_scan_data_sample'),
+                              'recoveries',
+                              'clear_sample_recov_scan',
+                              'ignore_sample_recov_layout',
+                              'unignore_sample_recov_layout') }}
+  </div>
+</div>
+
+{% if not su.get('no_recoveries') %}
+  {{ render_column_mapping("recov", recov_cfg, recov_preview) }}
+  {{ render_validation("recov", recov_validation, pool_choices) }}
+{% endif %}
+
+{# ── Navigation ──────────────────────────────────────────────── #}
+<div class="card">
+  <form method="post">
+    <input type="hidden" name="no_sample_recoveries" id="nav-no-recov-hidden" value="">
+    <script>
+      (function () {
+        function syncHidden(cbId, hiddenId) {
+          var cb = document.getElementById(cbId);
+          var hid = document.getElementById(hiddenId);
+          if (cb && hid) {
+            hid.value = cb.checked ? 'on' : '';
+            cb.addEventListener('change', function () { hid.value = cb.checked ? 'on' : ''; });
+          }
+        }
+        document.addEventListener('DOMContentLoaded', function () {
+          syncHidden('no-sample-recoveries-cb', 'nav-no-recov-hidden');
+        });
+      })();
+    </script>
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step_balance_check') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit" name="action" value="next">
+        Next: Impaired Loans &rarr;
+      </button>
+    </div>
+  </form>
+</div>
+
+<script>
+// Live-toggle: when the user (un)checks "File has a header row", rewrite the
+// option labels in the same form's column dropdowns to include or hide the
+// header text.
+(function () {
+  function rebuildOptions(form, headers, showHdr) {
+    form.querySelectorAll('select').forEach(function (sel) {
+      Array.prototype.forEach.call(sel.options, function (opt) {
+        var v = opt.value;
+        if (v === '') return;  // skip the placeholder option
+        var idx = parseInt(v, 10);
+        if (isNaN(idx)) return;
+        var letter = '';
+        // Convert idx -> Excel-style letters (matches server _col_letter)
+        var n = idx;
+        do {
+          letter = String.fromCharCode(65 + (n % 26)) + letter;
+          n = Math.floor(n / 26) - 1;
+        } while (n >= 0);
+        var hdr = headers[idx] || '';
+        if (showHdr && hdr) {
+          opt.textContent = hdr;
+        } else if (hdr) {
+          opt.textContent = letter + ' (sample: ' + hdr + ')';
+        } else {
+          opt.textContent = letter;
+        }
+      });
+    });
+  }
+  document.querySelectorAll('input.cr-has-header').forEach(function (cb) {
+    var kind = cb.getAttribute('data-kind');
+    var headers = [];
+    var node = document.getElementById('cr-headers-' + kind);
+    if (node) {
+      try { headers = JSON.parse(node.textContent || '[]'); } catch (e) {}
+    }
+    var form = cb.closest('form');
+    cb.addEventListener('change', function () {
+      rebuildOptions(form, headers, cb.checked);
+    });
+  });
+})();
+
+// Show / hide the member-account fields based on the chosen mode.
+// Defined globally so the inline onchange="" handlers on the radios can
+// still call it, but we also wire up our own event-delegation listener
+// below as a belt-and-suspenders measure.
+window.updateCRMemberAccountMode = function (kind) {
+  var picked = document.querySelector(
+    'input[name="' + kind + '_member_account_mode"]:checked'
+  );
+  var mode = picked ? picked.value : 'split';
+  // Build the visibility map with bracket-assignment so we don't rely on
+  // ES6 computed property name syntax inside an object literal.
+  var show = {};
+  show['cr-ma-combined-' + kind] = (mode === 'fixed_suffix' || mode === 'delimiter');
+  show['cr-ma-suffix-'   + kind] = (mode === 'fixed_suffix');
+  show['cr-ma-delim-'    + kind] = (mode === 'delimiter');
+  show['cr-ma-member-'   + kind] = (mode === 'split');
+  show['cr-ma-account-'  + kind] = (mode === 'split');
+  Object.keys(show).forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    var visible = show[id];
+    el.style.display = visible ? '' : 'none';
+    // Disable hidden controls so they don't post stale values.
+    el.querySelectorAll('input, select').forEach(function (ctrl) {
+      ctrl.disabled = !visible;
+    });
+  });
+};
+
+// Event-delegation fallback: catches change AND click events on any
+// member-account-mode radio anywhere on the page, regardless of when it
+// was rendered. Doesn't depend on inline onchange="" attributes firing.
+(function () {
+  function handle(evt) {
+    var t = evt.target;
+    if (!t || t.tagName !== 'INPUT' || t.type !== 'radio') return;
+    var m = (t.name || '').match(/^(co|recov)_member_account_mode$/);
+    if (!m) return;
+    window.updateCRMemberAccountMode(m[1]);
+  }
+  document.addEventListener('change', handle, true);
+  document.addEventListener('click',  handle, true);
+})();
+
+// Sync initial visibility immediately (script is at end of body, so the
+// radios exist) and again on DOMContentLoaded just in case.
+(function () {
+  function syncAll() {
+    ['co', 'recov'].forEach(function (kind) {
+      if (document.querySelector('input[name="' + kind + '_member_account_mode"]')) {
+        window.updateCRMemberAccountMode(kind);
+      }
+    });
+  }
+  syncAll();
+  document.addEventListener('DOMContentLoaded', syncAll);
+})();
+</script>
+{% endblock %}

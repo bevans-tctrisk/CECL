@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block title %}Loan File Format{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Loan File Format</h2>
+  <p class="muted">Tell the importer how to recognize this CU's quarterly loan
+    files. We'll scan the data directory you set on Step 1 and show you which
+    files match these patterns.</p>
+
+  {% if state.data_directory %}
+    <p class="muted">
+      <strong>Data directory:</strong> <code>{{ state.data_directory }}</code>
+    </p>
+  {% else %}
+    <p class="muted">
+      <em>No data directory set on Step 1 &mdash; pattern testing is disabled.
+      You can still save patterns and scan later.</em>
+    </p>
+  {% endif %}
+
+  {% if sample_loan_name %}
+    <div class="alert alert-info" style="margin-bottom:12px;">
+      <strong>Sample file detected:</strong> <code>{{ sample_loan_name }}</code>.
+      {% if suggestion %}
+        We can auto-fill the file-name and date patterns from this filename.
+        <form method="post" style="display:inline; margin-left:8px;">
+          <button class="btn btn-secondary" type="submit"
+                  name="action" value="suggest">
+            Suggest from sample
+          </button>
+        </form>
+        <div class="muted" style="margin-top:6px;">
+          Suggested file pattern: <code>{{ suggestion.file_pattern }}</code><br>
+          Suggested date pattern: <code>{{ suggestion.date_pattern }}</code>
+        </div>
+      {% else %}
+        <em>Couldn't detect a date in the filename &mdash; please fill in the
+        patterns by hand.</em>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  <form method="post">
+    <div class="form-row">
+      <div>
+        <label>File-name pattern (regex) *
+          <input type="text" name="file_pattern"
+                 value="{{ form_values.file_pattern }}" required>
+          <span class="help">Examples: <code>AIRESLOANS.*\.(xlsx|xls)$</code> or <code>LOANDATA.*\.csv$</code>. Case-insensitive.</span>
+        </label>
+      </div>
+      <div>
+        <label>Date pattern (regex w/ year/month groups) *
+          <input type="text" name="date_pattern"
+                 value="{{ form_values.date_pattern }}" required>
+          <span class="help">Default <code>(\d{4})-(\d{2})</code> matches <code>...2025-12....xlsx</code>. Group 1 = year, group 2 = month.</span>
+        </label>
+      </div>
+      <div>
+        <label>Pool-code split character
+          <input type="text" name="pool_code_split"
+                 value="{{ form_values.pool_code_split }}" maxlength="3">
+          <span class="help">If pool codes look like <code>11 / New Car</code>, set this to <code>/</code>. Leave default if unsure.</span>
+        </label>
+      </div>
+      <div>
+        <label>Balance "remove" characters
+          <input type="text" name="balance_remove_chars"
+                 value="{{ form_values.balance_remove_chars | join(',') }}">
+          <span class="help">Comma-separated list of characters to strip from balance text. Default <code>$,,</code>.</span>
+        </label>
+      </div>
+      <div>
+        <label style="display:flex; align-items:center; gap:6px; margin-top:32px;">
+          <input type="checkbox" name="accounting_negatives"
+                 {% if form_values.accounting_negatives %}checked{% endif %}>
+          Treat parentheses as negatives (accounting style)
+        </label>
+      </div>
+    </div>
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step_impaired') }}">&larr; Back</a>
+      <button class="btn btn-secondary" type="submit" name="action" value="test"
+              {% if not state.data_directory %}disabled{% endif %}>
+        Test patterns &darr;
+      </button>
+      <button class="btn btn-primary" type="submit" name="action" value="save">
+        Next: Economic Data &rarr;
+      </button>
+    </div>
+  </form>
+</div>
+
+{% if scan %}
+<div class="card">
+  <h3>Pattern test results</h3>
+  {% if scan.error %}
+    <div class="alert alert-error">{{ scan.error }}</div>
+  {% else %}
+    <p class="muted">
+      Scanned <code>{{ scan.directory }}</code> &mdash;
+      <strong>{{ scan.matched }}</strong> of {{ scan.total_files }}
+      candidate files match.
+      {% if scan.truncated %}
+        <em>(showing first 200 newest)</em>
+      {% endif %}
+    </p>
+    {% if scan.files %}
+      <table>
+        <thead>
+          <tr>
+            <th style="width:60px;">Match</th>
+            <th>File</th>
+            <th>Subfolder</th>
+            <th style="width:110px;">Extracted date</th>
+            <th style="width:90px;">Remove</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in scan.files %}
+            <tr style="{% if not f.matched %}color:#999;{% endif %}">
+              <td>
+                {% if f.matched %}
+                  <span style="color:#2a7; font-weight:bold;">&#10003;</span>
+                {% else %}
+                  <span>&mdash;</span>
+                {% endif %}
+              </td>
+              <td><code>{{ f.name }}</code></td>
+              <td>{% if f.subdir %}<code>{{ f.subdir }}</code>{% endif %}</td>
+              <td>
+                {% if f.date %}
+                  <code>{{ f.date }}</code>
+                {% elif f.matched and f.date_error %}
+                  <span style="color:#c33;" title="{{ f.date_error }}">no date</span>
+                {% endif %}
+              </td>
+              <td>
+                <form method="post" style="margin:0;"
+                      onsubmit="return confirm('Permanently delete {{ f.name }} from the data directory?');">
+                  <input type="hidden" name="file_pattern" value="{{ form_values.file_pattern }}">
+                  <input type="hidden" name="date_pattern" value="{{ form_values.date_pattern }}">
+                  <input type="hidden" name="pool_code_split" value="{{ form_values.pool_code_split }}">
+                  <input type="hidden" name="balance_remove_chars" value="{{ form_values.balance_remove_chars | join(',') }}">
+                  {% if form_values.accounting_negatives %}
+                    <input type="hidden" name="accounting_negatives" value="on">
+                  {% endif %}
+                  <input type="hidden" name="filename"
+                         value="{% if f.subdir %}{{ f.subdir }}/{% endif %}{{ f.name }}">
+                  <button class="btn btn-secondary" type="submit"
+                          name="action" value="remove_file"
+                          title="Delete this file from the data directory"
+                          style="color:#c33;">&times;</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if scan.matched == 0 and scan.total_files > 0 %}
+        <p class="muted" style="margin-top:8px;">
+          <strong>Hint:</strong> none of the files in this folder match.
+          Adjust the file-name pattern above and click <em>Test patterns</em> again.
+        </p>
+      {% endif %}
+    {% else %}
+      <p class="muted"><em>No candidate files (.xlsx, .xls, .xlsm, .csv, .txt) found.</em></p>
+    {% endif %}
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

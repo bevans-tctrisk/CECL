@@ -1,0 +1,74 @@
+﻿# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Secrets / per-machine config ----
+.env
+.env.*
+/admin_defaults.yaml
+
+# ---- Databases ----
+*.db
+*.sqlite
+*.sqlite3
+
+# ---- Logs / runtime artifacts ----
+*.log
+*.out
+*.err
+logs/
+run_ui.err*
+run_ui.out*
+ui_err*
+ui_out*
+ui_log*
+vizo_run.log
+hist_bal.out
+inspect_warm.out
+temp_diag_out.txt
+temp_vizo_output.txt
+tmp_*.html
+*.bak
+*.bak_*
+
+# ---- Credit-union data (NEVER push real member data) ----
+/Raw_Uploads/
+/Generated_Reports/
+/Reports/
+/Sample Reports/
+/wizard_drafts/
+/client_configs/
+/Archive/
+/Brian Process outlines/
+/temp_chart_xml/
+
+# Per-CU data folders (anything not source code)
+/Franklin Trust Files/
+/Maple FCU/
+/Ontario files/
+/Sample CU/
+
+# ---- Throwaway debug scripts at repo root ----
+/temp_*.py
+
+# Old/backup source files kept locally but not versioned
+/generate_report_old.py
+/report_tct_backup.py
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# ---- Build / dist ----
+build/
+dist/

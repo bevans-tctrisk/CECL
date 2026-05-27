@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Edit Settings &mdash; {{ cfg.credit_union }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Edit Settings &mdash; {{ cfg.credit_union }}</h2>
+  <p class="muted">
+    Update per-pool risk rating and ACL months, plus global management
+    adjustment factors. Changes are written to
+    <code>client_configs/{{ short_name }}.yaml</code> and take effect on the
+    next report run.
+  </p>
+  <p>
+    <a class="btn btn-secondary" href="{{ url_for('run.client_dashboard', short_name=short_name) }}">
+      &larr; Back to dashboard
+    </a>
+    <a class="btn btn-secondary" href="{{ url_for('run.edit_pool_map', short_name=short_name) }}">
+      Edit Loan Code Mapping
+    </a>
+  </p>
+</div>
+
+<form method="post">
+  <div class="card">
+    <h3>Pools <span class="muted" style="font-weight:normal;">({{ rows | length }})</span></h3>
+    <p class="muted">
+      Pools marked <em>No</em> for Risk Rated are excluded from the
+      Improved Deteriorated Summary, Historical Trends Balance, and per-pool
+      Risk Change tabs (single-line pools).
+      Pools marked <em>Excluded from Analysis</em> are dropped entirely &mdash;
+      their loan codes are remapped to the <code>Exclude</code> sentinel and
+      do not appear in any totals, charts, or per-pool sheets.
+      Leave ACL Months blank to use whatever is detected from the WARM file
+      or carried forward from the prior TCT report.
+    </p>
+    {% if not rows %}
+      <p><em>No pools found yet. Run an import first so we know which pools exist.</em></p>
+    {% else %}
+    <p class="muted">
+      Use the <strong>&uarr;</strong> / <strong>&darr;</strong> buttons to
+      change the order pools appear in the report. Risk-rated pools should
+      generally come before non-risk-rated; excluded pools are dropped from
+      the analysis entirely regardless of position.
+    </p>
+    <table id="pools-table" style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr style="background:#eef; text-align:left;">
+          <th style="padding:6px 8px; width:90px;">Order</th>
+          <th style="padding:6px 8px;">Pool</th>
+          <th style="padding:6px 8px;">Risk Rated</th>
+          <th style="padding:6px 8px;">ACL Months</th>
+        </tr>
+      </thead>
+      <tbody id="pools-tbody">
+        {% for r in rows %}
+        <tr class="pool-row" style="border-bottom:1px solid #eee;">
+          <td style="padding:4px 8px; white-space:nowrap;">
+            <button type="button" class="btn-up"
+                    style="padding:2px 6px;" title="Move up">&uarr;</button>
+            <button type="button" class="btn-down"
+                    style="padding:2px 6px;" title="Move down">&darr;</button>
+            <span class="row-num muted" style="margin-left:6px;">{{ loop.index }}</span>
+          </td>
+          <td style="padding:4px 8px;">
+            <input type="hidden" name="pool_name" value="{{ r.name }}">
+            <code>{{ r.name }}</code>
+          </td>
+          <td style="padding:4px 8px;">
+            {% set _rr_val = 'excluded' if r.excluded else ('yes' if r.risk_rated else 'no') %}
+            <select name="rr_{{ loop.index0 }}" class="rr-select">
+              <option value="yes"      {% if _rr_val == 'yes' %}selected{% endif %}>Yes &mdash; broken out by Grades</option>
+              <option value="no"       {% if _rr_val == 'no' %}selected{% endif %}>No &mdash; single line</option>
+              <option value="excluded" {% if _rr_val == 'excluded' %}selected{% endif %}>Excluded from Analysis</option>
+            </select>
+          </td>
+          <td style="padding:4px 8px;">
+            <input type="number" name="acl_{{ loop.index0 }}" class="acl-input"
+                   value="{{ r.acl_months }}" min="0" max="240"
+                   style="width:90px;" placeholder="(auto)">
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h3>Management Adjustment Defaults</h3>
+    <p class="muted">
+      Global factors used when computing the management adjustment overlay.
+    </p>
+    <label>LTV baseline
+      <input type="number" step="0.01" name="ma_ltv_baseline"
+             value="{{ mgmt_adj.get('ltv_baseline', '') }}"
+             style="width:120px;">
+    </label>
+    <label style="margin-top:10px;">Probability factor
+      <input type="number" step="0.01" name="ma_probability_factor"
+             value="{{ mgmt_adj.get('probability_factor', '') }}"
+             style="width:120px;">
+    </label>
+  </div>
+
+  <div class="card">
+    <button class="btn btn-primary" type="submit">Save Settings</button>
+    <a class="btn btn-secondary" href="{{ url_for('run.client_dashboard', short_name=short_name) }}">Cancel</a>
+  </div>
+</form>
+
+<script>
+(function () {
+  const tbody = document.getElementById('pools-tbody');
+  if (!tbody) return;
+
+  function renumber() {
+    const rows = tbody.querySelectorAll('tr.pool-row');
+    rows.forEach((tr, i) => {
+      const sel = tr.querySelector('select.rr-select');
+      const acl = tr.querySelector('input.acl-input');
+      const num = tr.querySelector('span.row-num');
+      if (sel) sel.name = 'rr_' + i;
+      if (acl) acl.name = 'acl_' + i;
+      if (num) num.textContent = (i + 1).toString();
+    });
+  }
+
+  tbody.addEventListener('click', function (ev) {
+    const btn = ev.target.closest('button');
+    if (!btn) return;
+    const tr = btn.closest('tr.pool-row');
+    if (!tr) return;
+    if (btn.classList.contains('btn-up')) {
+      const prev = tr.previousElementSibling;
+      if (prev && prev.classList.contains('pool-row')) {
+        tbody.insertBefore(tr, prev);
+        renumber();
+      }
+    } else if (btn.classList.contains('btn-down')) {
+      const next = tr.nextElementSibling;
+      if (next && next.classList.contains('pool-row')) {
+        tbody.insertBefore(next, tr);
+        renumber();
+      }
+    }
+  });
+})();
+</script>
+{% endblock %}

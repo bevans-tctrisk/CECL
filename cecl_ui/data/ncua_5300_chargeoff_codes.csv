@@ -1,0 +1,21 @@
+field_code,loan_code,description
+A680,Unsecured Credit Card,YTD net charge-offs — unsecured credit card loans
+A136,Payday Alternative Loans,YTD net charge-offs — payday alternative loans (PALs/FCU)
+A550T,Non-Federally Guaranteed Student,YTD net charge-offs — non-federally guaranteed student loans
+ACH0007,All Other Unsecured,YTD net charge-offs — all other unsecured loans/lines of credit
+A550C1,New Vehicles,YTD net charge-offs — new vehicle loans
+A550C2,Used Vehicles,YTD net charge-offs — used vehicle loans
+A550D,Leases Receivable,YTD net charge-offs — leases receivable
+ACH0015,All Other Secured Non-RE,YTD net charge-offs — all other secured non-real estate loans/lines of credit
+ACH0017,First Liens,YTD net charge-offs — secured by 1st lien on a single 1- to 4-family residential property
+ACH0019,Junior Liens,YTD net charge-offs — secured by junior lien on a single 1- to 4-family residential property
+ACH0021,Other Real Estate (Other),YTD net charge-offs — all other (non-commercial) real estate loans/lines of credit
+ACH0023,Construction and Development,YTD net charge-offs — construction and development loans
+ACH0025,Secured by Farmland,YTD net charge-offs — secured by farmland
+ACH0027,Secured by Multifamily,YTD net charge-offs — secured by multifamily
+ACH0029,Owner-Occupied Non-Farm Non-Residential,YTD net charge-offs — secured by owner-occupied non-farm non-residential property
+ACH0031,Non-Owner-Occupied Non-Farm Non-Residential,YTD net charge-offs — secured by non-owner-occupied non-farm non-residential property
+ACH0033,Agricultural,YTD net charge-offs — loans to finance agricultural production and other loans to farmers
+ACH0035,Commercial and Industrial,YTD net charge-offs — commercial and industrial loans
+ACH0037,Unsecured Commercial,YTD net charge-offs — unsecured commercial loans
+ACH0039,Unsecured Revolving Commercial,YTD net charge-offs — unsecured revolving lines of credit for commercial purposes

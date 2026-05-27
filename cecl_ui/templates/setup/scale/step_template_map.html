@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}SCALE — Template &amp; Map{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Template &amp; Mapping for {{ state.scale.period }}</h2>
+  <p class="muted">
+    SCALE ships with canonical templates and per-quarter mapping CSVs. You can
+    upload per-CU overrides if this credit union needs a customized template or
+    a different cell map.
+  </p>
+
+  <h3>Template (.xlsx)</h3>
+  <div class="info-block" style="padding:8px 12px; border:1px solid #c9d6e8; background:#f4f8ff;">
+    {% if tmpl.ok %}
+      <p style="margin:4px 0;">
+        <strong>Source:</strong>
+        {% if tmpl.source == 'override' %}
+          per-CU override &mdash; <code>{{ state.scale.template_override_name }}</code>
+        {% elif tmpl.source == 'canonical' %}
+          app-wide canonical (exact match for {{ state.scale.period }})
+        {% else %}
+          app-wide canonical (fallback) &mdash; {{ tmpl.message }}
+        {% endif %}
+      </p>
+      <p class="muted" style="margin:4px 0; font-size:0.85em;">
+        Path: <code>{{ tmpl.path }}</code>
+      </p>
+    {% else %}
+      <p style="color:#a01818;"><strong>No template available.</strong> {{ tmpl.message }}</p>
+    {% endif %}
+  </div>
+
+  <form method="post" enctype="multipart/form-data" style="margin-top:8px;">
+    <label>Upload a per-CU template override
+      <input type="file" name="template_file" accept=".xlsx">
+    </label>
+    <div style="display:flex; gap:8px; margin-top:4px;">
+      <button type="submit" name="action" value="upload_template" class="btn btn-secondary">Upload template</button>
+      {% if state.scale.template_override_path %}
+        <button type="submit" name="action" value="clear_template" class="btn btn-secondary">Clear override</button>
+      {% endif %}
+    </div>
+  </form>
+
+  <h3 style="margin-top:20px;">Mapping CSV</h3>
+  <div class="info-block" style="padding:8px 12px; border:1px solid #c9d6e8; background:#f4f8ff;">
+    {% if mp.ok %}
+      <p style="margin:4px 0;">
+        <strong>Source:</strong>
+        {% if mp.source == 'override' %}
+          per-CU override &mdash; <code>{{ state.scale.map_override_name }}</code>
+        {% else %}
+          app-wide canonical (exact match for {{ state.scale.period }})
+        {% endif %}
+      </p>
+      <p class="muted" style="margin:4px 0; font-size:0.85em;">
+        Path: <code>{{ mp.path }}</code>
+      </p>
+      {% if map_summary %}
+        <p style="margin:4px 0;">
+          {{ map_summary.total }} mapping rows across {{ map_summary.sheets|length }} sheets.
+        </p>
+        <details>
+          <summary>Sheets &amp; cell counts</summary>
+          <ul>
+            {% for sheet, cnt in map_summary.sheets.items() %}
+              <li><code>{{ sheet }}</code> &mdash; {{ cnt }}</li>
+            {% endfor %}
+          </ul>
+        </details>
+      {% endif %}
+    {% else %}
+      <p style="color:#a01818;"><strong>No mapping CSV.</strong> {{ mp.message }}</p>
+    {% endif %}
+  </div>
+
+  <form method="post" enctype="multipart/form-data" style="margin-top:8px;">
+    <label>Upload a per-CU mapping override
+      <input type="file" name="map_file" accept=".csv">
+    </label>
+    <div style="display:flex; gap:8px; margin-top:4px;">
+      <button type="submit" name="action" value="upload_map" class="btn btn-secondary">Upload mapping</button>
+      {% if state.scale.map_override_path %}
+        <button type="submit" name="action" value="clear_map" class="btn btn-secondary">Clear override</button>
+      {% endif %}
+    </div>
+  </form>
+
+  <form method="post" style="margin-top:18px;">
+    <div class="btn-row" style="display:flex; gap:8px;">
+      <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_solr') }}">&larr; Back</a>
+      <button type="submit" name="action" value="next" class="btn"
+        {% if not (tmpl.ok and mp.ok) %}disabled title="Resolve template + map before continuing"{% endif %}>
+        Continue &rarr;
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

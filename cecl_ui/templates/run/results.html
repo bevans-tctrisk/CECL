@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Report Results{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Report Results</h2>
+
+  {% if outputs %}
+    <h3>Generated files</h3>
+    <ul class="report-list">
+      {% for path in outputs %}
+      <li>
+        <span><code>{{ path }}</code></span>
+        <a class="btn btn-primary" href="{{ url_for('run.download') }}?path={{ path | urlencode }}">Download</a>
+      </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  {% if errors %}
+    <h3>Errors</h3>
+    <ul class="report-list">
+      {% for e in errors %}<li class="err"><code>{{ e }}</code></li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  {% if not outputs and not errors %}
+    <p class="muted">No reports were generated.</p>
+  {% endif %}
+
+  <div class="btn-row">
+    <a class="btn btn-secondary" href="{{ url_for('run.client_dashboard', short_name=short_name) }}">&larr; Back to CU</a>
+    <a class="btn btn-primary" href="{{ url_for('home.index') }}">Home</a>
+  </div>
+</div>
+{% endblock %}

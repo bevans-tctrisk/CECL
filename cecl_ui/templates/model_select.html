@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Choose a CECL Model{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Choose a CECL Model</h2>
+  <p class="muted">Select the methodology this CU will use.</p>
+  <form method="post">
+    <div class="choice-grid">
+      <button class="choice-card" type="submit" name="model" value="migration" style="border:0;">
+        <h3>CECL &mdash; Migration Model</h3>
+        <p>Risk-grade migration over a look-back window. Used for TCT, Vizo, Vizo Supplemental, and Improved/Deteriorated reports.</p>
+      </button>
+      <button class="choice-card" type="submit" name="model" value="scale" style="border:0;">
+        <h3>CECL &mdash; Simple Model <span class="pill">SCALE</span></h3>
+        <p>Lighter-weight reserve calculation. Pulls almost all data from NCUA 5300 reports via Solr and fills a quarterly SCALE workbook template.</p>
+      </button>
+    </div>
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('home.index') }}">&larr; Back</a>
+      <span></span>
+    </div>
+  </form>
+</div>
+{% endblock %}

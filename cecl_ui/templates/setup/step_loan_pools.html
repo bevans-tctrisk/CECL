@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block title %}Loan Pools{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Loan Pools</h2>
+  <p class="muted">
+    Define the canonical loan-pool list for this credit union. Each pool
+    listed here drives the downstream Loan Code Mapping, monthly balance
+    titles, credit-grade allocations, and management-adjustment overlays.
+  </p>
+  <p class="muted">
+    Use <strong>+ Add Pool</strong> to declare a pool, the
+    <strong>&times;</strong> button to remove one, and the
+    <strong>&uarr;</strong> / <strong>&darr;</strong> buttons to change
+    the order pools appear in the report. For each pool, indicate
+    whether it should be broken out by credit grades / business risk
+    ratings, and how many months of ACL history (including the current
+    month) to use.
+  </p>
+
+  {% set ps_by_name = {} %}
+  {% for s in (state.pool_settings or []) %}
+    {% set _ = ps_by_name.update({s.name: s}) %}
+  {% endfor %}
+  {% set ns = namespace(rows=[]) %}
+  {% for s in (state.pool_settings or []) %}
+    {% set _pn = (s.name or '') | lower %}
+    {% if s.name
+          and not (_pn.startswith('allowance for credit loss')
+                   or _pn.startswith('credit grade deteriorated')
+                   or _pn.startswith('grand total')
+                   or _pn.startswith('total')
+                   or _pn.startswith('hide')
+                   or _pn == 'exclude'
+                   or _pn == 'allowance') %}
+      {% set _ = ns.rows.append(s) %}
+    {% endif %}
+  {% endfor %}
+
+  <h3>Pools <span class="muted" style="font-weight:normal;">({{ ns.rows | length }})</span></h3>
+  <form method="post">
+    <table id="pool-list-table" style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr style="background:#eef; text-align:left;">
+          <th style="padding:6px 8px; width:90px;">Order</th>
+          <th style="padding:6px 8px;">Pool</th>
+          <th style="padding:6px 8px;">Risk Rated</th>
+          <th style="padding:6px 8px;">ACL Months</th>
+          <th style="padding:6px 8px; width:40px;"></th>
+        </tr>
+      </thead>
+      <tbody id="pool-list-tbody">
+        {% for s in ns.rows %}
+        <tr class="pool-list-row" style="border-bottom:1px solid #eee;">
+          <td style="padding:4px 8px; white-space:nowrap;">
+            <button type="button" class="btn-up" style="padding:2px 6px;" title="Move up">&uarr;</button>
+            <button type="button" class="btn-down" style="padding:2px 6px;" title="Move down">&darr;</button>
+            <span class="row-num muted" style="margin-left:6px;">{{ loop.index }}</span>
+          </td>
+          <td style="padding:4px 8px;">
+            <input type="text" name="ps_name" value="{{ s.name }}"
+                   class="ps-name" style="width:100%; font-family:monospace;">
+          </td>
+          <td style="padding:4px 8px;">
+            {% set _rr_val = 'excluded' if s.excluded else ('yes_brr' if s.brr else ('yes' if s.risk_rated else 'no')) %}
+            <select name="ps_risk_rated_{{ loop.index0 }}" class="ps-rr">
+              <option value="yes"      {% if _rr_val == 'yes' %}selected{% endif %}>Yes &mdash; broken out by Grades</option>
+              <option value="yes_brr"  {% if _rr_val == 'yes_brr' %}selected{% endif %}>Yes &mdash; broken out by Business RR</option>
+              <option value="no"       {% if _rr_val == 'no' %}selected{% endif %}>No &mdash; single line</option>
+              <option value="excluded" {% if _rr_val == 'excluded' %}selected{% endif %}>Excluded from Analysis</option>
+            </select>
+          </td>
+          <td style="padding:4px 8px;">
+            <input type="number" name="ps_acl_months_{{ loop.index0 }}" class="ps-acl"
+                   value="{{ s.acl_months or '' }}" min="0" max="240"
+                   style="width:80px;">
+            <span class="help" style="margin-left:4px;">incl. current month</span>
+          </td>
+          <td style="padding:4px 8px; text-align:center;">
+            <button type="button" class="btn-del icon-btn" title="Remove this pool"
+                    style="color:#a00; font-weight:bold;">&times;</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div style="margin-top:10px;">
+      <button type="button" id="pool-list-add" class="btn btn-secondary">
+        + Add Pool
+      </button>
+    </div>
+
+    <script>
+      (function () {
+        var tbody = document.getElementById('pool-list-tbody');
+        if (!tbody) return;
+
+        function renumber() {
+          var rows = tbody.querySelectorAll('tr.pool-list-row');
+          rows.forEach(function (tr, i) {
+            var rr = tr.querySelector('select.ps-rr');
+            var acl = tr.querySelector('input.ps-acl');
+            var num = tr.querySelector('span.row-num');
+            if (rr) rr.name = 'ps_risk_rated_' + i;
+            if (acl) acl.name = 'ps_acl_months_' + i;
+            if (num) num.textContent = (i + 1).toString();
+          });
+        }
+
+        tbody.addEventListener('click', function (ev) {
+          var btn = ev.target.closest('button');
+          if (!btn) return;
+          var tr = btn.closest('tr.pool-list-row');
+          if (!tr) return;
+          if (btn.classList.contains('btn-up')) {
+            var prev = tr.previousElementSibling;
+            if (prev && prev.classList.contains('pool-list-row')) {
+              tbody.insertBefore(tr, prev);
+              renumber();
+            }
+          } else if (btn.classList.contains('btn-down')) {
+            var next = tr.nextElementSibling;
+            if (next && next.classList.contains('pool-list-row')) {
+              tbody.insertBefore(next, tr);
+              renumber();
+            }
+          } else if (btn.classList.contains('btn-del')) {
+            if (confirm('Remove pool "' + (tr.querySelector('input.ps-name').value || '(unnamed)') + '"?')) {
+              tr.parentNode.removeChild(tr);
+              renumber();
+            }
+          }
+        });
+
+        var addBtn = document.getElementById('pool-list-add');
+        if (addBtn) {
+          addBtn.addEventListener('click', function () {
+            var i = tbody.querySelectorAll('tr.pool-list-row').length;
+            var tr = document.createElement('tr');
+            tr.className = 'pool-list-row';
+            tr.style.borderBottom = '1px solid #eee';
+            tr.innerHTML =
+              '<td style="padding:4px 8px; white-space:nowrap;">' +
+                '<button type="button" class="btn-up" style="padding:2px 6px;" title="Move up">&uarr;</button>' +
+                '<button type="button" class="btn-down" style="padding:2px 6px;" title="Move down">&darr;</button>' +
+                '<span class="row-num muted" style="margin-left:6px;">' + (i + 1) + '</span>' +
+              '</td>' +
+              '<td style="padding:4px 8px;">' +
+                '<input type="text" name="ps_name" value="" class="ps-name" placeholder="New pool name" style="width:100%; font-family:monospace;">' +
+              '</td>' +
+              '<td style="padding:4px 8px;">' +
+                '<select name="ps_risk_rated_' + i + '" class="ps-rr">' +
+                  '<option value="yes">Yes &mdash; broken out by Grades</option>' +
+                  '<option value="yes_brr">Yes &mdash; broken out by Business RR</option>' +
+                  '<option value="no" selected>No &mdash; single line</option>' +
+                  '<option value="excluded">Excluded from Analysis</option>' +
+                '</select>' +
+              '</td>' +
+              '<td style="padding:4px 8px;">' +
+                '<input type="number" name="ps_acl_months_' + i + '" class="ps-acl" value="36" min="0" max="240" style="width:80px;">' +
+                '<span class="help" style="margin-left:4px;">incl. current month</span>' +
+              '</td>' +
+              '<td style="padding:4px 8px; text-align:center;">' +
+                '<button type="button" class="btn-del icon-btn" title="Remove this pool" style="color:#a00; font-weight:bold;">&times;</button>' +
+              '</td>';
+            tbody.appendChild(tr);
+            renumber();
+            var nameInput = tr.querySelector('input.ps-name');
+            if (nameInput) nameInput.focus();
+          });
+        }
+      })();
+    </script>
+
+    <div class="btn-row" style="margin-top:18px;">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step1_identity') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit"
+              name="action" value="save_pool_settings">
+        Save &amp; Next &rarr;
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

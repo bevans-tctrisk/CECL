@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Select a Credit Union{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Select a Credit Union</h2>
+  {% if not clients %}
+    <p class="muted">No CUs configured yet. <a href="{{ url_for('home.model_select') }}">Set one up &rsaquo;</a></p>
+  {% else %}
+    <table>
+      <thead><tr><th>Short Name</th><th>Credit Union</th><th></th></tr></thead>
+      <tbody>
+        {% for c in clients %}
+        <tr>
+          <td>{{ c.short_name }}</td>
+          <td>{{ c.credit_union }}</td>
+          <td><a class="btn btn-primary" href="{{ url_for('run.client_dashboard', short_name=c.short_name) }}">Open</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>
+{% endblock %}

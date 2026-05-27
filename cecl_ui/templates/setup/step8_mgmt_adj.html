@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% block title %}Management Adjustments{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Management Adjustments</h2>
+  <p class="muted">Optional Q-factor overlays the engine adds on top of the
+    base WARM loss rate. Most CUs leave the per-pool table blank and only
+    return here later when management decides a specific pool needs a manual
+    bump.</p>
+
+  <form method="post">
+
+    <h3 style="margin-top:8px;">Per-pool overlay (optional)</h3>
+    <p class="help">Enter a percentage to add to that pool's base loss rate.
+      Positive values <em>increase</em> the allowance; negative values
+      decrease it. Leave blank or <code>0</code> for pools you don't want
+      to adjust. The engine applies the overlay across grades using the
+      standard distribution factor (so the overlay you enter here is the
+      pool-wide weighted average).</p>
+
+    {% if pool_names %}
+      <table class="data-table" style="max-width:760px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;">Pool</th>
+            <th style="text-align:center; width:130px;" title="Apply the industry default management adjustment to this pool">Use Default</th>
+            <th style="text-align:left; width:160px;">Overlay (%)</th>
+            <th style="text-align:left;">Example</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in pool_names %}
+            <tr>
+              <td>{{ p }}</td>
+              <td style="text-align:center;">
+                <input type="checkbox" name="pool_use_default__{{ p }}"
+                       {% if pool_use_default.get(p) %}checked{% endif %}>
+              </td>
+              <td>
+                <input type="number" step="0.01"
+                       name="pool_pct__{{ p }}"
+                       value="{{ pool_overlay_pct[p] }}"
+                       placeholder="e.g. 0.50"
+                       style="width:120px;">
+              </td>
+              <td class="muted">
+                {% if pool_overlay_pct[p] %}
+                  +{{ pool_overlay_pct[p] }}% &rarr;
+                  decimal <code>{{ '%.5f'|format(pool_overlay_pct[p]|float / 100.0) }}</code>
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="flash info">No pools have been named yet. Go back to
+        <a href="{{ url_for('setup.step4_pools') }}">Step 4 (Pools)</a> and
+        give your raw pool codes meaningful names first.</div>
+    {% endif %}
+
+    <details style="margin-top:24px;">
+      <summary><strong>Advanced / legacy factors</strong></summary>
+      <p class="help">These two values are kept in the YAML for backward
+        compatibility with older client configs. The current report engine
+        does not read them — leave them at the defaults unless you have a
+        specific reason to change them.</p>
+      <div class="form-row">
+        <div>
+          <label>LTV baseline
+            <input type="number" step="0.01" name="ltv_baseline"
+                   value="{{ state.mgmt_adj.ltv_baseline }}">
+            <span class="help">Default <code>0.9</code>.</span>
+          </label>
+        </div>
+        <div>
+          <label>Probability factor
+            <input type="number" step="0.01" name="probability_factor"
+                   value="{{ state.mgmt_adj.probability_factor }}">
+            <span class="help">Default <code>0.35</code>.</span>
+          </label>
+        </div>
+      </div>
+    </details>
+
+    {# ── Other Allowance Considerations (optional) ──────────── #}
+    <h3 style="margin-top:24px; padding-top:14px; border-top:2px solid #ddd;">
+      Other Allowance Considerations
+      <span class="badge-optional">Optional</span>
+    </h3>
+    <label class="checkbox-label" style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+      <input type="checkbox" name="include_other_allowance"
+             id="include-oac-cb"
+             {% if state.include_other_allowance %}checked{% endif %}
+             onchange="document.getElementById('oac-section').hidden = !this.checked;">
+      <strong>Include Other Allowance Considerations</strong>
+    </label>
+
+    <div id="oac-section" {% if not state.include_other_allowance %}hidden{% endif %}>
+      <p class="muted">
+        Each line is an additional allowance overlay. Provide a Title,
+        a Balance ($), and a Percentage (0&ndash;100%). The wizard
+        computes the product (Balance &times; Percentage) automatically.
+      </p>
+      <table id="oac-table" style="width:100%; border-collapse:collapse; font-size:13px;">
+        <thead>
+          <tr style="background:#eef; text-align:left;">
+            <th style="padding:6px 8px;">Title</th>
+            <th style="padding:6px 8px;">Balance ($)</th>
+            <th style="padding:6px 8px;">Percentage of Balance (%)</th>
+            <th style="padding:6px 8px;">Computed Allowance ($)</th>
+            <th style="padding:6px 8px;"></th>
+          </tr>
+        </thead>
+        <tbody id="oac-tbody">
+          {% set oac_rows = state.other_allowance_considerations or [] %}
+          {% if oac_rows %}
+            {% for r in oac_rows %}
+            <tr class="oac-row" style="border-bottom:1px solid #eee;">
+              <td style="padding:4px 8px;">
+                <input type="text" name="oac_title" value="{{ r.title or '' }}" style="width:100%;">
+              </td>
+              <td style="padding:4px 8px;">
+                <input type="number" step="0.01" min="0"
+                       name="oac_balance" value="{{ '%.2f'|format(r.balance or 0) }}"
+                       class="oac-balance" style="width:140px; text-align:right;">
+              </td>
+              <td style="padding:4px 8px;">
+                <input type="number" step="0.01" min="0" max="100"
+                       name="oac_percentage" value="{{ '%.2f'|format(r.percentage or 0) }}"
+                       class="oac-pct" style="width:100px; text-align:right;"> %
+              </td>
+              <td style="padding:4px 8px; text-align:right;" class="oac-product">
+                ${{ '%.2f'|format(((r.balance or 0) * (r.percentage or 0) / 100.0)) }}
+              </td>
+              <td style="padding:4px 8px;">
+                <button type="button" class="btn btn-secondary oac-remove"
+                        style="padding:2px 8px;">Remove</button>
+              </td>
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr class="oac-row" style="border-bottom:1px solid #eee;">
+              <td style="padding:4px 8px;">
+                <input type="text" name="oac_title" value="" style="width:100%;">
+              </td>
+              <td style="padding:4px 8px;">
+                <input type="number" step="0.01" min="0"
+                       name="oac_balance" value="0.00"
+                       class="oac-balance" style="width:140px; text-align:right;">
+              </td>
+              <td style="padding:4px 8px;">
+                <input type="number" step="0.01" min="0" max="100"
+                       name="oac_percentage" value="0.00"
+                       class="oac-pct" style="width:100px; text-align:right;"> %
+              </td>
+              <td style="padding:4px 8px; text-align:right;" class="oac-product">$0.00</td>
+              <td style="padding:4px 8px;">
+                <button type="button" class="btn btn-secondary oac-remove"
+                        style="padding:2px 8px;">Remove</button>
+              </td>
+            </tr>
+          {% endif %}
+        </tbody>
+      </table>
+      <div style="margin-top:10px;">
+        <button type="button" id="oac-add" class="btn btn-secondary">+ Add Other Allowance Consideration</button>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        function fmt(n) {
+          if (!isFinite(n)) n = 0;
+          return '$' + n.toFixed(2);
+        }
+        function recompute(row) {
+          var bal = parseFloat(row.querySelector('.oac-balance').value) || 0;
+          var pct = parseFloat(row.querySelector('.oac-pct').value) || 0;
+          row.querySelector('.oac-product').textContent = fmt(bal * pct / 100.0);
+        }
+        function wireRow(row) {
+          row.querySelectorAll('.oac-balance, .oac-pct').forEach(function (el) {
+            el.addEventListener('input', function () { recompute(row); });
+          });
+          var rm = row.querySelector('.oac-remove');
+          if (rm) rm.addEventListener('click', function () {
+            row.parentNode.removeChild(row);
+          });
+        }
+        document.querySelectorAll('#oac-tbody .oac-row').forEach(wireRow);
+        var addBtn = document.getElementById('oac-add');
+        if (addBtn) {
+          addBtn.addEventListener('click', function () {
+            var tbody = document.getElementById('oac-tbody');
+            var tr = document.createElement('tr');
+            tr.className = 'oac-row';
+            tr.style.borderBottom = '1px solid #eee';
+            tr.innerHTML =
+              '<td style="padding:4px 8px;"><input type="text" name="oac_title" value="" style="width:100%;"></td>' +
+              '<td style="padding:4px 8px;"><input type="number" step="0.01" min="0" name="oac_balance" value="0.00" class="oac-balance" style="width:140px; text-align:right;"></td>' +
+              '<td style="padding:4px 8px;"><input type="number" step="0.01" min="0" max="100" name="oac_percentage" value="0.00" class="oac-pct" style="width:100px; text-align:right;"> %</td>' +
+              '<td style="padding:4px 8px; text-align:right;" class="oac-product">$0.00</td>' +
+              '<td style="padding:4px 8px;"><button type="button" class="btn btn-secondary oac-remove" style="padding:2px 8px;">Remove</button></td>';
+            tbody.appendChild(tr);
+            wireRow(tr);
+          });
+        }
+      })();
+    </script>
+
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step7_economic') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit">Next: Reports &rarr;</button>
+    </div>
+  </form>
+</div>
+{% endblock %}
+

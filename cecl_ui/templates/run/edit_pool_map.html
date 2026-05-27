@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+{% block title %}Edit Loan Code Mapping &mdash; {{ cfg.credit_union }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Loan Code Mapping &mdash; {{ cfg.credit_union }}</h2>
+  <p class="muted">
+    Each row maps a raw <strong>loan code</strong> from the source loan file
+    to a <strong>pool</strong>. Codes not listed here fall through to the
+    <em>Default pool</em> below. Changes are written to
+    <code>client_configs/{{ short_name }}.yaml</code> and take effect on the
+    next report run &mdash; you do <strong>not</strong> need to re-import
+    historical data; runtime filtering honours the new mapping immediately
+    for excluded pools, and re-importing the current quarter will pick up
+    pool renames.
+  </p>
+  <p>
+    <a class="btn btn-secondary" href="{{ url_for('run.client_dashboard', short_name=short_name) }}">
+      &larr; Back to dashboard
+    </a>
+    <a class="btn btn-secondary" href="{{ url_for('run.edit_settings', short_name=short_name) }}">
+      Edit Pool / Mgmt-Adj Settings
+    </a>
+  </p>
+</div>
+
+<form method="post">
+  <div class="card">
+    <h3>Loan Code &rarr; Pool
+      <span class="muted" style="font-weight:normal;">({{ rows | length }} codes)</span>
+    </h3>
+    <p class="muted">
+      Pick an existing pool from the drop-down, or choose
+      <em>&laquo; New pool &raquo;</em> and type a new pool name in the
+      adjacent box. Check the <strong>Delete</strong> box to remove a code
+      on save. Use the <em>Add Row</em> button at the bottom to map a new
+      code.
+    </p>
+
+    {% if unmapped_codes %}
+    <div class="alert alert-info"
+         style="background:#fff8e1; border:1px solid #f0d674; padding:8px 12px; border-radius:4px; margin:8px 0;">
+      <strong>{{ unmapped_codes | length }} loan code(s) found in your loan-data file(s)
+      that aren't mapped yet</strong> &mdash; these currently fall through to the
+      <em>Default Pool</em>. Click <em>Add to table</em> to start mapping any of them:
+      <div style="margin-top:6px;">
+        {% for u in unmapped_codes %}
+          <span style="display:inline-block; margin:2px 4px;">
+            <button type="button" class="btn btn-secondary add-unmapped"
+                    data-code="{{ u.code }}"
+                    style="padding:2px 8px; font-size:0.9em;">
+              + <code>{{ u.code }}</code> <span class="muted">({{ u.count }})</span>
+            </button>
+          </span>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <table id="pm-table" style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr style="background:#eef; text-align:left;">
+          <th style="padding:6px 8px; width:160px;">Loan Code</th>
+          <th style="padding:6px 8px;">Pool</th>
+          <th style="padding:6px 8px; width:220px;">New Pool Name</th>
+          <th style="padding:6px 8px; width:80px;">Delete</th>
+        </tr>
+      </thead>
+      <tbody id="pm-tbody">
+        {% for r in rows %}
+        <tr class="pm-row" style="border-bottom:1px solid #eee;">
+          <td style="padding:4px 8px;">
+            <input type="text" name="code" value="{{ r.code }}"
+                   style="width:140px; font-family:monospace;">
+          </td>
+          <td style="padding:4px 8px;">
+            <select name="pool_select" class="pool-select">
+              {% for p in all_pools %}
+                <option value="{{ p }}" {% if p == r.pool %}selected{% endif %}>{{ p }}</option>
+              {% endfor %}
+              <option value="Ignore" {% if r.pool in ('Ignore', 'Exclude') %}selected{% endif %}>Ignore (exclude from report)</option>
+              {% if r.pool and r.pool not in all_pools and r.pool not in ('Ignore', 'Exclude') %}
+                <option value="{{ r.pool }}" selected>{{ r.pool }}</option>
+              {% endif %}
+              <option value="__new__">&laquo; New pool &raquo;</option>
+            </select>
+          </td>
+          <td style="padding:4px 8px;">
+            <input type="text" name="pool_new" value=""
+                   placeholder="(only when 'New pool' selected)"
+                   class="pool-new" style="width:200px;">
+          </td>
+          <td style="padding:4px 8px; text-align:center;">
+            <input type="checkbox" name="delete" value="{{ loop.index0 }}">
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <p style="margin-top:10px;">
+      <button type="button" id="add-row-btn" class="btn btn-secondary">
+        + Add Row
+      </button>
+    </p>
+  </div>
+
+  <div class="card">
+    <h3>Default Pool</h3>
+    <p class="muted">
+      Loan codes that don't appear in the table above are assigned to this
+      pool at import time. Choose <em>&laquo; New pool &raquo;</em> to type
+      a new name.
+    </p>
+    <select name="default_pool_select" id="default-pool-select">
+      <option value="Ignore" {% if not default_pool or default_pool in ('Ignore', 'Exclude') %}selected{% endif %}>Ignore (exclude from report)</option>
+      {% for p in all_pools %}
+        <option value="{{ p }}" {% if p == default_pool %}selected{% endif %}>{{ p }}</option>
+      {% endfor %}
+      {% if default_pool and default_pool not in all_pools and default_pool not in ('Ignore', 'Exclude') %}
+        <option value="{{ default_pool }}" selected>{{ default_pool }}</option>
+      {% endif %}
+      <option value="__new__">&laquo; New pool &raquo;</option>
+    </select>
+    <input type="text" name="default_pool_new" id="default-pool-new"
+           placeholder="(only when 'New pool' selected)"
+           style="width:240px; margin-left:8px;">
+  </div>
+
+  <div class="card">
+    <button class="btn btn-primary" type="submit">Save Mapping</button>
+    <a class="btn btn-secondary" href="{{ url_for('run.client_dashboard', short_name=short_name) }}">Cancel</a>
+  </div>
+</form>
+
+{% if pool_distribution %}
+<form method="post" action="{{ url_for('run.reclassify_pool', short_name=short_name) }}"
+      onsubmit="return confirm('This updates loan rows in the database directly. Continue?');">
+  <div class="card">
+    <h3>Reclassify Existing DB Rows</h3>
+    <p class="muted">
+      Mapping changes above only take effect on the <em>next</em> data
+      import. If you can't re-import (e.g. the original loan-data file has
+      been archived), use this tool to bulk-move rows that are already in
+      the database from one pool to another. Pick
+      <em>Ignore</em> as the destination to drop the rows from reports.
+    </p>
+    <table style="border-collapse:collapse;">
+      <tr>
+        <td style="padding:4px 8px;"><strong>From pool</strong></td>
+        <td style="padding:4px 8px;">
+          <select name="from_pool" required>
+            <option value="">-- choose --</option>
+            {% for d in pool_distribution %}
+              <option value="{{ d.pool }}">
+                {{ d.pool }} &mdash; {{ d.count }} loans, ${{ '{:,.2f}'.format(d.balance) }}
+              </option>
+            {% endfor %}
+          </select>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:4px 8px;"><strong>To pool</strong></td>
+        <td style="padding:4px 8px;">
+          <select name="to_pool_select" id="reclassify-to-select">
+            <option value="Ignore" selected>Ignore (exclude from report)</option>
+            {% for p in all_pools %}
+              <option value="{{ p }}">{{ p }}</option>
+            {% endfor %}
+            <option value="__new__">&laquo; New pool &raquo;</option>
+          </select>
+          <input type="text" name="to_pool_new" placeholder="(only when 'New pool' selected)"
+                 style="width:200px; margin-left:8px;">
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:4px 8px;"><strong>Snapshot</strong></td>
+        <td style="padding:4px 8px;">
+          <select name="snapshot_date">
+            <option value="">All snapshots</option>
+            {% for s in snapshots %}
+              <option value="{{ s }}">{{ s }}</option>
+            {% endfor %}
+          </select>
+        </td>
+      </tr>
+    </table>
+    <p style="margin-top:10px;">
+      <button class="btn btn-warning" type="submit">Reclassify Rows</button>
+    </p>
+  </div>
+</form>
+{% endif %}
+
+<script>
+(function () {
+  const tbody = document.getElementById('pm-tbody');
+  const addBtn = document.getElementById('add-row-btn');
+  if (!tbody || !addBtn) return;
+
+  // Build the option list HTML once from the existing first row's <select>
+  // so we don't have to re-render Jinja for new rows.
+  function poolOptionsHTML() {
+    const firstSel = tbody.querySelector('select.pool-select');
+    if (!firstSel) {
+      // Fallback if the table started empty: only "New pool" option.
+      return '<option value="__new__">&laquo; New pool &raquo;</option>';
+    }
+    let html = '';
+    for (const opt of firstSel.options) {
+      // strip 'selected' from cloned options
+      html += '<option value="' + opt.value.replace(/"/g, '&quot;') + '">'
+            + opt.textContent + '</option>';
+    }
+    return html;
+  }
+
+  function renumberDeletes() {
+    const rows = tbody.querySelectorAll('tr.pm-row');
+    rows.forEach((tr, i) => {
+      const cb = tr.querySelector('input[name="delete"]');
+      if (cb) cb.value = i.toString();
+    });
+  }
+
+  addBtn.addEventListener('click', function () {
+    addNewRow('');
+  });
+
+  function addNewRow(prefillCode) {
+    const tr = document.createElement('tr');
+    tr.className = 'pm-row';
+    tr.style.borderBottom = '1px solid #eee';
+    tr.innerHTML = ''
+      + '<td style="padding:4px 8px;">'
+      +   '<input type="text" name="code" value="' + (prefillCode || '').replace(/"/g, '&quot;') + '" style="width:140px; font-family:monospace;">'
+      + '</td>'
+      + '<td style="padding:4px 8px;">'
+      +   '<select name="pool_select" class="pool-select">' + poolOptionsHTML() + '</select>'
+      + '</td>'
+      + '<td style="padding:4px 8px;">'
+      +   '<input type="text" name="pool_new" value="" placeholder="(only when \'New pool\' selected)" class="pool-new" style="width:200px;">'
+      + '</td>'
+      + '<td style="padding:4px 8px; text-align:center;">'
+      +   '<input type="checkbox" name="delete" value="">'
+      + '</td>';
+    tbody.appendChild(tr);
+    renumberDeletes();
+    // Default the new row's <select> to "Ignore" if available so the
+    // common "drop charge-offs / write-offs" workflow is one click.
+    const sel = tr.querySelector('select.pool-select');
+    if (sel) {
+      const hasIgnore = Array.from(sel.options).some(o => o.value === 'Ignore');
+      sel.value = hasIgnore ? 'Ignore' : (sel.options[0] && sel.options[0].value) || '';
+    }
+    const codeInput = tr.querySelector('input[name="code"]');
+    if (codeInput && !prefillCode) codeInput.focus();
+    return tr;
+  }
+
+  // "+ <code>" buttons in the unmapped-codes banner: insert a new row
+  // with the code prefilled, scroll to it, then hide the banner button.
+  document.querySelectorAll('.add-unmapped').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const code = btn.getAttribute('data-code') || '';
+      const tr = addNewRow(code);
+      btn.disabled = true;
+      btn.style.opacity = '0.5';
+      tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  });
+})();
+</script>
+{% endblock %}

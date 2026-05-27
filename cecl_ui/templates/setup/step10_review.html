@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block title %}Review &amp; Save{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Review &amp; Save</h2>
+  <p class="muted">Quick summary of everything you've configured. Use the
+    <em>Edit</em> links to jump back to a specific step. When you're happy,
+    save the config to
+    <code>client_configs/{{ short_name or '&lt;short_name&gt;' }}.yaml</code>.</p>
+
+  {% if warnings %}
+    <div class="flash error" style="margin-bottom:16px;">
+      <strong>Heads up &mdash; please review:</strong>
+      <ul style="margin:6px 0 0 18px;">
+        {% for w in warnings %}<li>{{ w }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if config_exists %}
+    <div class="flash info" style="margin-bottom:16px;">
+      A config named <code>{{ short_name }}.yaml</code> already exists in
+      <code>client_configs/</code>. Tick <strong>Overwrite</strong> below to
+      replace it, or go back to step 1 and pick a different short name.
+    </div>
+  {% endif %}
+
+  <table class="data-table" style="width:100%; margin-bottom:18px;">
+    <tbody>
+      <tr>
+        <th style="text-align:left; width:30%;">Credit union</th>
+        <td>
+          {{ state.credit_union or '—' }}
+          <span class="muted">(short name: <code>{{ state.short_name or '?' }}</code>)</span>
+          <a class="muted" style="float:right;"
+             href="{{ url_for('setup.step1_identity') }}">Edit</a>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">NCUA charter #</th>
+        <td>
+          {% if state.charter_number %}<code>{{ state.charter_number }}</code>
+          {% else %}<span class="muted">— not provided —</span>{% endif %}
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">Data directory</th>
+        <td>
+          {% if state.data_directory %}<code>{{ state.data_directory }}</code>
+          {% else %}<span class="muted">— (using <code>Raw_Uploads/{{ state.short_name }}/</code>)</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">File pattern</th>
+        <td>
+          <code>{{ state.file_pattern }}</code>
+          <span class="muted">&nbsp;|&nbsp; date: <code>{{ state.date_pattern }}</code></span>
+          <a class="muted" style="float:right;"
+             href="/setup/step/files">Edit</a>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">Column mappings</th>
+        <td>
+          {{ summary.mapped_columns|length }} mapped
+          {% if summary.unmapped_columns %}
+            <span class="muted">({{ summary.unmapped_columns|length }} unmapped:
+              {{ summary.unmapped_columns|join(', ') }})</span>
+          {% endif %}
+          <a class="muted" style="float:right;" href="/setup/step/columns">Edit</a>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">Pools</th>
+        <td>
+          {{ summary.named_pools|length }} named:
+          {% for p in summary.named_pools %}<code>{{ p }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+          {% if summary.unnamed_pool_codes %}
+            <div class="muted" style="margin-top:4px;">
+              {{ summary.unnamed_pool_codes|length }} raw code(s) without a name
+              &rarr; will fall through to <code>{{ summary.default_pool }}</code>
+            </div>
+          {% endif %}
+          <a class="muted" style="float:right;" href="/setup/step/pools">Edit</a>
+        </td>
+      </tr>
+      {% if summary.balance_titles_total %}
+      <tr>
+        <th style="text-align:left;">Balance titles</th>
+        <td>
+          {{ summary.balance_titles_mapped }} mapped
+          {% if summary.balance_titles_ignored %}
+            <span class="muted">&middot; {{ summary.balance_titles_ignored }} ignored</span>
+          {% endif %}
+          (of {{ summary.balance_titles_total }} from WARM)
+          <a class="muted" style="float:right;" href="/setup/step/balances">Edit</a>
+        </td>
+      </tr>
+      {% endif %}
+      <tr>
+        <th style="text-align:left;">Credit grades</th>
+        <td>
+          {{ summary.grade_count }} grade tier(s) defined
+          <a class="muted" style="float:right;" href="/setup/step/grades">Edit</a>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">Credit pull</th>
+        <td>
+          {% if summary.credit_pull_sources %}
+            {{ summary.credit_pull_sources|join(' · ') }}
+          {% else %}
+            <span class="muted">— no credit-pull source configured —</span>
+          {% endif %}
+          <a class="muted" style="float:right;" href="/setup/step/credit-pull">Edit</a>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">Economic data</th>
+        <td>
+          {{ summary.economic_state or '—' }}{% if summary.economic_county %} / {{ summary.economic_county }}{% endif %}
+          <span class="muted">&nbsp;|&nbsp; unemployment
+            <code>{{ summary.unemployment_rate }}</code></span>
+          <a class="muted" style="float:right;" href="/setup/step/economic">Edit</a>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">Mgmt adjustments</th>
+        <td>
+          {% if summary.pool_overlay %}
+            {% for pname, dec in summary.pool_overlay.items() %}
+              <code>{{ pname }}</code>: {{ '%+.2f'|format(dec * 100) }}%{% if not loop.last %}, {% endif %}
+            {% endfor %}
+          {% else %}
+            <span class="muted">— no per-pool overlays —</span>
+          {% endif %}
+          <a class="muted" style="float:right;" href="/setup/step/mgmt-adj">Edit</a>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">Default reports</th>
+        <td>
+          {% if summary.selected_reports %}
+            {{ summary.selected_reports|join(' · ') }}
+          {% else %}
+            <span class="muted">— none selected —</span>
+          {% endif %}
+          <a class="muted" style="float:right;" href="/setup/step/reports">Edit</a>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <details style="margin-bottom:18px;">
+    <summary><strong>Show generated YAML</strong></summary>
+    <pre class="yaml" style="margin-top:8px;">{{ yaml_text }}</pre>
+  </details>
+
+  <form method="post">
+    {% if config_exists %}
+      <label style="display:flex; align-items:center; gap:6px; color:#a44;">
+        <input type="checkbox" name="overwrite">
+        <strong>Overwrite existing <code>{{ short_name }}.yaml</code></strong>
+      </label>
+    {% else %}
+      <label style="display:flex; align-items:center; gap:6px;" class="muted">
+        <input type="checkbox" name="overwrite" disabled>
+        Overwrite existing config (no existing file detected)
+      </label>
+    {% endif %}
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step9_reports') }}">&larr; Back</a>
+      <div>
+        <button class="btn btn-danger" type="submit"
+                formaction="{{ url_for('setup.cancel') }}"
+                formnovalidate
+                onclick="return confirm('Cancel setup and discard all entered data?');">
+          Cancel setup
+        </button>
+        <button class="btn btn-success" type="submit">Save &amp; Continue &rarr;</button>
+      </div>
+    </div>
+  </form>
+</div>
+{% endblock %}
+

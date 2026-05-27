@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+{% block title %}Credit Pull{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Credit Pull (Current Score Source)</h2>
+  <p class="muted">Where does the <em>current</em> credit score come from for
+    each loan? Pick one or more sources &mdash; they're tried in priority
+    order, with the original-score fallback as a final safety net.</p>
+
+  {% set has_open_date = (state.column_mappings and state.column_mappings.open_date) %}
+  {% set cp = state.credit_pull %}
+  {% set warm = state.warm or {} %}
+  {% set warm_path = warm.saved_path %}
+  {% set warm_name = warm.filename %}
+  {% set warm_ready = warm_path %}
+  {% set opt1_on = cp.use_standalone_file or cp.uploaded_filename %}
+
+  {# ---------- Option 1: standalone credit-pull file ---------- #}
+  <h3>
+    <label style="display:flex; align-items:center; gap:8px; font-weight:bold; margin:0;">
+      <input type="checkbox" form="cp-main"
+             name="use_standalone_file" value="1"
+             class="opt-toggle" data-target="opt1-detail"
+             {% if opt1_on %}checked{% endif %}>
+      <span>Option 1 &mdash; Standalone credit-pull file</span>
+    </label>
+  </h3>
+  <p class="muted" style="margin:4px 0 8px 28px;">
+    A spreadsheet with one row per member listing the latest bureau score.
+    Upload the file, map the Member# and Score columns, and (optionally)
+    record the as-of date so the engine knows how fresh it is.
+  </p>
+
+  <div id="opt1-detail" class="opt-detail" style="margin-left:28px;
+       {% if not opt1_on %}display:none;{% endif %}">
+
+    {# Upload sub-form (kept separate so it can submit a file w/o the main form) #}
+    <form method="post" enctype="multipart/form-data" style="margin-bottom:8px;">
+      {% if cp.uploaded_filename %}
+      <p style="margin:6px 0;">
+        Currently using: <code>{{ cp.uploaded_filename }}</code>
+        <span class="muted">&mdash; in <code>{{ cp.source_folder }}</code></span>
+        <button class="btn btn-secondary" type="submit" name="action" value="clear_credit_pull"
+                formnovalidate style="margin-left:12px;">Clear</button>
+      </p>
+      {% endif %}
+      <div class="form-row">
+        <div style="grid-column: 1 / -1;">
+          <label>Choose credit-pull file (.xlsx / .csv)
+            <input type="file" name="credit_pull_file" accept=".xlsx,.xls,.csv">
+          </label>
+        </div>
+      </div>
+      <button class="btn btn-secondary" type="submit" name="action" value="upload_credit_pull">
+        {% if cp.uploaded_filename %}Replace file{% else %}Upload file{% endif %}
+      </button>
+    </form>
+
+    {# Visible column mapping (lives in the main form below via form="cp-main") #}
+    {% if cp.uploaded_filename %}
+    <h4 style="margin:14px 0 6px 0;">Column mapping</h4>
+    {% if cp_headers %}
+    <div class="form-row">
+      <div><label>Member-# column
+        <select form="cp-main" name="member_column">
+          <option value="">&mdash; choose column &mdash;</option>
+          {% for h in cp_headers %}
+          <option value="{{ h }}" {% if cp.member_column == h %}selected{% endif %}>{{ h }}</option>
+          {% endfor %}
+        </select>
+      </label></div>
+      <div><label>Score column
+        <select form="cp-main" name="score_column">
+          <option value="">&mdash; choose column &mdash;</option>
+          {% for h in cp_headers %}
+          <option value="{{ h }}" {% if cp.score_column == h %}selected{% endif %}>{{ h }}</option>
+          {% endfor %}
+        </select>
+      </label></div>
+    </div>
+    {% else %}
+    <p class="muted" style="margin:6px 0;">
+      Couldn't read the file's header row &mdash; type the column names below.
+    </p>
+    <div class="form-row">
+      <div><label>Member-# column name
+        <input type="text" form="cp-main" name="member_column"
+               value="{{ cp.member_column or '' }}">
+      </label></div>
+      <div><label>Score column name
+        <input type="text" form="cp-main" name="score_column"
+               value="{{ cp.score_column or '' }}">
+      </label></div>
+    </div>
+    {% endif %}
+    <details style="margin:6px 0 12px 0;">
+      <summary class="muted" style="cursor:pointer;">Advanced: file-name pattern &amp; folder</summary>
+      <div class="form-row" style="margin-top:8px;">
+        <div><label>File-name pattern (regex)
+          <input type="text" form="cp-main" name="file_pattern" value="{{ cp.file_pattern or '' }}">
+        </label></div>
+        <div><label>Source folder
+          <input type="text" form="cp-main" name="source_folder" value="{{ cp.source_folder or '' }}">
+        </label></div>
+      </div>
+    </details>
+    {% else %}
+    <div class="form-row">
+      <div style="grid-column: 1 / -1;"><p class="muted">
+        Upload a file above to map its Member# and Score columns.
+      </p></div>
+      {# Keep these inputs in the form even before upload, in case the
+         user wants to type the columns manually. #}
+      <div style="display:none;">
+        <input type="text" form="cp-main" name="member_column"
+               value="{{ cp.member_column or '' }}">
+        <input type="text" form="cp-main" name="score_column"
+               value="{{ cp.score_column or '' }}">
+        <input type="text" form="cp-main" name="file_pattern"
+               value="{{ cp.file_pattern or '' }}">
+        <input type="text" form="cp-main" name="source_folder"
+               value="{{ cp.source_folder or '' }}">
+      </div>
+    </div>
+    {% endif %}
+
+    {# Credit-pull as-of date — moved here from Option 3 #}
+    <div class="form-row" style="margin-top:8px;">
+      <div><label>Credit-pull as-of date <span class="muted">(optional)</span>
+        <input type="date" form="cp-main" name="pull_as_of_date"
+               value="{{ cp.pull_as_of_date or '' }}">
+        <span class="help">
+          Leave blank to let the engine infer this from the credit-pull file's
+          modification date. Override only if the file timestamp is wrong.
+        </span>
+      </label></div>
+    </div>
+  </div>
+
+  {# Main form holds Options 2 &amp; 3, the Option-1 toggle/columns, and the Save button. #}
+  <form id="cp-main" method="post">
+
+    {# ---------- Option 2: WARM/CECL report tabs ---------- #}
+    <h3 style="margin-top:24px;">
+      <label style="display:flex; align-items:center; gap:8px; font-weight:bold; margin:0;">
+        <input type="checkbox" name="use_configured_report" value="1"
+               class="opt-toggle" data-target="opt2-detail"
+               {% if cp.use_configured_report %}checked{% endif %}
+               {% if not warm_ready %}disabled{% endif %}>
+        <span>Option 2 &mdash; WARM workbook "Credit Pull" tabs</span>
+      </label>
+    </h3>
+    <p class="muted" style="margin:4px 0 8px 28px;">
+      Use the bureau-score tabs already inside the WARM workbook you uploaded
+      in Step 2. Useful for picking up older scores that aren't in the
+      standalone file.
+    </p>
+
+    <div id="opt2-detail" class="opt-detail" style="margin-left:28px;
+         {% if not cp.use_configured_report %}display:none;{% endif %}">
+      {% if warm_ready %}
+      <p style="margin:6px 0;">
+        Current WARM workbook: <code>{{ warm_name or warm_path }}</code>
+      </p>
+      {% else %}
+      <p class="muted">
+        <strong>Heads up:</strong> no WARM workbook is currently uploaded.
+        Use the file chooser below to add one (or upload it from
+        <a href="{{ url_for('setup.step2_warm') }}">Step 2</a>).
+      </p>
+      {% endif %}
+
+      <p style="margin:8px 0 4px 0;">
+        Replace the WARM workbook (uploads + reparses, then comes back here):
+      </p>
+    </div>
+
+    <details {% if not cp.use_configured_report and (cp.fallback_report_pattern or cp.fallback_report_folder) %}open{% endif %}
+             style="margin:6px 0 12px 28px; {% if not cp.use_configured_report %}display:none;{% endif %}"
+             class="opt-detail" data-mirror="opt2-detail">
+      <summary class="muted" style="cursor:pointer;">Advanced: override report file/folder manually</summary>
+      <div class="form-row" style="margin-top:8px;">
+        <div><label>Report file pattern (regex)
+          <input type="text" name="fallback_report_pattern" value="{{ cp.fallback_report_pattern or '' }}">
+        </label></div>
+        <div><label>Report folder
+          <input type="text" name="fallback_report_folder" value="{{ cp.fallback_report_folder or '' }}">
+        </label></div>
+        <div><label>Sheet-name pattern
+          <input type="text" name="fallback_sheet_pattern" value="{{ cp.fallback_sheet_pattern or '' }}">
+        </label></div>
+        <div></div>
+        <div><label>Member column index (0-based)
+          <input type="number" name="fallback_member_col" value="{{ cp.fallback_member_col }}" min="0">
+        </label></div>
+        <div><label>Score column index (0-based)
+          <input type="number" name="fallback_score_col" value="{{ cp.fallback_score_col }}" min="0">
+        </label></div>
+      </div>
+    </details>
+
+    {# ---------- Option 3: original-score fallback ---------- #}
+    <h3 style="margin-top:24px;">
+      <label style="display:flex; align-items:center; gap:8px; font-weight:bold; margin:0;">
+        <input type="checkbox" name="prefer_original_for_new_loans" value="1"
+               class="opt-toggle" data-target="opt3-detail"
+               {% if cp.prefer_original_for_new_loans %}checked{% endif %}>
+        <span>Option 3 &mdash; Original-score fallback</span>
+      </label>
+    </h3>
+    <p class="muted" style="margin:4px 0 8px 28px;">
+      For new credit unions that don't have a fresh bureau pull yet &mdash;
+      or for loans that were originated <em>after</em> the most recent credit
+      pull &mdash; use the loan-file's original FICO column as the current
+      score.
+    </p>
+
+    <div id="opt3-detail" class="opt-detail" style="margin-left:28px;
+         {% if not cp.prefer_original_for_new_loans %}display:none;{% endif %}">
+      <p class="muted">
+        The engine picks the most recent original score per member (by open
+        date) and applies it to all of that member's loans.
+      </p>
+      {% if not has_open_date %}
+      <p class="muted">
+        <strong>Heads up:</strong> the <code>open_date</code> column isn't
+        mapped in <a href="{{ url_for('setup.step3_columns') }}">Column
+        Mappings</a>. Without it the engine can't tell which loans are newer
+        than the pull, so it will only kick in when no credit-pull source is
+        configured at all.
+      </p>
+      {% endif %}
+    </div>
+
+    <div class="btn-row" style="margin-top:24px;">
+      {% if state.has_warm_files == 'yes' %}
+      <a class="btn btn-secondary" href="{{ url_for('setup.step2_files') }}">&larr; Back</a>
+      {% else %}
+      <a class="btn btn-secondary" href="{{ url_for('setup.step5_grades') }}">&larr; Back</a>
+      {% endif %}
+      <button class="btn btn-primary" type="submit">Next: Loan Data Extract(s) &rarr;</button>
+    </div>
+  </form>
+
+  {# Replace-WARM upload (Option 2) — separate form so it submits a file. #}
+  <form method="post" enctype="multipart/form-data"
+        id="warm-replace-form"
+        style="margin:6px 0 0 28px;
+        {% if not cp.use_configured_report %}display:none;{% endif %}">
+    <input type="file" name="warm_file" accept=".xlsx,.xls,.xlsm">
+    <button class="btn btn-secondary" type="submit"
+            name="action" value="replace_warm_file">
+      Replace WARM file
+    </button>
+  </form>
+</div>
+
+<script>
+  // Toggle option-detail blocks based on each option's checkbox.
+  // Only one of the three options can be active at a time — picking one
+  // automatically unchecks the others.
+  (function () {
+    var toggles = document.querySelectorAll('.opt-toggle');
+    function syncToggle(cb) {
+      var tgt = document.getElementById(cb.dataset.target);
+      if (tgt) tgt.style.display = cb.checked ? '' : 'none';
+      // Mirror toggles share the same data-target via data-mirror.
+      document.querySelectorAll(
+        '.opt-detail[data-mirror="' + cb.dataset.target + '"]'
+      ).forEach(function (el) {
+        el.style.display = cb.checked ? '' : 'none';
+      });
+      if (cb.dataset.target === 'opt2-detail') {
+        var wf = document.getElementById('warm-replace-form');
+        if (wf) wf.style.display = cb.checked ? '' : 'none';
+      }
+    }
+    toggles.forEach(function (cb) {
+      cb.addEventListener('change', function () {
+        if (cb.checked) {
+          // Mutually exclusive: turn off the other options.
+          toggles.forEach(function (other) {
+            if (other !== cb && other.checked) {
+              other.checked = false;
+              syncToggle(other);
+            }
+          });
+        }
+        syncToggle(cb);
+      });
+      // Initial sync (handles the "checked but disabled" cases too).
+      syncToggle(cb);
+    });
+  })();
+</script>
+{% endblock %}

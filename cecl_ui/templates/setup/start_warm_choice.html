@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}WARM Workbook or From Scratch?{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+<div class="card">
+  <h2>Do you have a WARM workbook for this CU?</h2>
+  <p class="muted">
+    The CECL-Migration model can read a prior quarterly
+    <code>CECL-Migration-WARM</code> workbook and pre-fill identity, pools,
+    grades, and historical balances. If this is a brand-new CU and you have
+    no prior WARM file, choose "Start from scratch" to type the identity
+    fields yourself.
+  </p>
+
+  <div class="choice-grid">
+    <form method="post" enctype="multipart/form-data" class="choice-card"
+          style="text-align:left;">
+      <h3>Use a WARM workbook</h3>
+      <p class="muted">Recommended when prior quarterly WARM files exist.
+        We'll read <code>BS CO DQ Data Enter</code> for charter #, CU name,
+        period ending, state/county, and economic baseline, then drop you on
+        Step&nbsp;1 with those fields already populated.</p>
+      <label>
+        <span class="help">Pick the most recent
+          <code>CECL-Migration-WARM</code> file:</span>
+        <input type="file" name="warm_file" accept=".xlsx,.xlsm" required>
+      </label>
+      <div class="btn-row" style="margin-top:10px;">
+        <button class="btn btn-primary" type="submit"
+                name="action" value="warm">
+          Upload &amp; pre-fill identity &rarr;
+        </button>
+      </div>
+    </form>
+
+    <form method="post" class="choice-card" style="text-align:left;">
+      <h3>Start from scratch</h3>
+      <p class="muted">Brand-new CU, or no prior WARM workbook handy. You'll
+        type the identity fields on Step&nbsp;1 and can still upload a WARM
+        file later on Step&nbsp;2.</p>
+      <div class="btn-row" style="margin-top:10px;">
+        <button class="btn btn-secondary" type="submit"
+                name="action" value="scratch">
+          Start from scratch &rarr;
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <div class="btn-row" style="margin-top:18px;">
+    <a class="btn btn-secondary" href="{{ url_for('home.model_select') }}">&larr; Back</a>
+    <span></span>
+  </div>
+</div>
+{% endblock %}

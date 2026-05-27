@@ -1,0 +1,12 @@
+# SCALE Q-factor defaults.
+# Format: sheet,cell,label,default_bps
+# - sheet:        exact worksheet name in the SCALE template
+# - cell:         A1-style cell coordinate to write to
+# - label:        human-readable description shown in the wizard
+# - default_bps:  default value in basis points (100 bps = 1.00%)
+# Lines starting with '#' are ignored. Add one row per Q-factor below.
+# Values are written as decimals (default_bps / 10000) by the runner.
+# Example (uncomment and edit cells/labels for your template):
+# Management Adjustment,C4,RE Construction qualitative overlay,0
+# Management Adjustment,C5,RE Commercial qualitative overlay,0
+sheet,cell,label,default_bps

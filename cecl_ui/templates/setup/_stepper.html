@@ -1,0 +1,33 @@
+{# Stepper component, included at the top of every wizard step. #}
+<div class="stepper">
+  {% for key, label in steps %}
+    {% set ep = step_endpoints.get(key) if step_endpoints is defined and step_endpoints else none %}
+    {% if ep and key != active %}
+      <a class="step" href="{{ url_for(ep) }}">{{ label }}</a>
+    {% else %}
+      <div class="step {% if key == active %}active{% endif %}">{{ label }}</div>
+    {% endif %}
+  {% endfor %}
+</div>
+
+<div class="stepper-actions" style="margin:8px 0 16px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <form method="post" action="{{ url_for('setup.save_progress') }}" style="display:inline;">
+    <input type="hidden" name="active_step" value="{{ active }}">
+    <button type="submit" class="btn btn-secondary" title="Save your progress and return to the home screen.">
+      Save progress &amp; exit
+    </button>
+  </form>
+  <form method="post" action="{{ url_for('setup.save_progress') }}" style="display:inline;">
+    <input type="hidden" name="active_step" value="{{ active }}">
+    <input type="hidden" name="return_to" value="stay">
+    <button type="submit" class="btn btn-secondary" title="Save your progress and keep working on this step.">
+      Save progress
+    </button>
+  </form>
+  {% if state and (state.credit_union or state.short_name) %}
+    <span class="muted" style="margin-left:auto; font-size:0.9em;">
+      Editing: <strong>{{ state.credit_union or state.short_name }}</strong>
+    </span>
+  {% endif %}
+</div>
+

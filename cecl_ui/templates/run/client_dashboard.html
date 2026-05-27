@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}{{ cfg.credit_union }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>{{ cfg.credit_union }}</h2>
+  <p class="muted">Config: <code>client_configs/{{ short_name }}.yaml</code> &nbsp;|&nbsp;
+     Uploads: <code>Raw_Uploads/{{ short_name }}/</code></p>
+  <p>
+    <a class="btn btn-secondary" href="{{ url_for('run.edit_settings', short_name=short_name) }}">
+      Edit Pool / Mgmt-Adj Settings
+    </a>
+    <a class="btn btn-secondary" href="{{ url_for('run.edit_pool_map', short_name=short_name) }}">
+      Edit Loan Code Mapping
+    </a>
+  </p>
+</div>
+
+<div class="card">
+  <h3>1. Upload this quarter's loan file(s)</h3>
+  <p class="muted">Files matching pattern <code>{{ cfg.file_pattern }}</code> will be picked up by the importer.</p>
+  <form method="post" action="{{ url_for('run.upload', short_name=short_name) }}" enctype="multipart/form-data">
+    <input type="file" name="files" multiple>
+    <button class="btn btn-primary" type="submit" style="margin-top:8px;">Upload</button>
+  </form>
+
+  {% if pending_files %}
+    <h4 style="margin-top:18px;">Files currently in the upload folder:</h4>
+    <ul style="list-style:none; padding-left:0;">
+      {% for f in pending_files %}
+        <li style="display:flex; align-items:center; gap:8px; margin:2px 0;">
+          <form method="post"
+                action="{{ url_for('run.delete_upload', short_name=short_name) }}"
+                style="margin:0;"
+                onsubmit="return confirm('Permanently delete {{ f }} from the upload folder?');">
+            <input type="hidden" name="filename" value="{{ f }}">
+            <button class="btn btn-secondary" type="submit"
+                    title="Delete this file"
+                    style="color:#c33; padding:0 8px; line-height:1;">&times;</button>
+          </form>
+          <code>{{ f }}</code>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>2. Import into the database</h3>
+  <form method="post" action="{{ url_for('run.import_data', short_name=short_name) }}">
+    <button class="btn btn-secondary" type="submit">Run Importer</button>
+  </form>
+</div>
+
+<div class="card">
+  <h3>3. Generate reports</h3>
+  <form method="post" action="{{ url_for('run.reports', short_name=short_name) }}">
+    <label>Snapshot date (optional)
+      {% if snapshots %}
+        <select name="snapshot_date">
+          <option value="">Latest in DB</option>
+          {% for s in snapshots %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+        </select>
+      {% else %}
+        <input type="text" name="snapshot_date" placeholder="YYYY-MM-DD (blank = latest)">
+        <span class="help">No snapshots found in DB yet &mdash; run the importer first.</span>
+      {% endif %}
+    </label>
+
+    <label style="margin-top:14px;"><input type="checkbox" name="tct" {% if cfg.reports and cfg.reports.tct %}checked{% endif %}>
+      TCT CECL-Migration Report</label>
+    <label><input type="checkbox" name="vizo" {% if cfg.reports and cfg.reports.vizo %}checked{% endif %}>
+      Vizo CECL-Migration Report</label>
+    <label><input type="checkbox" name="vizo_supp" {% if cfg.reports and cfg.reports.vizo_supp %}checked{% endif %}>
+      Vizo Supplemental Report</label>
+    <label><input type="checkbox" name="impdet" {% if cfg.reports and cfg.reports.impdet %}checked{% endif %}>
+      Improved / Deteriorated Loans Report</label>
+
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('run.select_cu') }}">&larr; CU list</a>
+      <button class="btn btn-success" type="submit">Generate Selected Reports</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

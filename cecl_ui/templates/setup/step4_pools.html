@@ -1,0 +1,357 @@
+{% extends "base.html" %}
+{% block title %}Loan Pools{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+{% set warm_pools = (state.warm.pools if state.warm else []) or [] %}
+{% set sample_codes = (state.sample.pool_code_suggestions if state.sample else []) or [] %}
+
+<div class="card">
+  <h2>Loan Pool Mapping</h2>
+  <p class="muted">Map each <em>raw pool/loan-type code</em> from the source
+    file to a <em>standardized pool name</em> used in reports. The pool name
+    on the right should match a name from the WARM workbook (if you uploaded
+    one) so historical balances line up.</p>
+
+  {% if warm_pools %}
+    <p class="muted">
+      <strong>Canonical pool names</strong> (from <code>{{ state.warm.filename }}</code>):
+      {% for p in warm_pools %}
+        <code style="display:inline-block; padding:2px 8px; margin:2px; background:#eef; border-radius:3px;">{{ p }}</code>
+      {% endfor %}
+    </p>
+  {% else %}
+    <div class="alert alert-info" style="margin:8px 0;">
+      <strong>No WARM file uploaded.</strong> Please upload a
+      <em>Loan Code Map</em> file below &mdash; a two-column Excel/CSV with
+      the credit union's raw loan codes in one column and the pool name each
+      code belongs to in the other. The WARM workbook normally provides this
+      on the &ldquo;Grade Ranges &amp; Loan Codes&rdquo; tab (columns S &amp; T).
+    </div>
+  {% endif %}
+
+  {% if unmapped_sample %}
+  <div class="alert alert-info" style="margin:8px 0;">
+    <strong>{{ unmapped_sample | length }} raw code(s) detected in your sample
+    file</strong> but not yet mapped:
+    {% for c in unmapped_sample %}<code>{{ c }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    <form method="post" style="display:inline; margin-left:8px;">
+      <button class="btn btn-secondary" type="submit" name="action" value="add_codes">
+        + Add as empty rows
+      </button>
+    </form>
+  </div>
+  {% endif %}
+
+  {# ---------- Pool-map file upload ---------- #}
+  <details style="margin:12px 0; padding:8px 12px; background:#f8f8fb; border:1px solid #ddd; border-radius:4px;"
+           {% if upload_review or not warm_pools %}open{% endif %}>
+    <summary style="cursor:pointer; font-weight:600;">
+      Upload a code &rarr; pool-name map file
+      {% if upload_review %}<span class="muted">&mdash; reviewing {{ upload_review.entries | length }} row(s) from {{ upload_review.filename }}</span>{% endif %}
+    </summary>
+    <p class="muted" style="margin-top:8px;">
+      Upload an Excel or CSV file with two columns: a <em>raw loan code</em>
+      and the <em>pool name</em> it belongs to. The tool will auto-pick the
+      columns by header (e.g. <code>LNDALTC</code> + <code>Pool Name</code>),
+      mark rows as matches/conflicts/new, and let you choose what to apply.
+      <strong>Codes that aren't in your loan sample are still useful</strong>
+      &mdash; they may show up in the charge-off, recoveries, or impaired-loan
+      files.
+    </p>
+    {% if not upload_review %}
+    <form method="post" enctype="multipart/form-data">
+      <input type="file" name="pool_map_file" accept=".xlsx,.xls,.csv" required>
+      <button class="btn btn-secondary" type="submit" name="action" value="upload_map">
+        Upload &amp; review
+      </button>
+    </form>
+    {% else %}
+      <p class="muted">
+        Detected columns: code = <code>{{ upload_review.code_column }}</code>,
+        name = <code>{{ upload_review.name_column }}</code>.
+      </p>
+      {% set c = upload_review.counts %}
+      <p style="margin:6px 0;">
+        <span class="badge" style="background:#dfd; padding:2px 8px; border-radius:3px;">{{ c.match }} already match</span>
+        <span class="badge" style="background:#fed; padding:2px 8px; border-radius:3px; margin-left:6px;">{{ c.conflict }} conflict</span>
+        <span class="badge" style="background:#eef; padding:2px 8px; border-radius:3px; margin-left:6px;">{{ c.fill }} fill blank name</span>
+        <span class="badge" style="background:#dfe; padding:2px 8px; border-radius:3px; margin-left:6px;">{{ c.new_in_loans }} new (in loan file)</span>
+        <span class="badge" style="background:#fef; padding:2px 8px; border-radius:3px; margin-left:6px;">{{ c.new_off_loans }} new (NOT in loan file)</span>
+      </p>
+      <form method="post">
+        <table style="width:100%; border-collapse:collapse; font-size:0.9em; margin-top:6px;">
+          <thead>
+            <tr style="background:#eee; text-align:left;">
+              <th style="padding:4px 8px; width:32px;">
+                <input type="checkbox" id="ck-all"
+                       onchange="document.querySelectorAll('input[name=apply_code]').forEach(c => c.checked = this.checked);">
+              </th>
+              <th style="padding:4px 8px;">Code</th>
+              <th style="padding:4px 8px;">Pool name (from file)</th>
+              <th style="padding:4px 8px;">Current name</th>
+              <th style="padding:4px 8px;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {# Off-loan-file rows are handled separately in the
+               "Codes not in the Loan Data Extract" panel below, so
+               skip them here to avoid double-action. #}
+            {% for it in upload_review.entries if it.status != 'new_off_loans' %}
+            {% set bg = {
+              'match': '#f6fff6',
+              'conflict': '#fff8f0',
+              'fill': '#f6f6ff',
+              'new_in_loans': '#f6fff8',
+            }[it.status] %}
+            <tr style="background:{{ bg }}; border-bottom:1px solid #eee;">
+              <td style="padding:4px 8px;">
+                <input type="checkbox" name="apply_code" value="{{ it.code }}"
+                       {% if it.default_checked %}checked{% endif %}>
+              </td>
+              <td style="padding:4px 8px;"><code>{{ it.code }}</code></td>
+              <td style="padding:4px 8px;">{{ it.name or '(blank)' }}</td>
+              <td style="padding:4px 8px;" class="muted">{{ it.existing_name or '&mdash;' | safe }}</td>
+              <td style="padding:4px 8px;">
+                {% if it.status == 'match' %}<span class="muted">&check; matches</span>
+                {% elif it.status == 'conflict' %}<strong style="color:#a60;">&#9888; differs</strong>
+                {% elif it.status == 'fill' %}<span>fill blank</span>
+                {% elif it.status == 'new_in_loans' %}<strong style="color:#080;">+ new (in loans)</strong>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <div style="margin-top:8px;">
+          <button class="btn btn-primary" type="submit" name="action" value="apply_upload">
+            Apply selected
+          </button>
+          <button class="btn btn-secondary" type="submit" name="action" value="dismiss_upload"
+                  formnovalidate>
+            Dismiss
+          </button>
+        </div>
+      </form>
+
+      {# ---------- Off-loan-file groups (from this upload) ---------- #}
+      {% if upload_review.off_file_groups %}
+      {% set step2_url_u = url_for('setup.step2_warm') if state.has_warm_files == 'yes' else url_for('setup.step_loan_pools') %}
+      {% set all_pools_u = pool_choices or [] %}
+      <div style="margin-top:14px; padding:8px 12px; background:#fff8ff; border:1px solid #c8a0c8; border-radius:4px;">
+        <h3 style="margin:0 0 6px 0;">Codes not in the Loan Data Extract</h3>
+        <p class="muted" style="margin:0 0 8px 0;">
+          The uploaded map references {{ upload_review.counts.new_off_loans }}
+          loan code(s) that don't appear in your loan-data extract,
+          grouped by the pool name from the file. For each group,
+          choose <strong>Ignore</strong> (drop them), <strong>Merge
+          into</strong> an existing Step-2 pool, or <strong>Create new
+          loan pool</strong> (you'll be sent back to
+          <a href="{{ step2_url_u }}">Step 2</a> to set ACL Months).
+        </p>
+        <form method="post">
+          <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+            <thead>
+              <tr style="background:#eee; text-align:left;">
+                <th style="padding:4px 8px;">Pool name (from file)</th>
+                <th style="padding:4px 8px;">Codes</th>
+                <th style="padding:4px 8px; width:80px; text-align:center;">Ignore</th>
+                <th style="padding:4px 8px; width:220px; text-align:center;">Merge into</th>
+                <th style="padding:4px 8px; width:140px; text-align:center;">Create new<br>loan pool</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for g in upload_review.off_file_groups %}
+              <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:4px 8px;">
+                  <strong>{{ g.name }}</strong>
+                  <input type="hidden" name="off_name" value="{{ g.name }}">
+                  <input type="hidden" name="off_codes_{{ loop.index0 }}"
+                         value="{{ g.codes | join(',') }}">
+                </td>
+                <td style="padding:4px 8px;">
+                  {% for c in g.codes -%}
+                    <code>{{ c }}</code>{% if not loop.last %}, {% endif %}
+                  {%- endfor %}
+                  <span class="muted">({{ g.count }})</span>
+                </td>
+                <td style="padding:4px 8px; text-align:center;">
+                  <input type="radio" name="off_choice_{{ loop.index0 }}"
+                         value="ignore" checked>
+                </td>
+                <td style="padding:4px 8px; text-align:center; white-space:nowrap;">
+                  <input type="radio" name="off_choice_{{ loop.index0 }}"
+                         value="merge"
+                         {% if not all_pools_u %}disabled{% endif %}>
+                  <select name="off_merge_{{ loop.index0 }}"
+                          {% if not all_pools_u %}disabled{% endif %}
+                          onchange="var r=this.previousElementSibling; if(r&&r.type=='radio') r.checked=true;"
+                          style="max-width:170px;">
+                    {% for p in all_pools_u %}
+                      <option value="{{ p }}">{{ p }}</option>
+                    {% else %}
+                      <option value="">(no Step 2 pools)</option>
+                    {% endfor %}
+                  </select>
+                </td>
+                <td style="padding:4px 8px; text-align:center;">
+                  <input type="radio" name="off_choice_{{ loop.index0 }}"
+                         value="create">
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <div style="margin-top:8px;">
+            <button class="btn btn-primary" type="submit"
+                    name="action" value="apply_offfile_groups">
+              Apply off-file groups
+            </button>
+            <span class="help" style="margin-left:8px;">
+              Default is <strong>Ignore</strong>.
+            </span>
+          </div>
+        </form>
+      </div>
+      {% endif %}
+    {% endif %}
+  </details>
+
+  {# Established pools come strictly from Step 2 (pool_settings). Any
+     pool_map name not in this list is surfaced in the extras panel
+     below so the user can either Ignore it or promote it to a new
+     Step-2 pool. "Ignore" is always offered separately by the
+     <select>. #}
+  {% set all_pools = pool_choices or [] %}
+
+  <script id="pool-options-data" type="application/json">{{ all_pools | tojson }}</script>
+
+  {% if extras %}
+  {% set step2_url = url_for('setup.step2_warm') if state.has_warm_files == 'yes' else url_for('setup.step_loan_pools') %}
+  <div class="card" style="background:#fff8f0; border:1px solid #e0b070; margin:12px 0;">
+    <h3 style="margin-top:0;">Unrecognized pool names</h3>
+    <p class="muted" style="margin-top:0;">
+      These pool names are referenced by your loan code mapping but are
+      not configured on <a href="{{ step2_url }}">Step 2 (Loan Pools)</a>.
+      For each one, choose to either drop the matching codes
+      (<strong>Ignore</strong>), merge them into one of your existing
+      Step-2 pools (<strong>Merge into</strong>), or add the name as a
+      brand-new pool on Step 2 (<strong>Create new loan pool</strong>).
+      Creating new pools will take you back to Step 2 so you can set
+      the <em>ACL Months</em> and other settings.
+    </p>
+    <form method="post">
+      <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+        <thead>
+          <tr style="background:#eee; text-align:left;">
+            <th style="padding:4px 8px;">Pool name (from mapping)</th>
+            <th style="padding:4px 8px;">Loan codes</th>
+            <th style="padding:4px 8px; width:80px; text-align:center;">Ignore</th>
+            <th style="padding:4px 8px; width:220px; text-align:center;">Merge into</th>
+            <th style="padding:4px 8px; width:140px; text-align:center;">Create new<br>loan pool</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for e in extras %}
+          <tr style="border-bottom:1px solid #eee;">
+            <td style="padding:4px 8px;">
+              <strong>{{ e.name }}</strong>
+              <input type="hidden" name="extra_name" value="{{ e.name }}">
+            </td>
+            <td style="padding:4px 8px;">
+              {% for c in e.codes -%}
+                <code>{{ c }}</code>{% if not loop.last %}, {% endif %}
+              {%- endfor %}
+              <span class="muted">({{ e.count }})</span>
+            </td>
+            <td style="padding:4px 8px; text-align:center;">
+              <input type="radio" name="extra_choice_{{ loop.index0 }}"
+                     value="ignore" checked>
+            </td>
+            <td style="padding:4px 8px; text-align:center; white-space:nowrap;">
+              <input type="radio" name="extra_choice_{{ loop.index0 }}"
+                     value="merge"
+                     {% if not all_pools %}disabled{% endif %}>
+              <select name="extra_merge_{{ loop.index0 }}"
+                      {% if not all_pools %}disabled{% endif %}
+                      onchange="var r=this.previousElementSibling; if(r&&r.type=='radio') r.checked=true;"
+                      style="max-width:170px;">
+                {% for p in all_pools %}
+                  <option value="{{ p }}">{{ p }}</option>
+                {% else %}
+                  <option value="">(no Step 2 pools)</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td style="padding:4px 8px; text-align:center;">
+              <input type="radio" name="extra_choice_{{ loop.index0 }}"
+                     value="create">
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div style="margin-top:8px;">
+        <button class="btn btn-primary" type="submit"
+                name="action" value="resolve_extras">
+          Update
+        </button>
+        <span class="help" style="margin-left:8px;">
+          Default is <strong>Ignore</strong>. Pick the Step-2 pool from
+          the dropdown when choosing <em>Merge into</em>. Any row
+          switched to <em>Create new loan pool</em> will send you back
+          to Step 2.
+        </span>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
+  <form method="post">
+    <div id="pool-rows">
+      {% for code, name in state.pool_map.items() %}
+      <div class="kv-row">
+        <input type="text" name="pool_code" value="{{ code }}"
+               placeholder="Raw code (e.g., AUTO_NEW)">
+        <select name="pool_name">
+          <option value="" {% if not name %}selected{% endif %}>&mdash; choose &mdash;</option>
+          {% for p in all_pools %}
+            <option value="{{ p }}" {% if p == name %}selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+          <option value="Ignore" {% if name == 'Ignore' %}selected{% endif %}>Ignore (exclude from report)</option>
+          {% if name and name not in all_pools and name != 'Ignore' %}
+            <option value="{{ name }}" selected>{{ name }} (unrecognized &mdash; resolve above)</option>
+          {% endif %}
+        </select>
+        <button type="button" class="icon-btn"
+                onclick="this.parentElement.remove()">&times;</button>
+      </div>
+      {% endfor %}
+    </div>
+    <button type="button" class="btn btn-secondary"
+            onclick="addPoolRow()"
+            style="margin-top:8px;">+ Add row</button>
+
+    <label style="margin-top:24px;">Default pool (for unmatched codes)
+      <select name="default_pool">
+        <option value="Ignore" {% if not state.default_pool or state.default_pool in ('Ignore', 'Exclude') %}selected{% endif %}>Ignore (exclude from report)</option>
+        {% for p in all_pools %}
+          <option value="{{ p }}" {% if p == state.default_pool %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+        {% if state.default_pool and state.default_pool not in all_pools and state.default_pool not in ('Ignore', 'Exclude') %}
+          <option value="{{ state.default_pool }}" selected>{{ state.default_pool }} (unrecognized &mdash; resolve above)</option>
+        {% endif %}
+      </select>
+      <span class="help">Any raw code not listed above is bucketed here.
+        <strong>Ignore</strong> drops unmatched loans from the report entirely.</span>
+    </label>
+
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step3_columns') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit" name="action" value="save">
+        Next: Balance Adjustment &rarr;
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}SCALE Runs{% endblock %}
+{% block content %}
+<h2>SCALE &mdash; Run a new quarter</h2>
+<p class="muted">
+  Pick a credit union that already has at least one SCALE report on
+  disk. From the dashboard you can run a new quarter using historical
+  data carried from the prior report, or do a full multi-quarter
+  re-pull from the 5300.
+</p>
+
+{% if not cus %}
+  <div class="card">
+    <p>No SCALE reports found under <code>Generated_Reports/</code>.
+       Generate one through the SCALE wizard first.</p>
+    <p><a class="btn" href="{{ url_for('home.model_select') }}">+ New CU</a></p>
+  </div>
+{% else %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Credit Union</th>
+        <th>Short name</th>
+        <th>Latest period</th>
+        <th>Periods on disk</th>
+        <th>Wizard draft</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for cu in cus %}
+      <tr>
+        <td>{{ cu.credit_union }}</td>
+        <td><code>{{ cu.short_name }}</code></td>
+        <td>{{ cu.latest_period }}</td>
+        <td>{{ cu.periods|length }}</td>
+        <td>
+          {% if cu.draft_present %}
+            <span class="badge badge-ok">present</span>
+          {% else %}
+            <span class="badge badge-warn">missing</span>
+          {% endif %}
+        </td>
+        <td>
+          <a class="btn btn-primary"
+             href="{{ url_for('scale_runs.cu_dashboard',
+                              short_name=cu.short_name) }}">Open</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}

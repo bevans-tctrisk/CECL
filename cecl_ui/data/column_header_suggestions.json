@@ -1,0 +1,106 @@
+{
+  "field_to_header_counts": {
+    "current_balance": {
+      "cc last stmt bal": 10,
+      "current balance amount": 2,
+      "current loan balance": 6,
+      "currupb": 2,
+      "loan balance": 15
+    },
+    "days_delinquent": {
+      "days delinquent": 6,
+      "delinquent days count": 2,
+      "inv": 2,
+      "member close date": 10,
+      "past due": 15
+    },
+    "interest_rate": {
+      "annual rate 1": 15,
+      "cash annual interest rate": 2,
+      "interest rate (apr)": 6,
+      "rate": 2
+    },
+    "loan_pool_code": {
+      "loan collateral code": 5,
+      "loan purpose": 2,
+      "loan type": 15,
+      "loan type code": 1,
+      "mbr state code": 6,
+      "type": 2
+    },
+    "loan_suffix": {
+      "card account number": 2,
+      "cc note last 4": 10,
+      "pool": 2
+    },
+    "member_number": {
+      "account number": 10,
+      "acct nbr": 10,
+      "loan#": 2,
+      "member name": 8,
+      "member's name (last, first, middle initial)": 3,
+      "om sys - prin number": 2
+    },
+    "open_date": {
+      "card open date": 2,
+      "date of loan": 6,
+      "loan original date": 15
+    },
+    "original_fico_score": {
+      "credit score": 23,
+      "inv": 2
+    },
+    "original_loan_amount": {
+      "loan original amnt": 2,
+      "loan#": 2,
+      "orig nbr pymts": 13,
+      "original loan amount": 8
+    },
+    "total_available_credit": {
+      "credit limit": 31,
+      "credit line amount": 2
+    }
+  },
+  "header_display_forms": {
+    "account number": "Account Number",
+    "acct nbr": "ACCT NBR",
+    "annual rate 1": "Annual Rate 1",
+    "card account number": "Card Account Number",
+    "card open date": "Card Open Date",
+    "cash annual interest rate": "Cash Annual Interest Rate",
+    "cc last stmt bal": "CC LAST STMT BAL",
+    "cc note last 4": "CC Note Last 4",
+    "credit limit": "CREDIT LIMIT",
+    "credit line amount": "Credit Line Amount",
+    "credit score": "CREDIT SCORE",
+    "current balance amount": "Current Balance Amount",
+    "current loan balance": "Current Loan Balance",
+    "currupb": "CURRUPB",
+    "date of loan": "Date of Loan",
+    "days delinquent": "Days Delinquent",
+    "delinquent days count": "Delinquent Days Count",
+    "interest rate (apr)": "Interest Rate (APR)",
+    "inv": "INV",
+    "loan balance": "LOAN BALANCE",
+    "loan collateral code": "Loan Collateral Code",
+    "loan original amnt": "LOAN ORIGINAL AMNT",
+    "loan original date": "LOAN ORIGINAL DATE",
+    "loan purpose": "Loan Purpose",
+    "loan type": "LOAN TYPE",
+    "loan type code": "Loan Type Code",
+    "loan#": "LOAN#",
+    "mbr state code": "MBR STATE CODE",
+    "member close date": "Member Close Date",
+    "member name": "Member Name",
+    "member's name (last, first, middle initial)": "Member's Name (Last, First, Middle Initial)",
+    "om sys - prin number": "OM SYS - PRIN Number",
+    "orig nbr pymts": "ORIG NBR PYMTS",
+    "original loan amount": "Original Loan Amount",
+    "past due": "Past Due",
+    "pool": "POOL",
+    "rate": "RATE",
+    "type": "TYPE"
+  },
+  "updated_at": "2026-05-21T22:44:53",
+  "version": 1
+}

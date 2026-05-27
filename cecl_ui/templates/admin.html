@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}Admin — Firm Defaults{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Admin &mdash; Firm Defaults</h2>
+  <p class="muted">Settings on this page apply across <strong>all</strong>
+    credit unions and are used as fallbacks where the CU wizard does not
+    override them. Changes affect <em>future</em> reports only &mdash;
+    historical reports retain the values they were generated with.</p>
+
+  <form method="post" style="margin-top:18px;">
+    <input type="hidden" name="action" value="save_mgmt_adj">
+    <h3>Management Adjustment</h3>
+    <div class="form-row" style="align-items:flex-end; gap:16px;">
+      <label style="max-width:280px;">
+        Default Management Adjustment (%)
+        <input type="number" step="0.0001" name="default_mgmt_adj_pct"
+               value="{{ default_mgmt_adj_pct }}"
+               style="width:140px;">
+      </label>
+      <span class="muted" style="padding-bottom:8px;">
+        Stored as decimal <code>{{ '%.6f'|format(default_mgmt_adj_decimal) }}</code>
+      </span>
+    </div>
+    <p class="help" style="max-width:720px;">
+      Applied to a pool <strong>only</strong> when all three are true:
+      (1) the pool has <em>Use Default</em> checked on Step 16
+      (Management Adjustments), (2) the pool's ACL base loss rate is
+      <code>0</code>, and (3) no manual overlay is entered for that
+      pool. A manual overlay always wins.
+    </p>
+
+    <div class="btn-row" style="margin-top:18px;">
+      <button class="btn btn-primary" type="submit">Save</button>
+      <a class="btn btn-secondary" href="{{ url_for('home.index') }}">Back to Home</a>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="margin-top:24px;">
+  <h2>Environmental Factor Ranges</h2>
+  <p class="muted">
+    Written into every new SCALE report at run time (TCT tab
+    <em>Environmental Factor Ranges</em>; the Vizo tab
+    <em>Envir Factor Ranges-Vizo</em> mirrors it via formulas). Edits
+    take effect on <strong>future</strong> reports only -- historical
+    workbooks keep the values they were generated with.
+  </p>
+  <p class="help" style="max-width:760px;">
+    Values are stored as decimals (enter <code>0.05</code> or
+    <code>5%</code>). The highest range is at the top. Score columns
+    are the Q&amp;E adjustment applied when a credit union's measure
+    falls in that range.
+  </p>
+
+  <form method="post" style="margin-top:18px;">
+
+    <div class="form-row" style="gap:32px; align-items:flex-start; flex-wrap:wrap;">
+
+      <div style="min-width:280px;">
+        <h3 style="margin-top:0;">Delinquency ({{ delinquency_row_count }} rows)</h3>
+        <table class="data-table" style="font-size:13px;">
+          <thead>
+            <tr>
+              <th style="width:40px;">#</th>
+              <th>Minimum %</th>
+              <th>Score</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for i in range(delinquency_row_count) %}
+              {% set row = delinquency_rows[i] if i < delinquency_rows|length else [0,0] %}
+              <tr>
+                <td class="muted">{{ i + 1 }}</td>
+                <td><input type="text" name="delq_min_{{ i }}"
+                       value="{{ '%g'|format(row[0]) }}"
+                       style="width:100px;"></td>
+                <td><input type="text" name="delq_score_{{ i }}"
+                       value="{{ '%g'|format(row[1]) }}"
+                       style="width:100px;"></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div style="min-width:280px;">
+        <h3 style="margin-top:0;">Economic Stress ({{ econ_stress_row_count }} rows)</h3>
+        <table class="data-table" style="font-size:13px;">
+          <thead>
+            <tr>
+              <th style="width:40px;">#</th>
+              <th>Minimum %</th>
+              <th>Score</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for i in range(econ_stress_row_count) %}
+              {% set row = econ_stress_rows[i] if i < econ_stress_rows|length else [0,0] %}
+              <tr>
+                <td class="muted">{{ i + 1 }}</td>
+                <td><input type="text" name="econ_min_{{ i }}"
+                       value="{{ '%g'|format(row[0]) }}"
+                       style="width:100px;"></td>
+                <td><input type="text" name="econ_score_{{ i }}"
+                       value="{{ '%g'|format(row[1]) }}"
+                       style="width:100px;"></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+
+    <div class="btn-row" style="margin-top:18px;">
+      <button class="btn btn-primary" type="submit"
+              name="action" value="save_env_factor_ranges">
+        Save Factor Ranges
+      </button>
+      <button class="btn btn-secondary" type="submit"
+              name="action" value="reset_env_factor_ranges"
+              onclick="return confirm('Reset Environmental Factor Ranges to the built-in defaults?');">
+        Reset to Defaults
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

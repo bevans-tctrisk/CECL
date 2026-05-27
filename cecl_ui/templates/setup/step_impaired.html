@@ -1,0 +1,532 @@
+{% extends "base.html" %}
+{% block title %}Impaired Loans{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+{% macro fmt_money(v) -%}
+  {% if v is none or v == '' %}{% else %}${{ '{:,.2f}'.format(v|float) }}{% endif %}
+{%- endmacro %}
+
+{% macro fmt_pct(v) -%}
+  {% if v is none or v == '' %}{% else %}{{ '{:.2f}%'.format(v|float * 100) }}{% endif %}
+{%- endmacro %}
+
+<div class="card">
+  <h2>Impaired Loans</h2>
+  <p class="muted">
+    Upload the CECL Migration / Impaired Loans file for the current
+    period. The wizard pulls the impairment-type list and the per-loan
+    <strong>Data Entry</strong> rows (cols A:J) from the file. Columns
+    K:Q are recalculated in Python (mirroring the workbook formulas)
+    and columns R:S (Loan Pool, Current Credit Grade) are looked up
+    from the latest sample loan-data file using the Member#-Suffix
+    combination.
+  </p>
+</div>
+
+{% set su = state.sample_uploads or {} %}
+
+{# ── Upload ──────────────────────────────────────────────────── #}
+<div class="card">
+  <h3>Impaired Loans File <span class="badge-required">Required</span></h3>
+
+  {% if su.get('impaired_files') %}
+    <div class="upload-status-list">
+      {% for f in su['impaired_files'] %}
+        <div class="upload-status-item"
+             style="display:flex; align-items:center; gap:8px;">
+          <span class="upload-status-icon">&#10003;</span>
+          <code>{{ f.name }}</code>
+          <form method="post" style="margin:0 0 0 auto;"
+                onsubmit="return confirm('Remove this impaired loans file? Any parsed impairment data will also be cleared.');">
+            <input type="hidden" name="action" value="remove_sample_impaired">
+            <input type="hidden" name="filename" value="{{ f.name }}">
+            <button type="submit" class="btn btn-secondary btn-sm"
+                    title="Remove this file"
+                    style="padding:2px 8px; font-size:12px;">&times;</button>
+          </form>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+    <label>Impaired loans file
+      <input type="file" name="sample_impaired_file" accept=".xlsx,.xlsm">
+      <span class="help">e.g. <code>2025-12-31 CECL-Migration-WARM - BRIDGETON_ONIZED_FCU.xlsx</code></span>
+    </label>
+    <button class="btn btn-secondary" type="submit" name="action"
+            value="upload_sample_impaired" style="margin-top:8px;">
+      Upload Impaired Loans File
+    </button>
+  </form>
+
+  {% if impaired and impaired.get('last_parse_error') %}
+    <div class="alert alert-error" style="margin-top:10px;">
+      Could not parse last upload: {{ impaired.last_parse_error }}
+    </div>
+  {% endif %}
+</div>
+
+{# ── Parsed metadata ─────────────────────────────────────────── #}
+{% if impaired and (impaired.get('cu_name_in_file') or impaired.get('period_ending')) %}
+  <div class="card">
+    <h3 style="margin-top:0;">Parsed metadata</h3>
+    <table class="data-table" style="font-size:12px;">
+      <tbody>
+        {% if impaired.get('cu_name_in_file') %}
+          <tr><th style="width:240px;">Credit union (from file A1)</th>
+              <td>{{ impaired.cu_name_in_file }}</td></tr>
+        {% endif %}
+        {% if impaired.get('period_ending') %}
+          <tr><th>Period ending</th>
+              <td>{{ impaired.period_ending }}</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
+{# ── Editable Impairment Types table ─────────────────────────── #}
+<div class="card">
+  <h3 style="margin-top:0;">Impairment Types &amp; Provision Percentages</h3>
+  <p class="muted">
+    Edit the impairment types and their provision percentages. Use
+    <code>Variable</code> (or leave blank) when the row should fall
+    back to the DQ-range table from the file. Saving recomputes
+    Provision Amount for every loan row below.
+  </p>
+
+  <form method="post" id="impaired-types-form">
+    <input type="hidden" name="action" value="save_impaired_types">
+    <table class="data-table" style="font-size:12px;" id="impaired-types-table">
+      <thead>
+        <tr>
+          <th style="width:60%;">Impairment Type</th>
+          <th style="width:25%;">Provision % <span class="muted">(0.5 = 50%)</span></th>
+          <th style="width:15%;"></th>
+        </tr>
+      </thead>
+      <tbody id="impaired-types-tbody">
+        {% set types = impaired.get('types') or [] if impaired else [] %}
+        {% for t in types %}
+          <tr>
+            <td><input type="text" name="type_name" value="{{ t.name }}" style="width:100%;"></td>
+            <td><input type="text" name="type_pct"
+                       value="{{ t.provision_pct if t.provision_pct is not none else '' }}"
+                       placeholder="e.g. 0.5  or  Variable" style="width:100%;"></td>
+            <td>
+              <button type="button" class="btn btn-secondary"
+                      onclick="this.closest('tr').remove();">Remove</button>
+            </td>
+          </tr>
+        {% endfor %}
+        {% if not types %}
+          <tr>
+            <td><input type="text" name="type_name" value="" style="width:100%;"></td>
+            <td><input type="text" name="type_pct" value="" style="width:100%;"></td>
+            <td>
+              <button type="button" class="btn btn-secondary"
+                      onclick="this.closest('tr').remove();">Remove</button>
+            </td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    <div class="btn-row" style="margin-top:10px;">
+      <button type="button" class="btn btn-secondary" id="impaired-add-row">
+        + Add impairment type
+      </button>
+      <button type="submit" class="btn btn-primary">Save &amp; recompute</button>
+    </div>
+  </form>
+
+  {% if su.get('impaired_files') %}
+    <form method="post" style="margin-top:8px; display:inline-block;">
+      <button type="submit" class="btn btn-secondary"
+              name="action" value="reparse_impaired"
+              onclick="return confirm('Re-parse will overwrite your edits to impairment types and reset all loan rows from the uploaded file. Continue?');">
+        Re-parse from uploaded file
+      </button>
+    </form>
+    <form method="post" style="margin-top:8px; display:inline-block;">
+      <button type="submit" class="btn btn-secondary"
+              name="action" value="refresh_lookup">
+        Refresh loan-data lookup
+      </button>
+    </form>
+  {% endif %}
+</div>
+
+<script>
+  (function () {
+    var btn = document.getElementById('impaired-add-row');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var tbody = document.getElementById('impaired-types-tbody');
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><input type="text" name="type_name" value="" style="width:100%;"></td>' +
+        '<td><input type="text" name="type_pct" value="" placeholder="e.g. 0.5  or  Variable" style="width:100%;"></td>' +
+        '<td><button type="button" class="btn btn-secondary" onclick="this.closest(\'tr\').remove();">Remove</button></td>';
+      tbody.appendChild(tr);
+    });
+  })();
+</script>
+
+{# ── Loan-data lookup status ─────────────────────────────────── #}
+{% set ls = impaired.get('lookup_status') if impaired else none %}
+{% if ls %}
+  <div class="card">
+    <h3 style="margin-top:0;">Loan-data lookup
+      {% if ls.ok %}<span class="muted" style="font-size:12px;">
+        (matched {{ ls.matched }} / {{ ls.matched + ls.unmatched }} rows from
+        <code>{{ ls.source }}</code>)
+      </span>{% endif %}
+    </h3>
+    {% if not ls.ok %}
+      <div class="alert alert-warning">
+        {{ ls.error or 'Loan-data lookup unavailable.' }}
+        Loan Pool and Current Credit Grade columns will be blank until
+        a sample loan-data file is uploaded on the Sample step and the
+        column mappings on the Columns step are set.
+      </div>
+    {% elif ls.unmatched %}
+      <div class="alert alert-warning">
+        {{ ls.unmatched }} loan row(s) had no match in the loan-data file.
+        Those rows are highlighted <span style="background:#fde7e7;
+        padding:0 6px;">light&nbsp;red</span> in the Loan-Data Lookup
+        section. Loan Pool was derived from the row's
+        <strong>Loan Code</strong>, Credit Grade defaulted to
+        &ldquo;Not Reported&rdquo;, and Bal&nbsp;from&nbsp;Loan&nbsp;Rpt
+        was set equal to Current Balance.
+      </div>
+    {% endif %}
+  </div>
+{% endif %}
+
+{# ── Loan-code validation (impaired rows whose code isn't in pool_map) ── #}
+{% set iv = impaired_validation or {} %}
+{% if iv.get('unmapped_codes') %}
+  <div class="card">
+    <h3 style="margin-top:0;">
+      Loan-code validation
+      <span class="badge-required">{{ iv.unmapped_codes|length }}</span>
+    </h3>
+    <p class="muted">
+      The following loan codes appear on impaired loans that
+      weren&rsquo;t found in the loan-data extract, and they
+      aren&rsquo;t in the loan-code map yet. Assign each one to a
+      pool so the fallback Loan&nbsp;Pool column resolves correctly
+      (otherwise it falls through to the default pool).
+    </p>
+    <table class="data-table" style="font-size:12px;">
+      <thead>
+        <tr><th>Loan code</th><th>Rows</th><th>Assign to pool</th></tr>
+      </thead>
+      <tbody>
+        {% for code in iv.unmapped_codes %}
+          <tr>
+            <td><code>{{ code }}</code></td>
+            <td>{{ iv.counts.get(code, 0) }}</td>
+            <td>
+              <form method="post" style="display:flex; gap:6px; align-items:center; margin:0;">
+                <input type="hidden" name="action" value="assign_impaired_code">
+                <input type="hidden" name="code" value="{{ code }}">
+                <select name="new_pool">
+                  <option value="">&mdash; leave unmapped (use default) &mdash;</option>
+                  {% for p in iv.pool_choices %}
+                    <option value="{{ p }}">{{ p }}</option>
+                  {% endfor %}
+                </select>
+                <button class="btn btn-secondary" type="submit">Save</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+
+{# ── Editable data table (Data Entry editable; Calc + Lookup read-only) ── #}
+{% set rows = impaired.get('data_rows') if impaired else [] %}
+{% set rows = rows or [] %}
+{% set type_options = (impaired.get('types') if impaired else none) or [] %}
+<div class="card">
+  <h3 style="margin-top:0;">
+    Impaired Loan Data
+    <span class="muted" style="font-size:12px;">{{ rows|length }} row(s)</span>
+  </h3>
+  <p class="muted" style="font-size:12px;">
+    The blue <strong>Data Entry</strong> cells are editable. Click a column
+    header to sort; type in the filter box to search. Use
+    <strong>+ Add loan</strong> to add a row and the per-row
+    <strong>Remove</strong> button to delete one. Click
+    <strong>Save loan rows</strong> to persist edits and recompute
+    columns K&ndash;Q + R&ndash;U.
+  </p>
+
+  <div class="btn-row" style="margin-bottom:8px; gap:12px; align-items:center;">
+    <input type="text" id="imp-filter" placeholder="Filter rows&hellip;"
+           style="padding:6px 10px; min-width:260px;">
+    <span class="muted" id="imp-filter-count" style="font-size:12px;"></span>
+  </div>
+
+  <datalist id="impaired-type-options">
+    {% for t in type_options %}
+      <option value="{{ t.name }}">
+    {% endfor %}
+  </datalist>
+
+  <form method="post" id="impaired-rows-form">
+    <input type="hidden" name="action" value="save_impaired_rows">
+    <div style="overflow-x:auto; max-height:600px; overflow-y:auto;">
+      <table class="data-table sortable" id="impaired-rows-table"
+             style="font-size:11px; white-space:nowrap;">
+        <thead>
+          <tr style="background:#eef2f8;">
+            <th colspan="10" style="text-align:center;">Data Entry (editable)</th>
+            <th colspan="7" style="text-align:center; background:#fef9e6;">Calculation (recomputed)</th>
+            <th colspan="4" style="text-align:center; background:#e6f3ec;">Loan-Data Lookup</th>
+            <th rowspan="2" style="background:#f6f6f6; text-align:center;">Actions</th>
+          </tr>
+          <tr>
+            <th data-sort="text">Impairment Type</th>
+            <th data-sort="text">Member #</th>
+            <th data-sort="text">Suffix</th>
+            <th data-sort="text">Loan Code</th>
+            <th data-sort="num">Current Balance</th>
+            <th data-sort="num">Days DQ</th>
+            <th data-sort="num">Other Lender Bal</th>
+            <th data-sort="num">Collateral Value</th>
+            <th data-sort="num">Allowance Provided</th>
+            <th data-sort="text">Notes</th>
+            <th data-sort="text" style="background:#fef9e6;">Member#-Suffix</th>
+            <th data-sort="num" style="background:#fef9e6;">Total Loans</th>
+            <th data-sort="num" style="background:#fef9e6;">LTV</th>
+            <th data-sort="num" style="background:#fef9e6;">LGD</th>
+            <th data-sort="num" style="background:#fef9e6;">% at Risk</th>
+            <th data-sort="num" style="background:#fef9e6;">Provision Amt</th>
+            <th data-sort="num" style="background:#fef9e6;">Bal Removed</th>
+            <th data-sort="text" style="background:#e6f3ec;">Loan Pool</th>
+            <th data-sort="text" style="background:#e6f3ec;">Credit Grade</th>
+            <th data-sort="num" style="background:#e6f3ec;">Bal from Loan Rpt</th>
+            <th data-sort="num" style="background:#e6f3ec;">Bal Diff</th>
+          </tr>
+        </thead>
+        <tbody id="impaired-rows-tbody">
+          {% for row in rows %}
+            {% set _ltv = row.get('ltv') %}
+            {% set _bd = row.get('balance_difference') %}
+            {% set _unmatched = row.get('unmatched_in_loan_data') %}
+            {% set _lookup_bg = '#fde7e7' if _unmatched else '#f3faf6' %}
+            <tr>
+              <td><input type="text" name="row_impairment_type"
+                         list="impaired-type-options"
+                         value="{{ row.get('impairment_type') or '' }}"
+                         style="width:140px;"></td>
+              <td><input type="text" name="row_member"
+                         value="{{ row.get('member') if row.get('member') is not none else '' }}"
+                         style="width:90px;"></td>
+              <td><input type="text" name="row_suffix"
+                         value="{{ row.get('suffix') if row.get('suffix') is not none else '' }}"
+                         style="width:60px;"></td>
+              <td><input type="text" name="row_loan_type"
+                         value="{{ row.get('loan_type') or '' }}"
+                         style="width:120px;"></td>
+              <td><input type="text" name="row_current_balance"
+                         value="{{ row.get('current_balance') if row.get('current_balance') is not none else '' }}"
+                         style="width:100px; text-align:right;"></td>
+              <td><input type="text" name="row_days_dq"
+                         value="{{ row.get('days_dq') if row.get('days_dq') is not none else '' }}"
+                         style="width:60px; text-align:right;"></td>
+              <td><input type="text" name="row_other_lender_balance"
+                         value="{{ row.get('other_lender_balance') if row.get('other_lender_balance') is not none else '' }}"
+                         style="width:100px; text-align:right;"></td>
+              <td><input type="text" name="row_collateral_value"
+                         value="{{ row.get('collateral_value') if row.get('collateral_value') is not none else '' }}"
+                         style="width:100px; text-align:right;"></td>
+              <td><input type="text" name="row_allowance_provided"
+                         value="{{ row.get('allowance_provided') if row.get('allowance_provided') is not none else '' }}"
+                         style="width:100px; text-align:right;"></td>
+              <td><input type="text" name="row_notes"
+                         value="{{ row.get('notes') or '' }}"
+                         style="width:160px;"></td>
+              <td style="background:#fffdf3;">{{ row.get('member_suffix') or '' }}</td>
+              <td style="background:#fffdf3; text-align:right;">{{ fmt_money(row.get('total_loans')) }}</td>
+              <td style="background:#fffdf3; text-align:right;">
+                {% if _ltv is none %}No Value{% else %}{{ '{:.2%}'.format(_ltv) }}{% endif %}
+              </td>
+              <td style="background:#fffdf3; text-align:right;">{{ fmt_money(row.get('lgd')) }}</td>
+              <td style="background:#fffdf3; text-align:right;">{{ fmt_pct(row.get('pct_at_risk')) }}</td>
+              <td style="background:#fffdf3; text-align:right;"><strong>{{ fmt_money(row.get('provision_amount')) }}</strong></td>
+              <td style="background:#fffdf3; text-align:right;">{{ fmt_money(row.get('balance_removed')) }}</td>
+              <td style="background:{{ _lookup_bg }};">{{ row.get('loan_pool') or '' }}</td>
+              <td style="background:{{ _lookup_bg }};">{{ row.get('credit_grade') or '' }}</td>
+              <td style="background:{{ _lookup_bg }}; text-align:right;">{{ fmt_money(row.get('balance_from_loan_report')) }}</td>
+              <td style="background:{{ _lookup_bg }}; text-align:right;
+                  {% if _bd and _bd|abs > 0.005 %}color:#b94a48;font-weight:bold;{% endif %}">
+                {{ fmt_money(_bd) }}
+              </td>
+              <td style="background:#f6f6f6; text-align:center;">
+                <button type="button" class="btn btn-secondary imp-row-remove"
+                        style="padding:2px 8px;">Remove</button>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="btn-row" style="margin-top:10px; gap:8px;">
+      <button type="button" class="btn btn-secondary" id="imp-add-row">
+        + Add loan
+      </button>
+      <button type="submit" class="btn btn-primary">Save loan rows</button>
+      <span class="muted" style="font-size:12px;">
+        Saving recomputes Calculation and Loan-Data Lookup columns.
+      </span>
+    </div>
+  </form>
+</div>
+
+<template id="imp-row-template">
+  <tr>
+    <td><input type="text" name="row_impairment_type" list="impaired-type-options" style="width:140px;"></td>
+    <td><input type="text" name="row_member" style="width:90px;"></td>
+    <td><input type="text" name="row_suffix" style="width:60px;"></td>
+    <td><input type="text" name="row_loan_type" style="width:120px;"></td>
+    <td><input type="text" name="row_current_balance" style="width:100px; text-align:right;"></td>
+    <td><input type="text" name="row_days_dq" style="width:60px; text-align:right;"></td>
+    <td><input type="text" name="row_other_lender_balance" style="width:100px; text-align:right;"></td>
+    <td><input type="text" name="row_collateral_value" style="width:100px; text-align:right;"></td>
+    <td><input type="text" name="row_allowance_provided" style="width:100px; text-align:right;"></td>
+    <td><input type="text" name="row_notes" style="width:160px;"></td>
+    <td style="background:#fffdf3;"></td>
+    <td style="background:#fffdf3; text-align:right;"></td>
+    <td style="background:#fffdf3; text-align:right;"></td>
+    <td style="background:#fffdf3; text-align:right;"></td>
+    <td style="background:#fffdf3; text-align:right;"></td>
+    <td style="background:#fffdf3; text-align:right;"></td>
+    <td style="background:#fffdf3; text-align:right;"></td>
+    <td style="background:#f3faf6;"></td>
+    <td style="background:#f3faf6;"></td>
+    <td style="background:#f3faf6; text-align:right;"></td>
+    <td style="background:#f3faf6; text-align:right;"></td>
+    <td style="background:#f6f6f6; text-align:center;">
+      <button type="button" class="btn btn-secondary imp-row-remove"
+              style="padding:2px 8px;">Remove</button>
+    </td>
+  </tr>
+</template>
+
+<script>
+(function () {
+  var tbody = document.getElementById('impaired-rows-tbody');
+  if (!tbody) return;
+  var table = document.getElementById('impaired-rows-table');
+  var filter = document.getElementById('imp-filter');
+  var filterCount = document.getElementById('imp-filter-count');
+  var addBtn = document.getElementById('imp-add-row');
+  var tpl = document.getElementById('imp-row-template');
+
+  // Remove (event delegation)
+  tbody.addEventListener('click', function (ev) {
+    var btn = ev.target.closest('.imp-row-remove');
+    if (!btn) return;
+    var tr = btn.closest('tr');
+    if (tr) tr.remove();
+    applyFilter();
+  });
+
+  // Add
+  if (addBtn && tpl) {
+    addBtn.addEventListener('click', function () {
+      var clone = tpl.content.firstElementChild.cloneNode(true);
+      tbody.appendChild(clone);
+      var inp = clone.querySelector('input[name="row_impairment_type"]');
+      if (inp) inp.focus();
+    });
+  }
+
+  // Filter
+  function applyFilter() {
+    var q = (filter ? filter.value : '').trim().toLowerCase();
+    var rows = tbody.querySelectorAll('tr');
+    var shown = 0;
+    rows.forEach(function (tr) {
+      var match = true;
+      if (q) {
+        var text = '';
+        tr.querySelectorAll('td').forEach(function (td) {
+          var inp = td.querySelector('input,select,textarea');
+          text += ' ' + ((inp ? inp.value : td.textContent) || '');
+        });
+        match = text.toLowerCase().indexOf(q) !== -1;
+      }
+      tr.style.display = match ? '' : 'none';
+      if (match) shown += 1;
+    });
+    if (filterCount) {
+      filterCount.textContent = q
+        ? (shown + ' of ' + rows.length + ' row(s) match')
+        : '';
+    }
+  }
+  if (filter) filter.addEventListener('input', applyFilter);
+
+  // Sort
+  function cellSortValue(tr, idx, type) {
+    var td = tr.children[idx];
+    if (!td) return type === 'num' ? -Infinity : '';
+    var inp = td.querySelector('input,select,textarea');
+    var raw = inp ? inp.value : td.textContent;
+    raw = (raw || '').trim();
+    if (type === 'num') {
+      var cleaned = raw.replace(/[$,%]/g, '').replace(/[()]/g, '');
+      var n = parseFloat(cleaned);
+      return isNaN(n) ? -Infinity : n;
+    }
+    return raw.toLowerCase();
+  }
+  var sortDir = {};
+  table.querySelectorAll('thead tr:nth-child(2) th[data-sort]').forEach(function (th, i) {
+    th.style.cursor = 'pointer';
+    th.title = 'Click to sort';
+    th.addEventListener('click', function () {
+      var type = th.getAttribute('data-sort') || 'text';
+      var dir = sortDir[i] === 'asc' ? 'desc' : 'asc';
+      sortDir = {}; sortDir[i] = dir;
+      var rowsArr = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+      rowsArr.sort(function (a, b) {
+        var av = cellSortValue(a, i, type);
+        var bv = cellSortValue(b, i, type);
+        if (av < bv) return dir === 'asc' ? -1 : 1;
+        if (av > bv) return dir === 'asc' ? 1 : -1;
+        return 0;
+      });
+      rowsArr.forEach(function (tr) { tbody.appendChild(tr); });
+      // Update header indicator
+      table.querySelectorAll('thead th[data-sort]').forEach(function (h) {
+        h.textContent = h.textContent.replace(/[ ]?[\u25B2\u25BC]$/, '');
+      });
+      th.textContent = th.textContent + ' ' + (dir === 'asc' ? '\u25B2' : '\u25BC');
+    });
+  });
+})();
+</script>
+
+{# ── Navigation ──────────────────────────────────────────────── #}
+<div class="card">
+  <form method="post">
+    <div class="btn-row">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step_co_recov') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit" name="action" value="next">
+        Next: File Format &rarr;
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

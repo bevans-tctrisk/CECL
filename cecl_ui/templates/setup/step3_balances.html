@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Balance Title Mapping{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Balance Title Mapping</h2>
+  <p class="muted">
+    Each row below is a balance-sheet title the credit union supplies in
+    its monthly data file. They were read from the <code>BS Data</code>
+    tab of <code>{{ state.warm.filename if state.warm else '(no WARM file)' }}</code>,
+    in the rows above the <em>Pool Order</em> / <em>Loan Pools</em>
+    anchor (column A). Pick which Loan Pool from
+    <a href="{{ url_for('setup.step2_warm') }}">Step&nbsp;2</a> each
+    title belongs in &mdash; or mark it <strong>&laquo; ignore &raquo;</strong>
+    if the row is a sub-total, spacer, or otherwise should be left out
+    of the report.
+  </p>
+  <p class="muted">
+    The workbook&rsquo;s own &ldquo;Pool&rdquo; column (col&nbsp;C, shown as
+    <em>Suggested</em>) is used to pre-pick the dropdown when the
+    suggestion matches one of your established pools. Anything that
+    doesn&rsquo;t match defaults to <strong>&laquo; ignore &raquo;</strong>
+    so nothing is mis-categorised silently.
+  </p>
+</div>
+
+{% if not titles %}
+<div class="card">
+  <h3>No balance titles found</h3>
+  <p class="muted">
+    {% if not state.warm %}
+      No WARM workbook is loaded. Go back to
+      <a href="{{ url_for('setup.step1_identity') }}">Step&nbsp;1</a> to
+      upload one.
+    {% else %}
+      The <code>BS Data</code> tab in this WARM workbook didn&rsquo;t
+      contain any rows above the <em>Pool Order</em> anchor that look
+      like balance titles. You can skip this step &mdash; the importer
+      will assign every loan to a pool via the loan-code mapping in
+      Step&nbsp;7.
+    {% endif %}
+  </p>
+  <form method="post">
+    <div class="btn-row" style="margin-top:18px;">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step2_warm') }}">&larr; Back</a>
+      <button class="btn btn-primary" type="submit" name="action" value="next">
+        Skip &amp; Next &rarr;
+      </button>
+    </div>
+  </form>
+</div>
+{% else %}
+<div class="card">
+  <h3>{{ titles|length }} balance title(s) found</h3>
+  <form method="post">
+    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr style="background:#f4f4f4;">
+          <th style="padding:6px 8px; text-align:left; width:32%;">Title (from monthly data)</th>
+          <th style="padding:6px 8px; text-align:left; width:18%;">Loan codes / note</th>
+          <th style="padding:6px 8px; text-align:left; width:22%;">Suggested (from WARM)</th>
+          <th style="padding:6px 8px; text-align:left; width:28%;">Assign to Loan Pool</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for t in titles %}
+        {% set saved = saved_map.get(t.title) %}
+        {% set chosen = saved if saved is not none else (t.suggested_pool if t.suggested_pool in pools else '') %}
+        <tr style="border-bottom:1px solid #eee;">
+          <td style="padding:6px 8px;">
+            <input type="hidden" name="bt_title" value="{{ t.title }}">
+            <strong>{{ t.title }}</strong>
+          </td>
+          <td style="padding:6px 8px;" class="muted">{{ t.note }}</td>
+          <td style="padding:6px 8px;" class="muted">{{ t.suggested_pool }}</td>
+          <td style="padding:6px 8px;">
+            <select name="bt_pool_{{ loop.index0 }}" style="width:100%;">
+              <option value="__ignore__" {% if not chosen %}selected{% endif %}>&laquo; ignore &raquo;</option>
+              {% for p in pools %}
+                <option value="{{ p }}" {% if chosen == p %}selected{% endif %}>{{ p }}</option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div class="btn-row" style="margin-top:18px;">
+      <a class="btn btn-secondary" href="{{ url_for('setup.step2_warm') }}">&larr; Back</a>
+      <button class="btn btn-secondary" type="submit" name="action" value="save">Save</button>
+      <button class="btn btn-primary" type="submit" name="action" value="next">Save &amp; Next &rarr;</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

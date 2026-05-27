@@ -1,0 +1,17 @@
+field_code,loan_code,description
+A703,1st Mortgage Real Estate,Total 1st mortgage real estate loans/lines of credit
+A386,Other Real Estate,Total other real estate loans/lines of credit
+A698,All Other Loans,Total all other loans
+A396,Unsecured Credit Card,Unsecured credit card loans
+A397A,Payday Alternative Loans,Payday alternative loans (PALs)
+A698A,Non-Federally Guaranteed Student,Non-federally guaranteed student loans
+A397,All Other Unsecured,All other unsecured loans/lines of credit
+A385,New Vehicles,New vehicle loans
+A370,Used Vehicles,Used vehicle loans
+A002,Leases Receivable,Leases receivable
+A698C,All Other,All other loans (catch-all)
+A703A,First Liens,Loans/lines of credit secured by first liens
+A386A,Junior Liens,Loans/lines of credit secured by junior liens
+A386B,Other Real Estate (Other),All other real estate loans/lines of credit
+A718A5,Commercial Real Estate,Commercial real estate loans
+A400P,Commercial (Non-RE),Commercial loans not secured by real estate

@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}SCALE — Review{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Review &amp; run</h2>
+  <table class="kv-table" style="width:100%; max-width:760px;">
+    <tr><th>Credit Union</th><td>{{ state.credit_union }}</td></tr>
+    <tr><th>Charter</th><td>{{ state.charter_number }}</td></tr>
+    <tr><th>Short name</th><td>{{ state.short_name }}</td></tr>
+    <tr><th>Solr URL</th><td><code>{{ state.scale.solr_url }}</code></td></tr>
+    <tr><th>Solr core</th><td><code>{{ state.scale.solr_core }}</code></td></tr>
+    <tr><th>Target period</th><td><strong>{{ state.scale.period }}</strong></td></tr>
+    <tr><th>Template</th>
+      <td>
+        {% if tmpl.ok %}
+          {{ tmpl.source }}{% if tmpl.message %} &mdash; {{ tmpl.message }}{% endif %}<br>
+          <code class="muted">{{ tmpl.path }}</code>
+        {% else %}<span style="color:#a01818;">{{ tmpl.message }}</span>{% endif %}
+      </td>
+    </tr>
+    <tr><th>Mapping CSV</th>
+      <td>
+        {% if mp.ok %}
+          {{ mp.source }} &mdash; {{ map_summary.total if map_summary else '?' }} rows<br>
+          <code class="muted">{{ mp.path }}</code>
+        {% else %}<span style="color:#a01818;">{{ mp.message }}</span>{% endif %}
+      </td>
+    </tr>
+    <tr><th>Q-factors</th>
+      <td>
+        {% if qf_total %}
+          {{ qf_total }} configured &mdash; {{ qf_active }} overridden for this CU
+        {% else %}
+          <span class="muted">None configured (admin can add via <code>cecl_ui/data/scale/qfactors_default.csv</code>)</span>
+        {% endif %}
+      </td>
+    </tr>
+    <tr><th>Impaired loans</th>
+      <td>
+        {% if imp_parsed.get('ok') %}
+          {{ imp_parsed.get('row_count', 0) }} row(s) &middot;
+          ${{ "{:,.2f}".format(imp_parsed.get('total_balance', 0)) }}
+          ({{ imp.get('uploaded_filename') }})
+        {% elif imp.get('saved_path') %}
+          <span style="color:#a01818;">Parse failed &mdash; {{ imp_parsed.get('error', '') }}</span>
+        {% else %}
+          <span class="muted">Not uploaded &mdash; optional</span>
+        {% endif %}
+      </td>
+    </tr>
+  </table>
+
+  <form method="post" style="margin-top:18px;">
+    {% set variant = state.scale.report_variant or 'both' %}
+    <fieldset style="margin:0 0 16px 0; padding:12px 14px; border:1px solid #c9d6e8; background:#f4f8ff; max-width:760px;">
+      <legend style="padding:0 6px; font-weight:600;">Report variant</legend>
+      <p class="muted" style="margin:0 0 8px 0;">
+        Tabs not used by the selected variant are hidden in the output workbook
+        (formulas still reference them, so unhide in Excel to inspect).
+        <strong>Management Adjustment</strong>, <strong>Historical Data</strong>,
+        and <strong>Industry Data</strong> are included for both variants.
+      </p>
+      <label style="display:block; margin:4px 0;">
+        <input type="radio" name="report_variant" value="tct"
+          {% if variant == 'tct' %}checked{% endif %}>
+        <strong>TCT Report</strong> — Cover, Introduction, Scale Calculation,
+        Env Factor by Pool, Environmental Factor Ranges, Impaired Loans ASC 310-10,
+        Calc tab
+      </label>
+      <label style="display:block; margin:4px 0;">
+        <input type="radio" name="report_variant" value="vizo"
+          {% if variant == 'vizo' %}checked{% endif %}>
+        <strong>Vizo Report</strong> — Cover-Vizo, Executive Summary-Vizo,
+        Scale Calculation-Vizo, Env Factor by Pool-Vizo, Impaired Loans-Vizo,
+        Introduction-Vizo, Explanation of ACL Calc-Vizo, Envir Factor Ranges-Vizo,
+        New Report Calc-Vizo
+      </label>
+      <label style="display:block; margin:4px 0;">
+        <input type="radio" name="report_variant" value="both"
+          {% if variant == 'both' %}checked{% endif %}>
+        <strong>Both</strong> — keep all TCT and Vizo tabs visible
+      </label>
+    </fieldset>
+    <div class="btn-row" style="display:flex; gap:8px;">
+      <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_impaired') }}">&larr; Back</a>
+      <button type="submit" class="btn"
+        {% if not (tmpl.ok and mp.ok and state.charter_number and state.scale.period) %}disabled{% endif %}>
+        Continue to Run &rarr;
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

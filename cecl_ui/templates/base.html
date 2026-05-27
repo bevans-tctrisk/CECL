@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}CECL UI{% endblock %}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+  <header class="app-header">
+    <h1>CECL UI &mdash; Credit Migration Reporting</h1>
+    <nav>
+      <a href="{{ url_for('home.index') }}">Home</a>
+      <a href="{{ url_for('run.select_cu') }}">Run Reports</a>
+      <a href="{{ url_for('scale_runs.index') }}">SCALE Runs</a>
+      <a href="{{ url_for('home.model_select') }}">+ New CU</a>
+      <a href="{{ url_for('admin.index') }}">Admin</a>
+    </nav>
+  </header>
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, msg in messages %}
+        <div class="flash {{ category }}">{{ msg }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <script src="{{ url_for('static', filename='js/wizard.js', v='20260507b') }}"></script>
+  <script>
+  // Preserve scroll position across POST/redirect/GET cycles. When the user
+  // submits a form, we stash window.scrollY keyed by the current URL path in
+  // sessionStorage. After the redirected GET renders, we read the saved
+  // value and scroll back to it. Keeps the view "in place" after small edits
+  // (save mappings, remove rows, refresh totals, etc.).
+  (function () {
+    var KEY_PREFIX = 'cecl_scroll:';
+    var key = KEY_PREFIX + window.location.pathname;
+
+    // Restore on load (use a tiny delay to let layout settle).
+    document.addEventListener('DOMContentLoaded', function () {
+      try {
+        var raw = sessionStorage.getItem(key);
+        if (raw !== null) {
+          sessionStorage.removeItem(key);
+          var y = parseInt(raw, 10);
+          if (!isNaN(y) && y > 0) {
+            // Disable native auto-restore so our value wins.
+            if ('scrollRestoration' in history) {
+              history.scrollRestoration = 'manual';
+            }
+            // Defer twice to ensure async content (tables, previews) has paint
+            requestAnimationFrame(function () {
+              requestAnimationFrame(function () { window.scrollTo(0, y); });
+            });
+          }
+        }
+      } catch (e) { /* ignore */ }
+    });
+
+    // Save on every form submit on this page.
+    document.addEventListener('submit', function () {
+      try { sessionStorage.setItem(key, String(window.scrollY || 0)); }
+      catch (e) { /* ignore */ }
+    }, true);
+  })();
+  </script>
+</body>
+</html>

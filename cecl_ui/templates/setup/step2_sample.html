@@ -1,0 +1,155 @@
+﻿{% extends "base.html" %}
+{% block title %}Loan Data Extract(s){% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Loan Data Extract(s)</h2>
+  <p class="muted">
+    Upload one or more of this credit union&rsquo;s quarterly loan-data
+    extracts (e.g. an Aries file). We&rsquo;ll inspect each one and pre-fill
+    the file pattern, column mappings, and pool codes for the next few steps.
+  </p>
+  {% if state.has_warm_files != 'yes' %}
+  <div class="alert alert-info" style="margin-top:10px;">
+    <strong>Note &mdash; Non-WARM path:</strong> Because this credit union does
+    not have a WARM file, the model will only use the <strong>most recent
+    3 months</strong> of data from this extract for reserve calculations.
+    The historical period comes from the files uploaded in Step 2.
+  </div>
+  {% endif %}
+</div>
+
+{% set su = state.sample_uploads or {} %}
+
+{# ── Loan Data Extract (required, triggers column analysis) ──── #}
+<div class="card">
+  <h3>Loan Data Extract
+    <span class="badge-required">Required</span>
+  </h3>
+  <p class="muted">
+    Upload one or more quarterly loan-data extracts. If the credit union
+    splits its portfolio across multiple files (e.g. consumer and business
+    on separate exports), add them all here &mdash; the most recently
+    analyzed file seeds the column-mapping suggestions for the next steps.
+  </p>
+
+  {% if su.get('loan_data_files') %}
+    <div class="upload-status-list">
+      {% for f in su['loan_data_files'] %}
+        <div class="upload-status-item" style="display:block; padding:8px 0; border-bottom:1px solid #eee;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="upload-status-icon">&#10003;</span>
+            <code>{{ f.name }}</code>
+            <form method="post" style="display:inline; margin:0;">
+              <input type="hidden" name="action" value="remove_loan_data">
+              <input type="hidden" name="filename" value="{{ f.name }}">
+              <button type="submit" class="btn btn-secondary"
+                      style="padding:1px 8px; font-size:12px;"
+                      onclick="return confirm('Remove {{ f.name }}?');"
+                      title="Remove this file">&times;</button>
+            </form>
+          </div>
+          {# Per-file header override. Auto-submits on change so users
+             don't have to remember the Apply button before clicking
+             Next: Column Mappings. #}
+          <form method="post" style="margin:6px 0 0 24px; padding:6px 10px;
+               background:#f6f8fa; border:1px solid #ddd; border-radius:4px;
+               display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <input type="hidden" name="action" value="set_file_header">
+            <input type="hidden" name="filename" value="{{ f.name }}">
+            <label style="display:inline-flex; align-items:center; gap:6px; margin:0;">
+              <input type="checkbox" name="has_header"
+                     onchange="this.form.submit();"
+                     {% if f.has_header %}checked{% endif %}>
+              <span>Has headers</span>
+            </label>
+            <label style="display:inline-flex; align-items:center; gap:6px; margin:0;">
+              Header row:
+              <select name="header_row" onchange="this.form.submit();">
+                {% for n in range(1, 11) %}
+                  <option value="{{ n }}" {% if (f.header_row or 1) == n %}selected{% endif %}>
+                    Row {{ n }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <button class="btn btn-secondary" type="submit"
+                    style="padding:2px 10px; font-size:12px;">Apply</button>
+            <span class="muted" style="font-size:11px;">
+              (auto-applies on change)
+            </span>
+          </form>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
+    <label>
+      {% if su.get('loan_data_files') %}Add another loan data file{% else %}Loan data file{% endif %}
+      (.xlsx or .csv)
+      <input type="file" name="sample_file" accept=".xlsx,.xls,.csv,.txt">
+      <span class="help">e.g. <code>aireslndn_Mar_2026.csv</code> &mdash; parsed locally; not uploaded anywhere.</span>
+    </label>
+    <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <button class="btn btn-primary" type="submit" name="action" value="upload">
+        {% if su.get('loan_data_files') %}Add &amp; Analyze{% else %}Analyze File{% endif %}
+      </button>
+      {% if state.sample %}
+        <button class="btn btn-secondary" type="submit" name="action" value="clear"
+                onclick="return confirm('Clear the parsed sample and reset suggested fields to defaults?');">
+          Clear analysis
+        </button>
+      {% endif %}
+    </div>
+  </form>
+
+  {% if su.get('loan_data_error') %}
+  <div class="flash error" style="margin-top:10px;">
+    {{ su.get('loan_data_error') }}
+  </div>
+  {% endif %}
+
+  {% if state.sample %}
+  <div style="margin-top:16px; padding:12px 14px; background:#f0f7ea; border:1px solid #b7d9a0; border-radius:6px; font-size:13px;">
+    <strong>Analysis: <code>{{ state.sample.filename }}</code></strong>
+    &nbsp;&mdash;&nbsp;
+    {{ state.sample.headers | length }} columns,
+    {{ state.sample.pool_code_suggestions | length }} pool codes detected.
+    Column mapping suggestions applied to later steps.
+    {% if state.sample.pool_code_suggestions %}
+      <br><span class="muted">Pool codes found:
+        {% for c in state.sample.pool_code_suggestions %}
+          <code>{{ c }}</code>{% if not loop.last %}, {% endif %}
+        {% endfor %}
+      </span>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+{# ── Navigation ──────────────────────────────────────────────── #}
+<div class="card">
+  <form method="post">
+    <div class="btn-row">
+      {% if state.has_warm_files == 'yes' %}
+        <a class="btn btn-secondary" href="{{ url_for('setup.step_orig_score') }}">&larr; Back</a>
+      {% else %}
+        <a class="btn btn-secondary" href="{{ url_for('setup.step_orig_score') }}">&larr; Back</a>
+      {% endif %}
+
+      {% set has_loan_data = su.get('loan_data_files') or state.sample %}
+      {% if has_loan_data %}
+        <button class="btn btn-primary" type="submit" name="action" value="next">
+          Next: Column Mappings &rarr;
+        </button>
+      {% else %}
+        <button class="btn btn-secondary" type="submit" name="action" value="skip">
+          Skip &mdash; I&rsquo;ll enter file details manually &rarr;
+        </button>
+      {% endif %}
+    </div>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,26 @@
+field_code,loan_code,description
+045B,Unsecured Credit Card,Delinquent balance — unsecured credit card loans
+130B,Payday Alternative Loans,Delinquent balance — payday alternative loans (PALs/FCU)
+041T,Non-Federally Guaranteed Student,Delinquent balance — non-federally guaranteed student loans
+DL0027,All Other Unsecured,Delinquent balance — all other unsecured loans/lines of credit
+041C,All Other Unsecured,Delinquent balance — all other loans (legacy 5300 aggregate)
+041C1,New Vehicles,Delinquent balance — new vehicle loans
+041C2,Used Vehicles,Delinquent balance — used vehicle loans
+041D,Leases Receivable,Delinquent balance — leases receivable
+DL0055,All Other Secured Non-RE,Delinquent balance — all other secured non-real estate loans/lines of credit
+DL0062,First Liens,Delinquent balance — secured by 1st lien on a single 1- to 4-family residential property
+713A,First Liens,Delinquent balance — 1st-lien residential, fixed rate (incl. hybrid/balloon > 5 yrs, legacy)
+714A,First Liens,Delinquent balance — 1st-lien residential, adjustable rate (incl. hybrid/balloon ≤ 5 yrs, legacy)
+DL0069,Junior Liens,Delinquent balance — secured by junior lien on a single 1- to 4-family residential property
+715A,Junior Liens,Delinquent balance — junior-lien residential, fixed rate/hybrid/balloon (legacy)
+716A,Junior Liens,Delinquent balance — junior-lien residential, adjustable rate (legacy)
+DL0076,Other Real Estate (Other),Delinquent balance — all other (non-commercial) real estate loans/lines of credit
+DL0083,Construction and Development,Delinquent balance — construction and development loans
+DL0090,Secured by Farmland,Delinquent balance — secured by farmland
+DL0097,Secured by Multifamily,Delinquent balance — secured by multifamily
+DL0104,Owner-Occupied Non-Farm Non-Residential,Delinquent balance — secured by owner-occupied non-farm non-residential property
+DL0111,Non-Owner-Occupied Non-Farm Non-Residential,Delinquent balance — secured by non-owner-occupied non-farm non-residential property
+DL0118,Agricultural,Delinquent balance — loans to finance agricultural production and other loans to farmers
+DL0125,Commercial and Industrial,Delinquent balance — commercial and industrial loans
+DL0132,Unsecured Commercial,Delinquent balance — unsecured commercial loans
+DL0139,Unsecured Revolving Commercial,Delinquent balance — unsecured revolving lines of credit for commercial purposes

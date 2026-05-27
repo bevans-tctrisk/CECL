@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}CECL UI &mdash; Home{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Welcome to the CECL UI</h2>
+  <p class="muted">
+    This tool walks you through configuring a Credit Union (CU) and producing
+    its quarterly CECL reports (TCT, Vizo, Vizo Supplemental, and
+    Improved/Deteriorated).
+  </p>
+
+  <form method="post">
+    <h3>What would you like to do?</h3>
+    <div class="choice-grid">
+      <button class="choice-card" type="submit" name="choice" value="new" style="border:0;">
+        <h3>Set up a NEW Credit Union</h3>
+        <p>Walk through the wizard to configure a new CU, then run its reports.</p>
+      </button>
+      <button class="choice-card" type="submit" name="choice" value="existing" style="border:0;">
+        <h3>Run reports for an EXISTING CU</h3>
+        <p>Pick a CU you already configured and run quarterly reports.</p>
+      </button>
+    </div>
+  </form>
+
+  {% if drafts %}
+  <h3 style="margin-top:36px;">Resume in-progress setup</h3>
+  <p class="muted" style="margin-top:-6px;">
+    These credit unions have wizard progress saved on disk. Pick one to
+    pick up where you left off.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Credit Union</th>
+        <th>Short Name</th>
+        <th>Model</th>
+        <th>Last step</th>
+        <th>Last saved</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in drafts %}
+      <tr>
+        <td>{{ d.credit_union }}</td>
+        <td>{{ d.short_name }}</td>
+        <td>
+          {% if d.model == 'scale' %}
+            <span class="badge" style="background:#e6f0ff; color:#1a4f8a; padding:2px 8px; border-radius:10px; font-size:0.85em;">SCALE</span>
+          {% else %}
+            <span class="badge" style="background:#eaf6e9; color:#296b22; padding:2px 8px; border-radius:10px; font-size:0.85em;">Migration</span>
+          {% endif %}
+        </td>
+        <td>{{ d.active_step }}</td>
+        <td>{{ d.saved_at }}</td>
+        <td style="white-space:nowrap;">
+          <form method="post" action="{{ url_for('setup.resume_draft', model=d.model, key=d.key) }}" style="display:inline;">
+            <button type="submit">Resume &rsaquo;</button>
+          </form>
+          <form method="post" action="{{ url_for('setup.delete_draft', model=d.model, key=d.key) }}"
+                style="display:inline;"
+                onsubmit="return confirm('Delete saved progress for {{ d.credit_union }} ({{ d.model }})? This cannot be undone.');">
+            <button type="submit" class="btn-danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if clients %}
+  <h3 style="margin-top:36px;">Configured Credit Unions</h3>
+  <table>
+    <thead><tr><th>Short Name</th><th>Credit Union</th><th></th></tr></thead>
+    <tbody>
+      {% for c in clients %}
+      <tr>
+        <td>{{ c.short_name }}</td>
+        <td>{{ c.credit_union }}</td>
+        <td><a href="{{ url_for('run.client_dashboard', short_name=c.short_name) }}">Open &rsaquo;</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}
