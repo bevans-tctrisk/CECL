@@ -4530,12 +4530,22 @@ def load_standalone_impaired(config, snap, df=None):
         # Look up grade from df using member+suffix
         grade = ''
         if member is not None and suffix is not None:
-            mem_key = f"{int(member)}{int(suffix):0{suffix_len}d}"
-            grade = grade_lookup.get(mem_key, '')
-            if not grade:
-                # Try with string suffix as-is
-                mem_key2 = f"{int(member)}{str(int(suffix)).zfill(suffix_len)}"
-                grade = grade_lookup.get(mem_key2, '')
+            try:
+                mem_int = int(float(member))
+                suf_int = int(float(suffix))
+            except (TypeError, ValueError):
+                # Spreadsheet placeholders like 'xxxx' or blanks — skip
+                # grade lookup for this row rather than crashing the
+                # whole report. The balance still aggregates into the
+                # pool below.
+                mem_int = suf_int = None
+            if mem_int is not None:
+                mem_key = f"{mem_int}{suf_int:0{suffix_len}d}"
+                grade = grade_lookup.get(mem_key, '')
+                if not grade:
+                    # Try with string suffix as-is
+                    mem_key2 = f"{mem_int}{str(suf_int).zfill(suffix_len)}"
+                    grade = grade_lookup.get(mem_key2, '')
 
         spec_id_by_pool.setdefault(pool, {})
         spec_id_by_pool[pool][grade] = (
