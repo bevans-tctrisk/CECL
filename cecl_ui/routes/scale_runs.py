@@ -32,6 +32,7 @@ from cecl_ui.services.scale import (
     impaired_loader,
     runner as scale_runner,
     runs_service,
+    solr_fetcher,
     template_loader,
 )
 
@@ -95,6 +96,39 @@ def _default_next_period(latest: str, choices: list[str]) -> str:
     return choices[0] if choices else ""
 
 
+def _solr_available_periods(state: dict | None) -> dict:
+    """Best-effort: ask Solr which quarter-end periods have a 5300 doc
+    for the CU's charter. Returns ``{ok, periods:set[str], error}``.
+    Caller falls back to the unfiltered template/map period list when
+    ok is False (Solr down, no creds, missing charter, etc.).
+    """
+    if not state:
+        return {"ok": False, "periods": set(), "error": "no draft"}
+    charter = state.get("charter_number") or state.get("charter")
+    sc = state.get("scale") or {}
+    solr_url = sc.get("solr_url")
+    solr_core = sc.get("solr_core")
+    if not (charter and solr_url and solr_core):
+        return {
+            "ok": False, "periods": set(),
+            "error": "missing charter or Solr config in wizard draft",
+        }
+    try:
+        charter_int = int(str(charter).strip())
+    except (TypeError, ValueError):
+        return {
+            "ok": False, "periods": set(),
+            "error": f"charter_number is not numeric: {charter!r}",
+        }
+    return solr_fetcher.list_charter_periods(
+        solr_url, solr_core, charter_int,
+        charter_field=sc.get("charter_field") or "charter",
+        charterdate_field=sc.get("charterdate_field") or "charterdate",
+        username=sc.get("solr_user") or None,
+        password=sc.get("solr_pass") or None,
+    )
+
+
 @scale_runs_bp.route("/<short_name>", methods=["GET"])
 def cu_dashboard(short_name: str):
     workspace_root = _workspace_root()
@@ -106,8 +140,27 @@ def cu_dashboard(short_name: str):
 
     state = runs_service.load_state_for_cu(workspace_root, short_name)
     draft_present = state is not None
-    choices = _period_choices()
-    default_target = _default_next_period(cu["latest_period"], choices)
+    all_choices = _period_choices()
+
+    # Filter the dropdown to quarters Solr actually has a 5300 doc for
+    # this charter. NCUA publishes 5300 data ~6-10 weeks after each
+    # quarter-end, so the template/map period list typically gets ahead
+    # of what's actually queryable. When Solr is unreachable we fall
+    # back to the full list and surface the error.
+    solr_probe = _solr_available_periods(state)
+    if solr_probe["ok"]:
+        period_choices = [p for p in all_choices if p in solr_probe["periods"]]
+        if not period_choices:
+            # Defensive: don't strand the user with an empty dropdown if
+            # the intersection is empty (e.g. brand-new charter).
+            period_choices = all_choices
+            solr_probe["error"] = (
+                "Solr has no 5300 docs for this charter that match the "
+                "available SCALE template/map periods. Showing the full list."
+            )
+    else:
+        period_choices = all_choices
+    default_target = _default_next_period(cu["latest_period"], period_choices)
 
     # Surface the impaired file the wizard currently has saved (used
     # as fallback when no per-run file is uploaded).
@@ -144,10 +197,11 @@ def cu_dashboard(short_name: str):
         "scale_runs/cu_dashboard.html",
         cu=cu,
         runs=runs,
-        period_choices=choices,
+        period_choices=period_choices,
         default_target=default_target,
         draft_present=draft_present,
         saved_impaired=saved_impaired,
+        solr_probe=solr_probe,
     )
 
 

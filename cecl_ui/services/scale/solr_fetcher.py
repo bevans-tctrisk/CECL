@@ -133,3 +133,80 @@ def test_connection(
         }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "status": "", "message": str(exc)}
+
+
+_CHARTERDATE_RE = re.compile(
+    r"^\d+-(?P<m>\d{2})/(?P<d>\d{2})/(?P<y>\d{4})$"
+)
+
+
+def _charterdate_to_period(value: str) -> str | None:
+    """Convert a Solr ``charterdate`` field value (``"<n>-MM/DD/YYYY"``)
+    into a ``"YYYY-MM"`` period string. Returns None when it doesn't
+    parse or the month isn't a quarter end.
+    """
+    if not isinstance(value, str):
+        return None
+    m = _CHARTERDATE_RE.match(value.strip())
+    if not m:
+        return None
+    month = int(m["m"])
+    if month not in VALID_Q_MONTHS:
+        return None
+    return f"{m['y']}-{month:02d}"
+
+
+def list_charter_periods(
+    solr_url: str,
+    core: str,
+    charter: int,
+    *,
+    charter_field: str = "charter",
+    charterdate_field: str = "charterdate",
+    username: str | None = None,
+    password: str | None = None,
+    timeout: int = 10,
+    max_rows: int = 500,
+) -> Dict[str, Any]:
+    """Return the set of ``YYYY-MM`` quarter-end periods for which Solr
+    has a 5300 doc for ``charter``.
+
+    Returns ``{"ok": bool, "periods": set[str], "error": str}``. On
+    network/auth errors ``ok=False`` and ``periods`` is empty so the
+    caller can fall back to its unfiltered period list.
+    """
+    result: Dict[str, Any] = {"ok": False, "periods": set(), "error": ""}
+    base = solr_url.rstrip("/")
+    url = f"{base}/{core}/select"
+    auth = (username, password) if username and password else None
+    try:
+        r = requests.get(
+            url,
+            params={
+                "q": f"{charter_field}:{charter}",
+                "fl": charterdate_field,
+                "rows": max_rows,
+                "wt": "json",
+            },
+            auth=auth,
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        docs = r.json().get("response", {}).get("docs", [])
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = str(exc)
+        return result
+
+    periods: set[str] = set()
+    for doc in docs:
+        raw = doc.get(charterdate_field)
+        # Solr may return multi-valued fields as a list.
+        values = raw if isinstance(raw, list) else [raw]
+        for v in values:
+            p = _charterdate_to_period(v)
+            if p:
+                periods.add(p)
+    result["ok"] = True
+    result["periods"] = periods
+    return result
+
