@@ -22,7 +22,10 @@ import openpyxl
 from cecl_ui.services import wizard_drafts
 
 
-_REPORT_GLOB = "CECL_SCALE_*.xlsx"
+# Glob accepts both the historical (CECL_SCALE_<short>...xlsx) and the
+# YYYY-MM-prefixed (2026-03_CECL_SCALE_<short>...xlsx) layouts so older
+# runs stay discoverable after the naming change.
+_REPORT_GLOB = "*CECL_SCALE_*.xlsx"
 
 # Source cells in the prior workbook that drive the Prior ACL block on
 # Executive Summary-Vizo. In a fresh template these are the formula

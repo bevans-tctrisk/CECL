@@ -109,7 +109,10 @@ def _output_path(workspace_root: str, short: str, period: str) -> Path:
     safe_short = short or "cu"
     out_dir = Path(workspace_root) / "Generated_Reports" / safe_short / period
     out_dir.mkdir(parents=True, exist_ok=True)
-    return out_dir / f"CECL_SCALE_{safe_short}.xlsx"
+    # Prefix with the YYYY-MM period so the workbook self-identifies once it
+    # leaves the period folder (email attachments, audit copies, etc.).
+    # apply_report_variant() appends _TCT/_Vizo suffixes to this stem.
+    return out_dir / f"{period}_CECL_SCALE_{safe_short}.xlsx"
 
 
 def apply_qfactors(
