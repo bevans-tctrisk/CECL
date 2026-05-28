@@ -37,7 +37,11 @@ from cecl_audit_log import get_audit_logger, log_report_generation, log_session_
 from cecl_credentials import get_database_url
 
 load_dotenv()
-BASE = os.path.dirname(os.path.abspath(__file__))
+# When the code clone lives on a local SSD (e.g. C:\Dev\CECL) and the
+# analyst data (client_configs/, Reports/, Raw_Uploads/, ...) lives on a
+# shared drive (e.g. Egnyte), CECL_WORKSPACE_ROOT points at the data root.
+# Falls back to the historical 'code dir == data dir' layout when unset.
+BASE = os.environ.get('CECL_WORKSPACE_ROOT') or os.path.dirname(os.path.abspath(__file__))
 CFG_DIR = os.path.join(BASE, 'client_configs')
 RPT_DIR = os.path.join(BASE, 'Reports')
 engine = create_engine(get_database_url())

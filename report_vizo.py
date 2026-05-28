@@ -50,10 +50,14 @@ from cecl_engine import risk_change_matrix
 # ══════════════════════════════════════════════════════════════════
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
+# _WORKSPACE_BASE holds analyst-owned data (Sample Reports templates, etc.)
+# which may live on a shared drive while the code lives in a local clone.
+# Falls back to the code dir when CECL_WORKSPACE_ROOT is unset.
+_WORKSPACE_BASE = os.environ.get('CECL_WORKSPACE_ROOT') or _BASE
 
 # Path to the Vizo template containing the Vizo Color Theme 1 (theme1.xml)
 VIZO_TEMPLATE_PATH = os.path.join(
-    _BASE, 'Sample Reports',
+    _WORKSPACE_BASE, 'Sample Reports',
     'YYYY-MM CECL-Migration-WARM - Template Credit Union with Vizo.xlsx')
 
 _VIZO_THEME_BYTES = None
@@ -78,8 +82,8 @@ def _apply_vizo_theme(wb):
 
 LOGO_VIZO = os.path.join(_BASE, 'logos', 'vizo_financial.png')
 LOGO_TCT  = os.path.join(_BASE, 'logos', 'tct_risk_solutions.png')
-ICON_INFO_DARKRED   = os.path.join(_BASE, 'Sample Reports', 'assets', 'info_darkred.png')
-ICON_INFO_DARKGREEN = os.path.join(_BASE, 'Sample Reports', 'assets', 'info_darkgreen.png')
+ICON_INFO_DARKRED   = os.path.join(_WORKSPACE_BASE, 'Sample Reports', 'assets', 'info_darkred.png')
+ICON_INFO_DARKGREEN = os.path.join(_WORKSPACE_BASE, 'Sample Reports', 'assets', 'info_darkgreen.png')
 
 HIDDEN_GRADES = ['Hide-F', 'Hide-G', 'Hide-H', 'Hide-I']
 
@@ -5457,7 +5461,7 @@ def compose_vizo_main(client, snap, df, config, grades, hist=None):
 
     # Insert Introduction-Vizo and Executive Summary-Vizo tabs from template
     from openpyxl import load_workbook
-    template_path = os.path.join(_BASE, 'Sample Reports', 'YYYY-MM CECL-Migration-WARM - Template Credit Union with Vizo.xlsx')
+    template_path = os.path.join(_WORKSPACE_BASE, 'Sample Reports', 'YYYY-MM CECL-Migration-WARM - Template Credit Union with Vizo.xlsx')
     if os.path.exists(template_path):
         template_wb = load_workbook(template_path)
         for tab_name in ["Introduction-Vizo", "Executive Summary-Vizo"]:

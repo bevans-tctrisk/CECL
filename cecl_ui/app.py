@@ -20,11 +20,21 @@ from pathlib import Path
 from flask import Flask
 from flask_session import Session
 
-# Make sure the workspace root is on sys.path so we can import the existing
-# CECL modules (cecl_engine, generate_report, import_data, ...).
-WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
-if str(WORKSPACE_ROOT) not in sys.path:
-    sys.path.insert(0, str(WORKSPACE_ROOT))
+# The CODE root is wherever cecl_ui/ lives — used for importing sibling
+# top-level modules (cecl_engine, generate_report, import_data, ...).
+_CODE_ROOT = Path(__file__).resolve().parent.parent
+if str(_CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_CODE_ROOT))
+
+# The WORKSPACE root is where the per-CU analyst data lives: wizard_drafts/,
+# Raw_Uploads/, Generated_Reports/, client_configs/, admin_defaults.yaml, etc.
+# Defaults to the same folder as the code (the historical layout where the
+# whole project sat on the shared drive).  When the code is on a local clone
+# (e.g. C:\Dev\CECL) and the analyst data is on a shared drive
+# (e.g. Z:\Shared\TCT Files\CECL - CM Files), set the CECL_WORKSPACE_ROOT
+# environment variable to point at the data location.
+_env_workspace = os.environ.get("CECL_WORKSPACE_ROOT", "").strip()
+WORKSPACE_ROOT = Path(_env_workspace).resolve() if _env_workspace else _CODE_ROOT
 
 from cecl_ui.routes.home import home_bp
 from cecl_ui.routes.setup import setup_bp

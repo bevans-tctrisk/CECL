@@ -1,16 +1,18 @@
 $ErrorActionPreference = "SilentlyContinue"
 
-$projectRoot = "Z:\Shared\TCT Files\CECL - CM Files"
+# Project root is the local clone on C:.  The repo used to live on Egnyte
+# (Z:\Shared\TCT Files\CECL - CM Files) but git operations and Python imports
+# off the network share were the dominant latency source.  GitHub is the
+# source of truth; the C: clone is the working copy.
+$projectRoot = "C:\Dev\CECL"
 
 # Use the local C: virtual environment for fast startup.  Importing 60+
-# packages from a network share (.venv on Z:) added 15-30s and occasional
-# PermissionErrors.  Fall back to the network venv if the C: one is missing.
+# packages from a network share added 15-30s and occasional PermissionErrors.
 $localVenvPython = "C:\cecl-venv\Scripts\python.exe"
-$networkVenvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
 if (Test-Path $localVenvPython) {
     $pythonExe = $localVenvPython
 } else {
-    $pythonExe = $networkVenvPython
+    throw "C:\cecl-venv not found. Run: python -m venv C:\cecl-venv; C:\cecl-venv\Scripts\pip install -r '$projectRoot\requirements.txt'"
 }
 
 # Keep Python bytecode cache off the network share too.
@@ -18,6 +20,12 @@ $env:PYTHONPYCACHEPREFIX = "C:\cecl-cache"
 if (-not (Test-Path $env:PYTHONPYCACHEPREFIX)) {
     New-Item -ItemType Directory -Path $env:PYTHONPYCACHEPREFIX -Force | Out-Null
 }
+
+# Code lives on C: (this clone) but analyst data (wizard_drafts/, Raw_Uploads/,
+# Generated_Reports/, client_configs/, admin_defaults.yaml) stays on Egnyte
+# so it's shared and backed up.  cecl_ui/app.py reads CECL_WORKSPACE_ROOT to
+# decouple code location from data location.
+$env:CECL_WORKSPACE_ROOT = "Z:\Shared\TCT Files\CECL - CM Files"
 
 $appUrl = "http://127.0.0.1:5000/setup/step/identity"
 

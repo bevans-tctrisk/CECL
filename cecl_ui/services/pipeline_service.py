@@ -4,8 +4,21 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import os
 from pathlib import Path
 from typing import Any
+
+
+def _client_configs_dir() -> Path:
+    """Return the client_configs directory.
+
+    Respects CECL_WORKSPACE_ROOT so the data root can live on a shared drive
+    while the code lives in a local clone.  Falls back to the historical
+    layout (sibling of cecl_ui/) when the env var is unset.
+    """
+    ws = os.environ.get("CECL_WORKSPACE_ROOT", "").strip()
+    root = Path(ws) if ws else Path(__file__).resolve().parents[2]
+    return root / "client_configs"
 
 
 def run_import(client_short_name: str, specific_file: str | None = None) -> int:
@@ -59,7 +72,7 @@ def list_snapshots_for_cu(client_short_name: str) -> list[str]:
     try:
         from sqlalchemy import create_engine, text
         cfg = importlib.import_module("yaml").safe_load(
-            (Path(__file__).resolve().parents[2] / "client_configs"
+            (_client_configs_dir()
              / f"{client_short_name}.yaml").read_text(encoding="utf-8")
         )
         cu_name = cfg.get("credit_union", client_short_name)
@@ -84,7 +97,7 @@ def list_pools_for_cu(client_short_name: str) -> list[str]:
         url = cfg_mod.get_database_url()
         from sqlalchemy import create_engine, text
         cfg = importlib.import_module("yaml").safe_load(
-            (Path(__file__).resolve().parents[2] / "client_configs"
+            (_client_configs_dir()
              / f"{client_short_name}.yaml").read_text(encoding="utf-8")
         )
         cu_name = cfg.get("credit_union", client_short_name)
@@ -116,7 +129,7 @@ def pool_distribution_for_cu(
         url = cfg_mod.get_database_url()
         from sqlalchemy import create_engine, text
         cfg = importlib.import_module("yaml").safe_load(
-            (Path(__file__).resolve().parents[2] / "client_configs"
+            (_client_configs_dir()
              / f"{client_short_name}.yaml").read_text(encoding="utf-8")
         )
         cu_name = cfg.get("credit_union", client_short_name)
@@ -169,7 +182,7 @@ def reclassify_loan_pool(
     url = cfg_mod.get_database_url()
     from sqlalchemy import create_engine, text
     cfg = importlib.import_module("yaml").safe_load(
-        (Path(__file__).resolve().parents[2] / "client_configs"
+        (_client_configs_dir()
          / f"{client_short_name}.yaml").read_text(encoding="utf-8")
     )
     cu_name = cfg.get("credit_union", client_short_name)

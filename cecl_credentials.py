@@ -50,8 +50,18 @@ def get_database_url():
         if stored:
             return stored
 
-    # 2) Fall back to environment / .env file
+    # 2) Fall back to environment / .env file.  When the code lives in a
+    #    local clone (e.g. C:\Dev\CECL) and analyst data + .env live on a
+    #    shared drive (e.g. Egnyte), CECL_WORKSPACE_ROOT points at the data
+    #    location — check there first so load_dotenv() finds the right file.
     from dotenv import load_dotenv
+    workspace_root = os.environ.get('CECL_WORKSPACE_ROOT', '').strip()
+    if workspace_root:
+        candidate = os.path.join(workspace_root, '.env')
+        if os.path.isfile(candidate):
+            load_dotenv(candidate)
+    # Also run the default lookup (walks up from CWD) so the historical
+    # layout (.env next to the code) keeps working.
     load_dotenv()
     url = os.getenv('DATABASE_URL')
     if url:

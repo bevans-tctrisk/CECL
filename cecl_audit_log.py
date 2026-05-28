@@ -15,7 +15,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+# Honour CECL_WORKSPACE_ROOT so the audit log lives next to the analyst data
+# (centralised across clones), not buried inside whichever code clone wrote it.
+# Falls back to historical layout when the env var is unset.
+BASE = os.environ.get('CECL_WORKSPACE_ROOT') or os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(BASE, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'cecl_audit.log')
 

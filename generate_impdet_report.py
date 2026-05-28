@@ -27,7 +27,9 @@ from dotenv import load_dotenv
 from cecl_engine import assign_credit_grade, build_grade_order
 
 load_dotenv()
-BASE = os.path.dirname(os.path.abspath(__file__))
+# Honour CECL_WORKSPACE_ROOT so the data root can be decoupled from the
+# code location; falls back to historical layout when the env var is unset.
+BASE = os.environ.get('CECL_WORKSPACE_ROOT') or os.path.dirname(os.path.abspath(__file__))
 CFG_DIR = os.path.join(BASE, 'client_configs')
 RPT_DIR = os.path.join(BASE, 'Reports')
 engine = create_engine(os.getenv('DATABASE_URL'))
