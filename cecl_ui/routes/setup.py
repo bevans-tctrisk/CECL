@@ -5379,6 +5379,8 @@ def _suggest_file_patterns(filename: str) -> dict[str, str] | None:
         (r"(20\d{2})[-_./ ](\d{2})(?!\d)",         r"(\d{4})[-_./ ](\d{2})"),
         # YYYYMMDD (8 contiguous digits starting 19xx/20xx)
         (r"(20\d{2})(\d{2})(\d{2})",               r"(\d{4})(\d{2})\d{2}"),
+        # MMDDYYYY (8 contiguous digits ending in 19xx/20xx)
+        (r"(\d{2})(\d{2})(20\d{2})",               r"\d{2}\d{2}(\d{4})"),
         # YYYYMM (6 contiguous digits)
         (r"(20\d{2})(\d{2})(?!\d)",                r"(\d{4})(\d{2})"),
         # MM-DD-YYYY
@@ -5388,10 +5390,22 @@ def _suggest_file_patterns(filename: str) -> dict[str, str] | None:
     date_match: _re.Match[str] | None = None
     for finder, dp in candidates:
         m = _re.search(finder, stem)
-        if m:
-            date_match = m
-            date_re = dp
-            break
+        if not m:
+            continue
+        # Validate the captured month-of-year is real (1-12). Year-first
+        # patterns capture month at group(2); month-first patterns at group(1).
+        try:
+            if finder.startswith("(20"):
+                if not 1 <= int(m.group(2)) <= 12:
+                    continue
+            else:
+                if not 1 <= int(m.group(1)) <= 12:
+                    continue
+        except (ValueError, IndexError):
+            continue
+        date_match = m
+        date_re = dp
+        break
     if not date_match:
         return None
 

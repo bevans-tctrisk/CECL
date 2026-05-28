@@ -120,19 +120,36 @@ def extract_snapshot_date(source_text, config):
     if g2 and g2[:3].lower() in _MONTH_MAP:
         return _from_month_name(g1, g2)
 
-    if date_fmt == 'MMDDYY':
-        month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
-        year += 2000 if year < 100 else 0
-        return date(year, month, day).isoformat()
-    elif date_fmt == 'MMYY':
-        month, year = int(match.group(1)), int(match.group(2))
-        year += 2000 if year < 100 else 0
-        last_day = calendar.monthrange(year, month)[1]
-        return date(year, month, last_day).isoformat()
-    else:
-        year, month = int(match.group(1)), int(match.group(2))
-        last_day = calendar.monthrange(year, month)[1]
-        return date(year, month, last_day).isoformat()
+    try:
+        if date_fmt == 'MMDDYY':
+            month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            year += 2000 if year < 100 else 0
+            return date(year, month, day).isoformat()
+        elif date_fmt == 'MMYY':
+            month, year = int(match.group(1)), int(match.group(2))
+            year += 2000 if year < 100 else 0
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+        elif date_fmt == 'MMYYYY':
+            month, year = int(match.group(1)), int(match.group(2))
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+        elif date_fmt == 'YYYYMMDD':
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return date(year, month, day).isoformat()
+        else:
+            year, month = int(match.group(1)), int(match.group(2))
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+    except (ValueError, calendar.IllegalMonthError) as exc:
+        # The captured groups don't form a real calendar date (most often the
+        # date_pattern is wrong for this filename — e.g. ``(\d{4})(\d{2})``
+        # against ``03312026`` gives month=20). Returning ``None`` lets the
+        # importer skip the file with a clean message rather than crashing
+        # the whole client import.
+        print(f"  WARN: could not parse date from '{source_text}' "
+              f"(format={date_fmt}): {exc}")
+        return None
 
 
 def clean_balance(series, balance_format):
