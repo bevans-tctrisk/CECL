@@ -183,9 +183,39 @@ def list_drafts(workspace_root: str | Path) -> list[dict[str, Any]]:
             "saved_at": meta.get("saved_at") or "",
             "active_step": meta.get("active_step") or "identity",
             "has_warm": data.get("has_warm_files") or "",
+            "completed_at": meta.get("completed_at") or "",
         })
     out.sort(key=lambda r: r.get("saved_at") or "", reverse=True)
     return out
+
+
+def mark_completed(
+    workspace_root: str | Path,
+    key: str,
+    model: str | None = None,
+) -> bool:
+    """Stamp a draft as completed setup. Returns True on success.
+
+    Writes ``_draft_meta.completed_at`` (ISO timestamp) so the home
+    dashboard can move the entry from "Resume in-progress setup" to
+    "Completed setup". The rest of the state is untouched -- the user
+    can still Edit (resume) or Delete it later.
+    """
+    data = load_draft(workspace_root, key, model=model)
+    if not data:
+        return False
+    meta = dict(data.get(DRAFT_META_KEY) or {})
+    meta["completed_at"] = datetime.now().isoformat(timespec="seconds")
+    meta["model"] = _normalize_model(model if model is not None else data.get("model"))
+    if not meta.get("active_step"):
+        meta["active_step"] = data.get("_active_step") or "identity"
+    data[DRAFT_META_KEY] = meta
+    out = _file_for(workspace_root, _slug(key), meta["model"])
+    out.write_text(
+        json.dumps(data, default=_default, indent=2),
+        encoding="utf-8",
+    )
+    return True
 
 
 def delete_draft(
