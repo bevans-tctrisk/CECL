@@ -710,3 +710,38 @@ def step_run():
         last_run=sc.get("last_run") or {},
         **_wizard_ctx("scale_run"),
     )
+
+
+@scale_setup_bp.route("/step/run/complete", methods=["POST"])
+def complete_and_home():
+    """Mark the SCALE wizard as completed for this CU and return home.
+
+    Triggered by the "Done -- Home" button on the Run step. Stamps the
+    draft's ``_draft_meta.completed_at`` so the dashboard moves it from
+    "Resume in-progress setup" to "Completed setup". The draft itself
+    is kept so the user can still Edit setup or Delete it later.
+    """
+    state = _state()
+    _ensure_scale_mode(state)
+    # Make sure the on-disk draft exists (Run-step saves are usually
+    # already persisted, but call save_draft as a safety net before
+    # stamping completion).
+    if state.get("short_name") or state.get("credit_union"):
+        try:
+            wizard_drafts.save_draft(
+                current_app.config["WORKSPACE_ROOT"], state,
+                active_step="scale_run", model="scale",
+            )
+            wizard_drafts.mark_completed(
+                current_app.config["WORKSPACE_ROOT"],
+                wizard_drafts.draft_key_for_state(state),
+                model="scale",
+            )
+            flash(
+                f"Marked {state.get('credit_union') or state.get('short_name')} "
+                f"setup as completed.",
+                "success",
+            )
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Could not mark setup completed: {exc}", "warning")
+    return redirect(url_for("home.index"))

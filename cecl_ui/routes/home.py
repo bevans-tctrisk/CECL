@@ -25,8 +25,15 @@ def index():
         if choice == "existing":
             return redirect(url_for("run.select_cu"))
     clients = config_service.list_existing_clients(current_app.config["WORKSPACE_ROOT"])
-    drafts = wizard_drafts.list_drafts(current_app.config["WORKSPACE_ROOT"])
-    return render_template("home.html", clients=clients, drafts=drafts)
+    all_drafts = wizard_drafts.list_drafts(current_app.config["WORKSPACE_ROOT"])
+    drafts = [d for d in all_drafts if not d.get("completed_at")]
+    completed_drafts = [d for d in all_drafts if d.get("completed_at")]
+    return render_template(
+        "home.html",
+        clients=clients,
+        drafts=drafts,
+        completed_drafts=completed_drafts,
+    )
 
 
 @home_bp.route("/model-select", methods=["GET", "POST"])

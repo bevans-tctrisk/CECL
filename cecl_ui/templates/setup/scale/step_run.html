@@ -195,7 +195,9 @@
 
   <div class="btn-row" style="margin-top:18px;">
     <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_review') }}">&larr; Back</a>
-    <a class="btn btn-secondary" href="{{ url_for('home.index') }}">Done &mdash; Home</a>
+    <form method="post" action="{{ url_for('scale_setup.complete_and_home') }}" style="display:inline;">
+      <button type="submit" class="btn btn-secondary">Done &mdash; Home</button>
+    </form>
   </div>
 </div>
 {% endblock %}
