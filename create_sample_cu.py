@@ -27,7 +27,9 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
 load_dotenv()
-BASE = os.path.dirname(os.path.abspath(__file__))
+# Honour CECL_WORKSPACE_ROOT so the data root can be decoupled from the
+# code location; falls back to historical layout when the env var is unset.
+BASE = os.environ.get('CECL_WORKSPACE_ROOT') or os.path.dirname(os.path.abspath(__file__))
 CFG_DIR = os.path.join(BASE, 'client_configs')
 RPT_DIR = os.path.join(BASE, 'Reports')
 DATA_DIR = os.path.join(BASE, 'Sample CU')

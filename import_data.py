@@ -25,7 +25,9 @@ from cecl_credentials import get_database_url
 
 load_dotenv()
 
-BASE_FOLDER = os.path.dirname(os.path.abspath(__file__))
+# Honour CECL_WORKSPACE_ROOT so the data root can be decoupled from the
+# code location; falls back to historical layout when the env var is unset.
+BASE_FOLDER = os.environ.get('CECL_WORKSPACE_ROOT') or os.path.dirname(os.path.abspath(__file__))
 CONFIG_FOLDER = os.path.join(BASE_FOLDER, 'client_configs')
 UPLOAD_FOLDER = os.path.join(BASE_FOLDER, 'Raw_Uploads')
 ARCHIVE_FOLDER = os.path.join(BASE_FOLDER, 'Archive')

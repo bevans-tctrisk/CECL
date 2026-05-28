@@ -27,7 +27,10 @@ from sqlalchemy import create_engine, text
 from cecl_credentials import get_database_url
 from cecl_audit_log import get_audit_logger, log_data_retention
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+# Honour CECL_WORKSPACE_ROOT so retention runs against the shared data root
+# rather than against whichever code clone the script happens to live in.
+# Falls back to historical layout when the env var is unset.
+BASE = os.environ.get('CECL_WORKSPACE_ROOT') or os.path.dirname(os.path.abspath(__file__))
 REPORTS_DIR = os.path.join(BASE, 'Reports')
 ARCHIVE_DIR = os.path.join(BASE, 'Archive')
 

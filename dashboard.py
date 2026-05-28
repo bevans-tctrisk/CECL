@@ -27,7 +27,9 @@ load_dotenv()
 
 st.set_page_config(page_title="TCT Credit Migration Analytics Hub", layout="wide")
 
-BASE_FOLDER = os.path.dirname(os.path.abspath(__file__))
+# Honour CECL_WORKSPACE_ROOT so the data root can be decoupled from the
+# code location; falls back to historical layout when the env var is unset.
+BASE_FOLDER = os.environ.get('CECL_WORKSPACE_ROOT') or os.path.dirname(os.path.abspath(__file__))
 CONFIG_FOLDER = os.path.join(BASE_FOLDER, 'client_configs')
 
 db_url = os.getenv('DATABASE_URL')
