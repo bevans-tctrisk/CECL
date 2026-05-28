@@ -28,7 +28,7 @@ import openpyxl
 from . import (
     env_factor_writer, excel_recalc, impaired_loader, mapping_loader,
     mgmt_adj_writer, qfactor_loader, runs_service, solr_fetcher,
-    template_loader,
+    template_loader, vizo_explanation_formatter,
 )
 
 
@@ -873,6 +873,13 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         if variant_result["outputs"] else str(out_path)
     )
 
+    # Re-apply Vizo Explanation tab wrap/height (template patch only
+    # covers the master template; this guards against any seed path).
+    for _entry in variant_result["outputs"]:
+        _p = _entry.get("path")
+        if _p:
+            vizo_explanation_formatter.apply_vizo_explanation_wrap(_p)
+
     prior_acl = _inject_prior_acl(
         workspace_root, short, period, variant_result["outputs"]
     )
@@ -1072,6 +1079,15 @@ def run_multi_quarter(
         variant_result["outputs"][0]["path"]
         if variant_result.get("outputs") else str(out_path)
     )
+
+    # Re-apply Vizo Explanation tab wrap/height. Carry-history seeds
+    # new workbooks from prior reports (which may pre-date the template
+    # patch), so enforcing here keeps every output consistent.
+    if successes > 0:
+        for _entry in variant_result.get("outputs") or []:
+            _p = _entry.get("path")
+            if _p:
+                vizo_explanation_formatter.apply_vizo_explanation_wrap(_p)
 
     prior_acl = _inject_prior_acl(
         workspace_root, short, start_period, variant_result.get("outputs") or []
@@ -1376,6 +1392,14 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         variant_result["outputs"][0]["path"]
         if variant_result["outputs"] else str(out_path)
     )
+
+    # Re-apply Vizo Explanation tab wrap/height. Carry-history seeds
+    # from the prior quarter's report -- if that was generated before
+    # the template patch, the formatting needs to be re-applied here.
+    for _entry in variant_result["outputs"]:
+        _p = _entry.get("path")
+        if _p:
+            vizo_explanation_formatter.apply_vizo_explanation_wrap(_p)
 
     prior_acl = _inject_prior_acl(
         workspace_root, short, period, variant_result["outputs"]
