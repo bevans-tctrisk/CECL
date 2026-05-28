@@ -1345,6 +1345,10 @@ def step5_monthly_bal():
     mb.setdefault("per_month_layout", {
         "sheet": "", "label_col": "", "balance_col": "", "header_row": 0,
     })
+    # Saved source folder for the "scan a folder for more months"
+    # workflow — remembered so the user can re-scan next quarter with
+    # a single click.
+    mb.setdefault("per_month_source_folder", "")
     # Manual-entry mode: explicit list of month-end dates plus the
     # {pool_name: {YYYY-MM-DD: float}} grid the user fills in.
     mb.setdefault("manual_months", [])
@@ -1806,19 +1810,142 @@ def step5_monthly_bal():
                     break
             if removed:
                 files.remove(removed)
-                # Best-effort disk cleanup.
-                sp = removed.get("saved_path") or ""
-                if sp:
-                    try:
-                        p = Path(sp)
-                        if p.is_file():
-                            p.unlink()
-                    except Exception:  # noqa: BLE001
-                        pass
+                # Best-effort disk cleanup — but only for files we
+                # actually copied into the managed upload dir. Folder-
+                # scanned entries reference the user's original file
+                # and must NEVER be deleted.
+                if not removed.get("external"):
+                    sp = removed.get("saved_path") or ""
+                    if sp:
+                        try:
+                            p = Path(sp)
+                            if p.is_file():
+                                p.unlink()
+                        except Exception:  # noqa: BLE001
+                            pass
                 flash(f"Removed {target_name}.", "success")
             else:
                 flash(f"File '{target_name}' not found.", "error")
             mb["monthly_files"] = files
+            _save_state(state)
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "scan_per_month_folder":
+            folder_raw = (request.form.get("scan_folder") or "").strip()
+            pattern_raw = (request.form.get("scan_pattern") or "").strip()
+            mb["per_month_source_folder"] = folder_raw
+            if pattern_raw:
+                mb["file_pattern"] = pattern_raw
+            if not folder_raw:
+                flash("Enter a folder path to scan.", "error")
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+            try:
+                folder = Path(folder_raw).expanduser()
+            except Exception as exc:  # noqa: BLE001
+                flash(f"Invalid folder path: {exc}", "error")
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+            if not folder.is_dir():
+                flash(
+                    f"Folder not found or not a directory: {folder}",
+                    "error",
+                )
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+
+            # Compile the regex once. Empty pattern = match every
+            # supported balance-sheet file.
+            try:
+                fp_rx = re.compile(pattern_raw, re.IGNORECASE) \
+                    if pattern_raw else None
+            except re.error as exc:
+                flash(f"Filename pattern is not a valid regex: {exc}",
+                      "error")
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+
+            supported_exts = {".xls", ".xlsx", ".xlsm", ".csv"}
+            files = mb.setdefault("monthly_files", [])
+            # Build period+filename indexes for de-dupe.
+            existing_by_name = {e.get("filename"): e for e in files}
+            existing_periods = {e.get("period") for e in files
+                                if e.get("period")}
+
+            scanned = 0
+            added: list[str] = []
+            replaced: list[str] = []
+            skipped_no_period: list[str] = []
+            skipped_parse: list[str] = []
+            for entry_path in sorted(folder.iterdir()):
+                if not entry_path.is_file():
+                    continue
+                if entry_path.suffix.lower() not in supported_exts:
+                    continue
+                if fp_rx is not None and not fp_rx.search(entry_path.name):
+                    continue
+                scanned += 1
+                analysis = monthly_bal_parser.analyse_per_month_file(
+                    entry_path)
+                period = analysis.get("detected_period") or ""
+                if not period:
+                    skipped_no_period.append(entry_path.name)
+                    continue
+                if not analysis.get("ok") and not analysis.get(
+                        "parsed_pool_labels"):
+                    # Parser failed AND we found nothing useful — still
+                    # add the entry so the importer can try with the
+                    # saved layout, but warn.
+                    skipped_parse.append(entry_path.name)
+                entry = {
+                    "filename": entry_path.name,
+                    "saved_path": str(entry_path),
+                    "period": period,
+                    "external": True,
+                }
+                if entry_path.name in existing_by_name:
+                    files[:] = [e for e in files
+                                if e.get("filename") != entry_path.name]
+                    files.append(entry)
+                    replaced.append(entry_path.name)
+                elif period in existing_periods:
+                    # Skip duplicate periods so we don't double-count.
+                    continue
+                else:
+                    files.append(entry)
+                    existing_periods.add(period)
+                    added.append(entry_path.name)
+
+            files.sort(key=lambda e: e.get("period") or "")
+
+            msgs = []
+            if added:
+                msgs.append(f"added {len(added)} new file(s)")
+            if replaced:
+                msgs.append(f"refreshed {len(replaced)}")
+            if skipped_no_period:
+                msgs.append(
+                    f"skipped {len(skipped_no_period)} with no detectable "
+                    f"month-end (rename them to include YYYYMMDD or add "
+                    "an 'As of:' cell)"
+                )
+            if skipped_parse:
+                msgs.append(
+                    f"{len(skipped_parse)} file(s) couldn't be parsed; "
+                    "they'll be retried at run time using the saved layout"
+                )
+            if scanned == 0:
+                flash(
+                    f"Scanned {folder}: no matching files found "
+                    f"(pattern={pattern_raw!r}).",
+                    "warning",
+                )
+            else:
+                flash(
+                    f"Scanned {folder}: {scanned} file(s) matched; "
+                    + ", ".join(msgs) + ".",
+                    "success" if added or replaced else "warning",
+                )
             _save_state(state)
             return redirect(url_for("setup.step5_monthly_bal"))
 

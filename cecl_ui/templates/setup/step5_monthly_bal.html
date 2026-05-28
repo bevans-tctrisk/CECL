@@ -522,13 +522,22 @@
         {% for e in pm_files %}
           <tr>
             <td style="padding:4px 10px;">{{ e.period }}</td>
-            <td style="padding:4px 10px;"><code>{{ e.filename }}</code></td>
+            <td style="padding:4px 10px;">
+              <code>{{ e.filename }}</code>
+              {% if e.external %}
+                <span class="muted"
+                      title="Folder-linked: file lives in the scanned folder; removing here just forgets the reference."
+                      style="margin-left:6px; font-size:11px;">
+                  &mdash; folder link
+                </span>
+              {% endif %}
+            </td>
             <td style="padding:4px 10px;">
               <form method="post" style="display:inline;"
-                    onsubmit="return confirm('Remove {{ e.filename }}?');">
-                <input type="hidden" name="action" value="remove_per_month">
+                    onsubmit="return confirm('Remove {{ e.filename }}?{% if e.external %}\n\n(The actual file in the folder will NOT be deleted.){% endif %}');">
                 <input type="hidden" name="filename" value="{{ e.filename }}">
-                <button class="btn btn-secondary" type="submit">&times;</button>
+                <button class="btn btn-secondary" type="submit"
+                        name="action" value="remove_per_month">&times;</button>
               </form>
             </td>
           </tr>
@@ -540,6 +549,52 @@
       No monthly files uploaded yet.
     </p>
   {% endif %}
+</div>
+
+<div class="card">
+  <h3>1b. Or scan a folder for many months at once</h3>
+  <p class="muted">
+    Already have a folder full of monthly balance sheets? Point us at
+    it and we&rsquo;ll pull in each file, detect the month-end date
+    from inside the file (or the filename), and add them to the list
+    above. The files stay where they are &mdash; we just remember the
+    paths. Next quarter you can re-scan with one click to pick up new
+    months.
+  </p>
+  <form method="post">
+    <table style="border-collapse:collapse; font-size:13px;">
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Folder path</th>
+        <td style="padding:4px 10px;">
+          <input type="text" name="scan_folder"
+                 value="{{ mb.per_month_source_folder or '' }}"
+                 placeholder="e.g. Z:\Shared\TCT Files\CECL - CM Files\Raw_Uploads\central_keystone_fcu"
+                 style="width:560px;">
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">
+          Filename pattern
+        </th>
+        <td style="padding:4px 10px;">
+          <input type="text" name="scan_pattern"
+                 value="{{ mb.file_pattern or '' }}"
+                 placeholder="e.g. Detailed.*Balance.*Sheet.*\.xls$  (leave blank to scan every .xls/.xlsx/.csv)"
+                 style="width:560px;">
+          <div class="muted" style="margin-top:2px;">
+            Optional case-insensitive regex; only files whose name
+            matches are picked up.
+          </div>
+        </td>
+      </tr>
+    </table>
+    <div class="btn-row" style="margin-top:10px;">
+      <button class="btn btn-primary" type="submit"
+              name="action" value="scan_per_month_folder">
+        Scan folder
+      </button>
+    </div>
+  </form>
 </div>
 
 <div class="card">

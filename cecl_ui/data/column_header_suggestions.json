@@ -2,63 +2,63 @@
   "field_to_header_counts": {
     "current_balance": {
       "cc last stmt bal": 10,
-      "current balance amount": 2,
+      "current balance amount": 4,
       "current loan balance": 6,
-      "currupb": 2,
-      "loan balance": 15
+      "currupb": 4,
+      "loan balance": 17
     },
     "days_delinquent": {
       "days delinquent": 6,
-      "delinquent days count": 2,
-      "inv": 2,
+      "delinquent days count": 4,
+      "inv": 4,
       "member close date": 10,
-      "past due": 15
+      "past due": 17
     },
     "interest_rate": {
-      "annual rate 1": 15,
-      "cash annual interest rate": 2,
+      "annual rate 1": 17,
+      "cash annual interest rate": 4,
       "interest rate (apr)": 6,
-      "rate": 2
+      "rate": 4
     },
     "loan_pool_code": {
       "loan collateral code": 5,
-      "loan purpose": 2,
-      "loan type": 15,
+      "loan purpose": 4,
+      "loan type": 17,
       "loan type code": 1,
       "mbr state code": 6,
-      "type": 2
+      "type": 4
     },
     "loan_suffix": {
-      "card account number": 2,
+      "card account number": 4,
       "cc note last 4": 10,
-      "pool": 2
+      "pool": 4
     },
     "member_number": {
-      "account number": 10,
+      "account number": 12,
       "acct nbr": 10,
-      "loan#": 2,
+      "loan#": 4,
       "member name": 8,
       "member's name (last, first, middle initial)": 3,
-      "om sys - prin number": 2
+      "om sys - prin number": 4
     },
     "open_date": {
-      "card open date": 2,
+      "card open date": 4,
       "date of loan": 6,
-      "loan original date": 15
+      "loan original date": 17
     },
     "original_fico_score": {
-      "credit score": 23,
-      "inv": 2
+      "credit score": 27,
+      "inv": 4
     },
     "original_loan_amount": {
-      "loan original amnt": 2,
-      "loan#": 2,
+      "loan original amnt": 4,
+      "loan#": 4,
       "orig nbr pymts": 13,
-      "original loan amount": 8
+      "original loan amount": 10
     },
     "total_available_credit": {
-      "credit limit": 31,
-      "credit line amount": 2
+      "credit limit": 33,
+      "credit line amount": 4
     }
   },
   "header_display_forms": {
@@ -101,6 +101,6 @@
     "rate": "RATE",
     "type": "TYPE"
   },
-  "updated_at": "2026-05-21T22:44:53",
+  "updated_at": "2026-05-28T21:56:59",
   "version": 1
 }
