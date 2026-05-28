@@ -1215,6 +1215,69 @@ def _save_acl_form(mb: dict, form) -> None:
                     pass
 
 
+def _persist_per_month_layout(mb: dict, form) -> None:
+    """Persist the per_month layout + pool_map + notes + ACL from ``form``.
+
+    Used by both the ``save_per_month_layout`` action (Save button) and the
+    ``save_per_month_layout_and_next`` action (Save & Next button) so we
+    never silently lose user-entered fields when advancing to the next
+    step.
+    """
+    layout = mb.setdefault("per_month_layout", {})
+    layout["sheet"] = (form.get("pm_sheet", "") or "").strip()
+    layout["label_col"] = (
+        form.get("pm_label_col", "A") or "A"
+    ).strip().upper()
+    layout["balance_col"] = (
+        form.get("pm_balance_col", "B") or "B"
+    ).strip().upper()
+    try:
+        layout["header_row"] = int(form.get("pm_header_row", "1") or 1)
+    except ValueError:
+        layout["header_row"] = 1
+    mb["pool_map"] = _parse_kv_rows(form, "map_label", "map_pool")
+    mb["file_pattern"] = (form.get("file_pattern", "") or "").strip()
+    mb["notes"] = (form.get("notes", "") or "").strip()
+    _save_acl_form(mb, form)
+
+
+def _persist_manual_grid(mb: dict, form) -> int:
+    """Persist the manual pool × month grid from ``form``.
+
+    Returns the count of pools in the saved grid (caller can use it for
+    a flash message). Used by both ``save_manual`` and
+    ``save_manual_and_next`` so Save & Next never drops the grid.
+    """
+    months = [
+        (m or "").strip()
+        for m in form.getlist("manual_month")
+        if (m or "").strip()
+    ]
+    mb["manual_months"] = months
+    pools = form.getlist("manual_pool")
+    grid: dict[str, dict[str, float]] = {}
+    for pool in pools:
+        pool = (pool or "").strip()
+        if not pool:
+            continue
+        row: dict[str, float] = {}
+        for m in months:
+            raw = (
+                form.get(f"mv__{pool}__{m}") or ""
+            ).strip().replace("$", "").replace(",", "")
+            if raw == "":
+                continue
+            try:
+                row[m] = float(raw)
+            except ValueError:
+                pass
+        grid[pool] = row
+    mb["manual_entries"] = grid
+    mb["notes"] = (form.get("notes", "") or "").strip()
+    _save_acl_form(mb, form)
+    return len(grid)
+
+
 @setup_bp.route("/step/monthly_bal", methods=["GET", "POST"])
 def step5_monthly_bal():
     """Establish the recurring 'monthly balance by pool/type' file contract.
@@ -1276,9 +1339,11 @@ def step5_monthly_bal():
     # Per-month-file mode: each entry is {filename, saved_path, period}.
     mb.setdefault("monthly_files", [])
     # Common layout across all per-month files (so the user only specifies
-    # sheet / label-col / balance-col / header-row once).
+    # sheet / label-col / balance-col / header-row once). Leave values
+    # empty so the upload_per_month auto-detect can fill them; the
+    # template renders display-defaults via ``{{ pm.label_col or 'A' }}``.
     mb.setdefault("per_month_layout", {
-        "sheet": "", "label_col": "A", "balance_col": "B", "header_row": 1,
+        "sheet": "", "label_col": "", "balance_col": "", "header_row": 0,
     })
     # Manual-entry mode: explicit list of month-end dates plus the
     # {pool_name: {YYYY-MM-DD: float}} grid the user fills in.
@@ -1450,9 +1515,12 @@ def step5_monthly_bal():
             return redirect(url_for("setup.step5_monthly_bal"))
 
         if action in ("save", "next"):
-            # In per_month / manual modes the dedicated handlers below
-            # already persisted everything we care about; "next" just
-            # advances to the grades step.
+            # In per_month / manual modes the Save and Save & Next buttons
+            # post the dedicated actions ``save_per_month_layout[_and_next]``
+            # / ``save_manual[_and_next]`` which handle persistence. If we
+            # land here in those modes it's a legacy bare action=next (e.g.
+            # someone re-posting an older form): just advance without
+            # touching the single-mode layout fields.
             if action == "next" and (mb.get("source") or "single") != "single":
                 return redirect(url_for("setup.step5_grades"))
             # Guarded layout writes: only overwrite a previously-detected
@@ -1610,12 +1678,26 @@ def step5_monthly_bal():
             period = (request.form.get("per_month_period") or "").strip()
             if not f or not f.filename:
                 flash("Choose a file to upload.", "error")
-            elif not period:
-                flash("Enter the month-end date (YYYY-MM-DD) this file covers.",
-                      "error")
             else:
                 try:
                     target = _save_monthly_bal_upload(f)
+                    # Auto-detect layout + pool labels from this file. We
+                    # do this BEFORE deciding what period to tag the entry
+                    # with so the in-file "As of:" date can fill in for a
+                    # missing per_month_period.
+                    analysis = monthly_bal_parser.analyse_per_month_file(target)
+                    if not period and analysis.get("detected_period"):
+                        period = analysis["detected_period"]
+                    if not period:
+                        flash(
+                            f"Saved {target.name}, but no month-end date "
+                            "was supplied and none could be detected in "
+                            "the file. Enter the date and re-upload.",
+                            "error",
+                        )
+                        _save_state(state)
+                        return redirect(url_for("setup.step5_monthly_bal"))
+
                     entry = {
                         "filename": target.name,
                         "saved_path": str(target),
@@ -1627,10 +1709,75 @@ def step5_monthly_bal():
                                 if e.get("filename") != entry["filename"]]
                     files.append(entry)
                     files.sort(key=lambda e: e.get("period") or "")
-                    flash(
-                        f"Uploaded {target.name} for period {period}.",
-                        "success",
-                    )
+
+                    if analysis.get("ok"):
+                        # Overwrite layout from the latest successful
+                        # parse: per-month files from the same CU share
+                        # a layout, so the newest detection is the most
+                        # reliable. (If a user customized via the Save
+                        # button and then uploads another file, the new
+                        # detection may revert their tweaks — but
+                        # auto-detect on a clean balance-sheet file is
+                        # usually exactly what they had typed anyway.)
+                        layout = mb.setdefault("per_month_layout", {})
+                        layout["sheet"] = analysis.get("sheet", "")
+                        layout["label_col"] = analysis.get(
+                            "pool_name_col", "A")
+                        layout["balance_col"] = analysis.get(
+                            "balance_col", "B")
+                        layout["header_row"] = analysis.get("header_row", 1)
+
+                        # Merge parsed labels into mb["parsed_pool_labels"]
+                        # (used by templates that want to display
+                        # auto-detected labels).
+                        existing_labels = list(mb.get("parsed_pool_labels") or [])
+                        seen = {s.lower() for s in existing_labels}
+                        for lab in analysis.get("parsed_pool_labels", []):
+                            if lab.lower() not in seen:
+                                existing_labels.append(lab)
+                                seen.add(lab.lower())
+                        mb["parsed_pool_labels"] = existing_labels
+
+                        # Seed pool_map from WARM balance_title_map +
+                        # historical hist_pool_map (same logic single
+                        # mode uses), then keep any user edits.
+                        combined_map: dict[str, str] = {}
+                        for _k, _v in (state.get("balance_title_map") or {}).items():
+                            if _k:
+                                combined_map[_k] = (_v or "")
+                        _hpm = state.get("hist_pool_map") or {}
+                        for _k, _v in (_hpm.get("mapping") or {}).items():
+                            if _k and _k not in combined_map:
+                                combined_map[_k] = (_v or "")
+                        seeded, status = monthly_bal_parser.seed_pool_map(
+                            existing_labels,
+                            combined_map,
+                        )
+                        existing_pm = mb.get("pool_map") or {}
+                        for label, pool in seeded.items():
+                            if label not in existing_pm or not existing_pm.get(label):
+                                existing_pm[label] = pool
+                        mb["pool_map"] = existing_pm
+                        mb["label_status"] = status
+
+                        flash(
+                            f"Uploaded {target.name} for {period}: parsed "
+                            f"{len(analysis.get('parsed_pool_labels', []))} "
+                            f"pool label(s) from sheet "
+                            f"{analysis.get('sheet')!r} "
+                            f"(labels in column {analysis.get('pool_name_col')}, "
+                            f"balances in column {analysis.get('balance_col')}).",
+                            "success",
+                        )
+                    else:
+                        flash(
+                            f"Uploaded {target.name} for {period}, but "
+                            f"auto-detect failed: "
+                            f"{analysis.get('error', 'unknown error')}. "
+                            "Fill in the layout fields by hand and click "
+                            "Save.",
+                            "warning",
+                        )
                 except Exception as exc:  # noqa: BLE001
                     flash(f"Upload failed: {exc}", "error")
             _save_state(state)
@@ -1663,68 +1810,36 @@ def step5_monthly_bal():
             return redirect(url_for("setup.step5_monthly_bal"))
 
         if action == "save_per_month_layout":
-            layout = mb.setdefault("per_month_layout", {})
-            layout["sheet"] = (request.form.get("pm_sheet", "") or "").strip()
-            layout["label_col"] = (
-                request.form.get("pm_label_col", "A") or "A"
-            ).strip().upper()
-            layout["balance_col"] = (
-                request.form.get("pm_balance_col", "B") or "B"
-            ).strip().upper()
-            try:
-                layout["header_row"] = int(
-                    request.form.get("pm_header_row", "1") or 1
-                )
-            except ValueError:
-                layout["header_row"] = 1
-            mb["pool_map"] = _parse_kv_rows(
-                request.form, "map_label", "map_pool"
-            )
-            mb["file_pattern"] = (
-                request.form.get("file_pattern", "") or ""
-            ).strip()
-            mb["notes"] = (request.form.get("notes", "") or "").strip()
-            _save_acl_form(mb, request.form)
+            _persist_per_month_layout(mb, request.form)
             _save_state(state)
             flash("Saved per-month layout.", "success")
             return redirect(url_for("setup.step5_monthly_bal"))
 
+        if action == "save_per_month_layout_and_next":
+            _persist_per_month_layout(mb, request.form)
+            _save_state(state)
+            flash("Saved per-month layout.", "success")
+            return redirect(url_for("setup.step5_grades"))
+
         if action == "save_manual":
-            # Persist the editable month list + the pool × month grid.
-            months = [
-                (m or "").strip()
-                for m in request.form.getlist("manual_month")
-                if (m or "").strip()
-            ]
-            mb["manual_months"] = months
-            pools = request.form.getlist("manual_pool")
-            grid: dict[str, dict[str, float]] = {}
-            for pool in pools:
-                pool = (pool or "").strip()
-                if not pool:
-                    continue
-                row: dict[str, float] = {}
-                for m in months:
-                    raw = (
-                        request.form.get(f"mv__{pool}__{m}") or ""
-                    ).strip().replace("$", "").replace(",", "")
-                    if raw == "":
-                        continue
-                    try:
-                        row[m] = float(raw)
-                    except ValueError:
-                        pass
-                grid[pool] = row
-            mb["manual_entries"] = grid
-            mb["notes"] = (request.form.get("notes", "") or "").strip()
-            _save_acl_form(mb, request.form)
+            n_pools = _persist_manual_grid(mb, request.form)
             _save_state(state)
             flash(
-                f"Saved manual balances for {len(grid)} pool(s) × "
-                f"{len(months)} month(s).",
+                f"Saved manual balances for {n_pools} pool(s) × "
+                f"{len(mb.get('manual_months') or [])} month(s).",
                 "success",
             )
             return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "save_manual_and_next":
+            n_pools = _persist_manual_grid(mb, request.form)
+            _save_state(state)
+            flash(
+                f"Saved manual balances for {n_pools} pool(s) × "
+                f"{len(mb.get('manual_months') or [])} month(s).",
+                "success",
+            )
+            return redirect(url_for("setup.step5_grades"))
 
         if action == "back":
             return redirect(url_for("setup.step_dq_hist"))

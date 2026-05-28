@@ -533,3 +533,425 @@ def pool_balances_for_latest_period(
         "by_pool": by_pool,
         "raw_rows": raw_rows,
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-month (individual balance sheet) file analysis
+# ---------------------------------------------------------------------------
+#
+# In ``per_month`` mode the CU sends one file per month-end (a typical
+# "Detailed Balance Sheet" produced by their core processor). The file is a
+# vertical layout: one column holds account labels, another holds the
+# month-end balance for a single period. The wide-format auto-detector
+# (``analyse_file`` above) does not apply.
+#
+# ``analyse_per_month_file`` opens the workbook (xls / xlsx / csv) and
+# tries to locate the "LOANS" section, then identifies the label column
+# and the balance column by scanning the rows beneath it. It returns the
+# same surface shape ``analyse_file`` does (sheet / header_row /
+# pool_name_col / parsed_pool_labels) plus a couple of per-month extras
+# (``balance_col`` and ``detected_period``).
+
+_LOAN_SECTION_PATTERNS = ("loans", "loan portfolio", "loan balances")
+_LOAN_SECTION_END = (
+    "total loans", "net loans", "total loan", "accounts receivable",
+    "total accounts receivable", "cash", "investments", "fixed assets",
+    "other assets", "total assets", "liabilities", "equity",
+)
+# Cells/labels we should never treat as a pool/account row.
+_PER_MONTH_SKIP_PHRASES = (
+    "loans", "loan portfolio", "balance", "as of", "produced",
+    "in usd", "detailed balance sheet", "balance sheet",
+)
+
+
+def _iter_xls_rows(path: Path) -> tuple[str, list[list[Any]]] | None:
+    """Read a legacy .xls file via xlrd. Returns (sheet_name, rows)."""
+    try:
+        import xlrd  # type: ignore[import-untyped]
+    except ImportError:
+        return None
+    try:
+        wb = xlrd.open_workbook(str(path))
+    except Exception:  # noqa: BLE001
+        return None
+    best: tuple[str, list[list[Any]]] | None = None
+    best_score = -1
+    for sname in wb.sheet_names():
+        s = wb.sheet_by_name(sname)
+        rows: list[list[Any]] = []
+        for r in range(s.nrows):
+            row = [s.cell_value(r, c) for c in range(s.ncols)]
+            rows.append(row)
+        # Score by total non-empty cells.
+        score = sum(1 for row in rows for v in row
+                    if v not in (None, "", 0))
+        if score > best_score:
+            best_score = score
+            best = (sname, rows)
+    return best
+
+
+def _iter_xlsx_rows(path: Path) -> tuple[str, list[list[Any]]] | None:
+    """Read .xlsx via openpyxl. Returns (sheet_name, rows) for best sheet."""
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001
+        return None
+    best: tuple[str, list[list[Any]]] | None = None
+    best_score = -1
+    try:
+        for ws in wb.worksheets:
+            rows = [list(r) for r in ws.iter_rows(values_only=True)]
+            score = sum(1 for row in rows for v in row
+                        if v not in (None, ""))
+            if score > best_score:
+                best_score = score
+                best = (ws.title, rows)
+    finally:
+        wb.close()
+    return best
+
+
+def _iter_csv_rows(path: Path) -> tuple[str, list[list[Any]]] | None:
+    """Read CSV. Returns (sheet_name, rows)."""
+    import csv
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as fh:
+            rows = [list(r) for r in csv.reader(fh)]
+    except Exception:  # noqa: BLE001
+        return None
+    return (path.stem, rows)
+
+
+def _load_grid(path: Path) -> tuple[str, list[list[Any]]] | None:
+    """Dispatch to the right reader based on extension. Returns
+    ``(sheet_name, rows)`` or ``None``.
+    """
+    ext = path.suffix.lower()
+    if ext == ".xls":
+        return _iter_xls_rows(path)
+    if ext in (".xlsx", ".xlsm"):
+        return _iter_xlsx_rows(path)
+    if ext == ".csv":
+        return _iter_csv_rows(path)
+    # Unknown / pdf: not supported here yet.
+    return None
+
+
+def _looks_like_money(v: Any) -> bool:
+    """Loose check: cell value plausibly a balance ($1k+, finite)."""
+    n = _coerce_number(v)
+    if n is None:
+        return False
+    return abs(n) >= 1000
+
+
+def _find_loan_section(rows: list[list[Any]]) -> int | None:
+    """Return 0-based row index where a 'LOANS' section header sits, or
+    ``None``. Match cell strings exactly equal to a known phrase (after
+    lower/strip) to avoid grabbing 'Auto Loans' detail rows.
+    """
+    for r, row in enumerate(rows):
+        for v in row:
+            if not isinstance(v, str):
+                continue
+            s = v.strip().lower()
+            if s in _LOAN_SECTION_PATTERNS:
+                return r
+    return None
+
+
+def _detect_period_from_rows(rows: list[list[Any]]) -> date | None:
+    """Search the first ~20 rows for an 'As of: <date>' style cell."""
+    rx = re.compile(r"as of[: ]+(.+)$", re.IGNORECASE)
+    for row in rows[:20]:
+        for v in row:
+            if not isinstance(v, str):
+                continue
+            m = rx.search(v.strip())
+            if m:
+                d = normalize_to_month_end(m.group(1).strip())
+                if d:
+                    return d
+    return None
+
+
+def _detect_period_from_name(name: str) -> date | None:
+    """Pull a YYYYMMDD or YYYY-MM-DD style date from a filename."""
+    m = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})", name)
+    if m:
+        try:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return _last_day(y, mo)
+        except ValueError:
+            return None
+    m = re.search(r"(20\d{2})[-_]?(\d{2})", name)
+    if m:
+        try:
+            y, mo = int(m.group(1)), int(m.group(2))
+            if 1 <= mo <= 12:
+                return _last_day(y, mo)
+        except ValueError:
+            return None
+    return None
+
+
+def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
+    """Detect layout + pool labels in a single-month balance-sheet file.
+
+    Returns::
+
+        {
+          "ok": bool,
+          "error": str | None,
+          "sheet": str,                # sheet name (or filename stem for csv)
+          "header_row": int,           # 1-based row above the first data row
+          "pool_name_col": str,        # column letter of the label column
+          "balance_col": str,          # column letter of the balance column
+          "parsed_pool_labels": [str], # labels found in the LOANS section
+          "rows": [{"label": str, "balance": float|None}],
+          "detected_period": str,      # ISO YYYY-MM-DD or ""
+        }
+    """
+    p = Path(path)
+    if not p.exists():
+        return {"ok": False, "error": f"File not found: {path}",
+                "sheet": "", "header_row": 0, "pool_name_col": "",
+                "balance_col": "", "parsed_pool_labels": [], "rows": [],
+                "detected_period": ""}
+
+    loaded = _load_grid(p)
+    if loaded is None:
+        return {"ok": False,
+                "error": f"Unsupported or unreadable file type: {p.suffix}",
+                "sheet": "", "header_row": 0, "pool_name_col": "",
+                "balance_col": "", "parsed_pool_labels": [], "rows": [],
+                "detected_period": ""}
+    sheet_name, rows = loaded
+    if not rows:
+        return {"ok": False, "error": "Empty workbook",
+                "sheet": sheet_name, "header_row": 0, "pool_name_col": "",
+                "balance_col": "", "parsed_pool_labels": [], "rows": [],
+                "detected_period": ""}
+
+    # Period: prefer in-file marker, fall back to filename, else "".
+    period = _detect_period_from_rows(rows) or _detect_period_from_name(p.name)
+    period_iso = period.isoformat() if period else ""
+
+    # Find the LOANS section header.
+    loans_idx = _find_loan_section(rows)
+    if loans_idx is None:
+        return {"ok": False,
+                "error": "Could not find a 'LOANS' section in the file.",
+                "sheet": sheet_name, "header_row": 0, "pool_name_col": "",
+                "balance_col": "", "parsed_pool_labels": [], "rows": [],
+                "detected_period": period_iso}
+
+    # Pick the label column = the column the "LOANS" header text sits in
+    # (or the closest non-numeric text column to its left if it's at col 0).
+    loans_row = rows[loans_idx]
+    label_col_idx: int | None = None
+    for c, v in enumerate(loans_row):
+        if isinstance(v, str) and v.strip().lower() in _LOAN_SECTION_PATTERNS:
+            label_col_idx = c
+            break
+    if label_col_idx is None:
+        return {"ok": False, "error": "Could not pin the label column",
+                "sheet": sheet_name, "header_row": 0, "pool_name_col": "",
+                "balance_col": "", "parsed_pool_labels": [], "rows": [],
+                "detected_period": period_iso}
+
+    # Walk rows below the LOANS header; pool/account labels usually sit
+    # one column to the LEFT of the section header (so that section
+    # headers like "LOANS" / "TOTAL LOANS" stand out). Detect: scan the
+    # first ~15 non-empty rows below to find which column holds short
+    # text labels with adjacent numeric balances. The detail-label column
+    # is the one with the most rows whose text != one of the section
+    # phrases AND whose row also has a money cell elsewhere.
+    detail_col_counts: dict[int, int] = {}
+    balance_col_counts: dict[int, int] = {}
+    end_idx = len(rows)
+    for r in range(loans_idx + 1, min(loans_idx + 80, len(rows))):
+        row = rows[r]
+        # Stop at section end (TOTAL LOANS / NET LOANS / etc.) — but only
+        # for counting; the actual end is found again below.
+        is_end = False
+        for v in row:
+            if isinstance(v, str):
+                s = v.strip().lower()
+                if s in _LOAN_SECTION_END:
+                    is_end = True
+                    end_idx = min(end_idx, r)
+                    break
+        if is_end:
+            break
+        # Identify text + money columns in this row.
+        text_cols = [c for c, v in enumerate(row)
+                     if isinstance(v, str) and v.strip()
+                     and v.strip().lower() not in _PER_MONTH_SKIP_PHRASES]
+        money_cols = [c for c, v in enumerate(row) if _looks_like_money(v)]
+        if text_cols and money_cols:
+            for c in text_cols:
+                detail_col_counts[c] = detail_col_counts.get(c, 0) + 1
+            for c in money_cols:
+                balance_col_counts[c] = balance_col_counts.get(c, 0) + 1
+
+    if not detail_col_counts or not balance_col_counts:
+        return {"ok": False,
+                "error": "Found a LOANS section but no labelled balance "
+                         "rows beneath it.",
+                "sheet": sheet_name, "header_row": loans_idx + 1,
+                "pool_name_col": "", "balance_col": "",
+                "parsed_pool_labels": [], "rows": [],
+                "detected_period": period_iso}
+
+    detail_col = max(detail_col_counts.items(), key=lambda kv: kv[1])[0]
+    balance_col = max(balance_col_counts.items(), key=lambda kv: kv[1])[0]
+
+    # Now extract labels + balances from the loans section.
+    parsed_labels: list[str] = []
+    extracted: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for r in range(loans_idx + 1, end_idx):
+        row = rows[r]
+        if detail_col >= len(row):
+            continue
+        cell = row[detail_col]
+        if not isinstance(cell, str):
+            continue
+        label = cell.strip()
+        if not label:
+            continue
+        if label.lower() in _PER_MONTH_SKIP_PHRASES:
+            continue
+        if label.lower() in _LOAN_SECTION_END:
+            continue
+        bal = _coerce_number(row[balance_col]) \
+            if balance_col < len(row) else None
+        if bal is None:
+            # Skip section labels that have no balance on their row.
+            continue
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed_labels.append(label)
+        extracted.append({"label": label, "balance": bal})
+
+    if not parsed_labels:
+        return {"ok": False,
+                "error": "Loans section found but no pool/account labels "
+                         "with balances were extractable.",
+                "sheet": sheet_name, "header_row": loans_idx + 1,
+                "pool_name_col": get_column_letter(detail_col + 1),
+                "balance_col": get_column_letter(balance_col + 1),
+                "parsed_pool_labels": [], "rows": [],
+                "detected_period": period_iso}
+
+    return {
+        "ok": True,
+        "error": None,
+        "sheet": sheet_name,
+        "header_row": loans_idx + 1,           # 1-based row of "LOANS" cell
+        "pool_name_col": get_column_letter(detail_col + 1),
+        "balance_col": get_column_letter(balance_col + 1),
+        "parsed_pool_labels": parsed_labels,
+        "rows": extracted,
+        "detected_period": period_iso,
+    }
+
+
+def pool_balances_for_per_month_files(
+    monthly_files: list[dict[str, Any]],
+    layout: dict[str, Any],
+    label_to_pool: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Aggregate per-pool balances across a list of single-month files.
+
+    ``monthly_files`` is the wizard's ``monthly_bal.monthly_files`` list:
+    each entry has ``{filename, saved_path, period}``. ``layout`` is
+    ``monthly_bal.per_month_layout`` with ``sheet`` / ``label_col`` /
+    ``balance_col`` / ``header_row`` keys.
+
+    Returns ``{ok, error, by_period: {period: {by_pool: {pool: amt},
+    raw_rows: [...]}}}``.
+    """
+    sheet = (layout or {}).get("sheet", "")
+    label_col = (layout or {}).get("label_col", "A") or "A"
+    balance_col = (layout or {}).get("balance_col", "B") or "B"
+    try:
+        header_row = int((layout or {}).get("header_row") or 1)
+    except (TypeError, ValueError):
+        header_row = 1
+    label_col_idx = _col_letter_to_idx(label_col) or 1
+    balance_col_idx = _col_letter_to_idx(balance_col) or 2
+
+    ltp = {
+        (k or "").strip().lower(): (v or "").strip()
+        for k, v in (label_to_pool or {}).items()
+    }
+
+    by_period: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    for entry in (monthly_files or []):
+        period = (entry.get("period") or "").strip()
+        saved_path = entry.get("saved_path") or ""
+        if not period or not saved_path:
+            continue
+        p = Path(saved_path)
+        if not p.exists():
+            errors.append(f"{period}: file missing ({p.name})")
+            continue
+        loaded = _load_grid(p)
+        if loaded is None:
+            errors.append(f"{period}: unreadable file ({p.name})")
+            continue
+        _sn, rows = loaded
+        # If the user gave a sheet name and we have an xlsx, prefer that
+        # sheet specifically. (Our _load_grid currently picks the densest
+        # sheet; that's usually correct for these one-tab balance sheets.)
+        by_pool: dict[str, float] = {}
+        raw_rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        start = max(header_row, 1)
+        hit_end = False
+        for r in range(start, len(rows)):
+            row = rows[r]
+            # Stop at the first totals/end marker anywhere in the row.
+            for v in row:
+                if isinstance(v, str) and v.strip().lower() in _LOAN_SECTION_END:
+                    hit_end = True
+                    break
+            if hit_end:
+                break
+            if label_col_idx - 1 >= len(row):
+                continue
+            cell = row[label_col_idx - 1]
+            if not isinstance(cell, str):
+                continue
+            label = cell.strip()
+            if not label:
+                continue
+            if label.lower() in _PER_MONTH_SKIP_PHRASES:
+                continue
+            if label.lower() in _LOAN_SECTION_END:
+                # Stop at the first totals/end marker.
+                break
+            key = label.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            bal = (_coerce_number(row[balance_col_idx - 1])
+                   if balance_col_idx - 1 < len(row) else None)
+            mapped = ltp.get(key, "")
+            raw_rows.append({"label": label, "balance": bal,
+                             "mapped_pool": mapped})
+            if mapped and bal is not None:
+                by_pool[mapped] = by_pool.get(mapped, 0.0) + bal
+        by_period[period] = {"by_pool": by_pool, "raw_rows": raw_rows}
+
+    return {"ok": True,
+            "error": "; ".join(errors) if errors else None,
+            "by_period": by_period}
+

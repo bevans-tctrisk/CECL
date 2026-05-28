@@ -605,11 +605,26 @@
     <h4 style="margin-top:16px;">Pool label mapping</h4>
     <p class="muted">
       Map each label found in the balance sheets to one of this CU&rsquo;s
-      pools. Leave blank to ignore a label. Add rows for every label you
-      need to capture; auto-detection from uploads isn&rsquo;t wired up
-      for per-month files yet.
+      pools. Leave blank to ignore a label. Rows are pre-populated from
+      labels auto-detected on the uploads above &mdash; add or edit as
+      needed.
     </p>
-    {% set pm_labels = (mb.pool_map.keys()|list) or [''] %}
+    {# Build label list: union of auto-detected parsed_pool_labels and any
+       labels already present in the saved pool_map. Keeps user-typed
+       labels visible alongside detected ones. #}
+    {% set _parsed = mb.parsed_pool_labels or [] %}
+    {% set _mapped = mb.pool_map.keys()|list %}
+    {% set _seen = {} %}
+    {% set pm_labels = [] %}
+    {% for lab in (_parsed + _mapped) %}
+      {% if lab and lab|lower not in _seen %}
+        {% set _ = pm_labels.append(lab) %}
+        {% set _ = _seen.update({lab|lower: True}) %}
+      {% endif %}
+    {% endfor %}
+    {% if not pm_labels %}
+      {% set pm_labels = [''] %}
+    {% endif %}
     <table style="border-collapse:collapse; font-size:13px;">
       <thead>
         <tr>
@@ -707,7 +722,8 @@
       <button class="btn btn-secondary" type="submit"
               name="action" value="save_per_month_layout">Save</button>
       <button class="btn btn-primary" type="submit"
-              name="action" value="next">Save &amp; Next &rarr;</button>
+              name="action"
+              value="save_per_month_layout_and_next">Save &amp; Next &rarr;</button>
     </div>
   </form>
 </div>
@@ -829,7 +845,8 @@
       <button class="btn btn-secondary" type="submit"
               name="action" value="save_manual">Save</button>
       <button class="btn btn-primary" type="submit"
-              name="action" value="next">Save &amp; Next &rarr;</button>
+              name="action"
+              value="save_manual_and_next">Save &amp; Next &rarr;</button>
     </div>
   </form>
 </div>
