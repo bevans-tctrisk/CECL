@@ -1499,6 +1499,14 @@ def _compute_balance_adjustments(df, hist, config, snapshot_date):
     all_pools = set(loan_bals.keys())
     matched_loan_pools = set()
     nrr_set = set(config.get('not_risk_rated', []) or [])
+    # Configured loan pools — used to drop balance-sheet line items that
+    # aren't loan pools (e.g. "ACH Clearing", "Accrued Interest"). Anything
+    # not in this set AND not already a loan-extract pool is ignored.
+    configured_pools = set(pool_order)
+    configured_pools.update(p.get('name') for p in (config.get('pools') or [])
+                            if p and p.get('name'))
+    configured_pools.update(nrr_set)
+    skipped_non_pool: list[str] = []
 
     for mp, mb_val in monthly_bals.items():
         lp = _match_pool(mp)
@@ -1506,8 +1514,20 @@ def _compute_balance_adjustments(df, hist, config, snapshot_date):
             # Monthly-balance pool with no loan-extract counterpart (e.g.
             # non-risk-rated pools like Loan Participation, Repo/Foreclosed).
             # Treat the full monthly balance as an adjustment so it shows up
-            # in the per-pool "Loans Not Risk Rated and Adjustments" row.
+            # in the per-pool "Loans Not Risk Rated and Adjustments" row —
+            # but ONLY when the name is a configured loan pool. Balance-sheet
+            # line items like ACH Clearing have no place on the ACL tabs.
             mp_clean = str(mp).strip()
+            if configured_pools and mp_clean not in configured_pools:
+                # Try case-insensitive match before giving up.
+                lc = mp_clean.lower()
+                hit = next((c for c in configured_pools
+                            if str(c).strip().lower() == lc), None)
+                if hit is None:
+                    if mb_val and abs(mb_val) > 0.005:
+                        skipped_non_pool.append(f"{mp_clean} (${mb_val:,.2f})")
+                    continue
+                mp_clean = hit
             if mb_val and abs(mb_val) > 0.005:
                 balance_adjustments[mp_clean] = round(float(mb_val), 2)
                 total_adj += float(mb_val)
@@ -1585,6 +1605,11 @@ def _compute_balance_adjustments(df, hist, config, snapshot_date):
     print(f"    Balance adjustments: {n_adj} pools, "
           f"total adj: ${total_adj:,.2f}, "
           f"total in portfolio: ${total_in_portfolio:,.2f}")
+    if skipped_non_pool:
+        print(f"    Skipped {len(skipped_non_pool)} balance-sheet line "
+              f"item(s) not mapped to any loan pool: "
+              f"{', '.join(skipped_non_pool[:8])}"
+              f"{'...' if len(skipped_non_pool) > 8 else ''}")
 
 
 def load_delinquency_history(config):
