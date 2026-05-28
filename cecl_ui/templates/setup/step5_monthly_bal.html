@@ -550,7 +550,11 @@
     uploaded above.
   </p>
   <form method="post">
-    <input type="hidden" name="action" value="save_per_month_layout">
+    {# Each button below carries its own name="action" value="..." so the
+       form picks the right handler. Do NOT add a hidden ``action`` input
+       here — Flask's ``request.form.get('action')`` would return that
+       first value and ignore the clicked button, which made "Save & Next"
+       silently redirect back to this same page. #}
     <table style="border-collapse:collapse; font-size:13px;">
       <tr>
         <th style="text-align:left; padding:4px 10px;">Sheet name</th>
@@ -746,7 +750,9 @@
     months if needed.
   </p>
   <form method="post">
-    <input type="hidden" name="action" value="save_manual">
+    {# Buttons below carry their own name="action" value="..."; see the
+       note on the per_month form above for why a hidden action input
+       here would silently break Save & Next. #}
 
     <table id="manual-months-table" style="border-collapse:collapse; font-size:13px;">
       <thead>

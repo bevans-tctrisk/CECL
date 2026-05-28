@@ -1403,6 +1403,19 @@ def step5_monthly_bal():
 
     if request.method == "POST":
         action = request.form.get("action", "")
+        # Enter-key submissions in a text input post the form without
+        # any submit-button value, so ``action`` is empty. Pick a sane
+        # default per source mode so the user's typed input is saved
+        # rather than dropped (or worse, the form defaulting to the
+        # first submit button which is "Back").
+        if not action:
+            src = (mb.get("source") or "single")
+            if src == "per_month":
+                action = "save_per_month_layout"
+            elif src == "manual":
+                action = "save_manual"
+            else:
+                action = "save"
 
         if action == "upload":
             f = request.files.get("monthly_bal_file")
