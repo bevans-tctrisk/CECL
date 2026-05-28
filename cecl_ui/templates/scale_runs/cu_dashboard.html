@@ -29,7 +29,14 @@
       {% endfor %}
     </select>
     <small class="muted">YYYY-MM (quarter-end month). Defaults to one
-      quarter after the latest report on disk.</small>
+      quarter after the latest report on disk.
+      {% if solr_probe and solr_probe.ok %}
+        Filtered to quarters with a 5300 doc in Solr for this charter.
+      {% elif solr_probe and solr_probe.error %}
+        <span style="color:#a00;">Solr availability check failed
+        ({{ solr_probe.error }}); showing all template/map periods.</span>
+      {% endif %}
+    </small>
   </div>
 
   <fieldset class="form-row">
