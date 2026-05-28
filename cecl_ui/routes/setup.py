@@ -7570,6 +7570,25 @@ def step10_review():
                 n_copied, copied_names = _copy_sample_uploads_to_raw(
                     state, ws, sn
                 )
+                # Stamp the Migration draft as completed so it appears
+                # under "Completed setup" on the home dashboard. The
+                # draft file is retained so the user can still Edit
+                # setup or Delete from there. If the user reached
+                # review without ever clicking "Save Progress", write
+                # the draft first so mark_completed has something to
+                # stamp.
+                try:
+                    wizard_drafts.save_draft(
+                        ws, state, active_step="review",
+                        model="migration",
+                    )
+                    wizard_drafts.mark_completed(
+                        ws, sn, model="migration",
+                    )
+                except Exception:  # noqa: BLE001
+                    # Non-fatal: completion stamp is best-effort and
+                    # must not block the redirect to the run flow.
+                    pass
                 # Done — wipe wizard state, send user to the run flow for this CU.
                 session.pop(STATE_KEY, None)
                 msg = f"Saved {target.name}. Raw_Uploads/{sn}/ folder created."
