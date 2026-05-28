@@ -21,6 +21,12 @@ if (-not (Test-Path $env:PYTHONPYCACHEPREFIX)) {
     New-Item -ItemType Directory -Path $env:PYTHONPYCACHEPREFIX -Force | Out-Null
 }
 
+# Code lives on C: (this clone) but analyst data (wizard_drafts/, Raw_Uploads/,
+# Generated_Reports/, client_configs/, admin_defaults.yaml) stays on Egnyte
+# so it's shared and backed up.  cecl_ui/app.py reads CECL_WORKSPACE_ROOT to
+# decouple code location from data location.
+$env:CECL_WORKSPACE_ROOT = "Z:\Shared\TCT Files\CECL - CM Files"
+
 $appUrl = "http://127.0.0.1:5000/setup/step/identity"
 
 Set-Location $projectRoot
