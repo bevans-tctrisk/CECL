@@ -31,7 +31,7 @@ from werkzeug.utils import secure_filename
 from cecl_ui.routes.setup import (
     STATE_KEY, _state, _save_state, _wizard_ctx,
 )
-from cecl_ui.services import admin_defaults
+from cecl_ui.services import admin_defaults, wizard_drafts
 from cecl_ui.services.scale import (
     impaired_loader, mapping_loader, mgmt_adj_writer,
     qfactor_loader, runner as scale_runner, solr_fetcher,
@@ -133,6 +133,28 @@ def _scale(state: dict[str, Any]) -> dict[str, Any]:
     for k, v in defaults.items():
         state["scale"].setdefault(k, v)
     return state["scale"]
+
+
+def _persist_scale_draft(state: dict[str, Any], active_step: str) -> None:
+    """Write the wizard draft to disk after a successful SCALE run so
+    the runs dashboard can rehydrate it for future quarters. Failures
+    here are surfaced as a warning but do not break the success flow
+    (the workbook is already on disk).
+    """
+    if not (state.get("short_name") or state.get("credit_union")):
+        return
+    try:
+        wizard_drafts.save_draft(
+            current_app.config["WORKSPACE_ROOT"], state,
+            active_step=active_step, model="scale",
+        )
+    except Exception as exc:  # noqa: BLE001
+        flash(
+            f"Workbook written, but the wizard draft could not be saved "
+            f"to disk ({exc}). Click Save Progress to enable future-quarter "
+            f"runs from the SCALE Runs dashboard.",
+            "warning",
+        )
 
 
 def _ensure_scale_mode(state: dict[str, Any]) -> None:
@@ -655,6 +677,7 @@ def step_run():
             sc["last_run"] = result
             _save_state(state)
             if result.get("ok"):
+                _persist_scale_draft(state, "scale_run")
                 flash(
                     f"SCALE workbook written: "
                     f"{result.get('quarters_written', 0)} of "
@@ -672,6 +695,7 @@ def step_run():
             sc["last_run"] = result
             _save_state(state)
             if result.get("ok"):
+                _persist_scale_draft(state, "scale_run")
                 flash(
                     f"SCALE workbook written: applied {result['applied']} "
                     f"of {result['total_rows']} cells.",

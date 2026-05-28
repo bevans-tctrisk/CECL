@@ -130,7 +130,7 @@ def cu_dashboard(short_name: str):
         for period_dir in sorted(runs_root.iterdir(), reverse=True):
             if not period_dir.is_dir():
                 continue
-            files = sorted(period_dir.glob("CECL_SCALE_*.xlsx"))
+            files = sorted(period_dir.glob("*CECL_SCALE_*.xlsx"))
             if not files:
                 continue
             runs.append({
