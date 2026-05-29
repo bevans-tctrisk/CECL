@@ -2894,6 +2894,37 @@ def load_historical_data(config):
     balances, alll_by_date = load_monthly_balances(config)
     dq = load_delinquency_history(config)
 
+    # Drop balance-sheet line items that aren't loan pools (e.g. "ACH
+    # Clearing", "ATM Machine", "Vizo Financial Corp ..."). The monthly
+    # balance file is often a full balance sheet; we only want rows that
+    # map to a configured loan pool. Anything else would pollute
+    # hist_bal_data, avg_balances, and downstream Vizo/TCT tabs.
+    if not balances.empty:
+        nrr_set = set(config.get('not_risk_rated', []) or [])
+        configured_pools = set(config.get('pool_order', []) or [])
+        configured_pools.update(
+            p.get('name') for p in (config.get('pools') or [])
+            if p and p.get('name')
+        )
+        configured_pools.update(nrr_set)
+        if configured_pools:
+            configured_lc = {str(p).strip().lower(): str(p).strip()
+                             for p in configured_pools if p}
+            pool_norm = balances['pool'].astype(str).str.strip().str.lower()
+            keep_mask = pool_norm.isin(configured_lc.keys())
+            dropped = sorted(set(
+                balances.loc[~keep_mask, 'pool'].astype(str).str.strip()
+            ))
+            if dropped:
+                print(f"    Dropped {len(dropped)} non-loan balance-sheet "
+                      f"line item(s) from monthly balances: "
+                      f"{', '.join(dropped[:5])}"
+                      f"{'...' if len(dropped) > 5 else ''}")
+            balances = balances.loc[keep_mask].copy()
+            # Canonicalize pool names to the configured spelling so downstream
+            # exact-match lookups (e.g. set membership in pool_order) work.
+            balances['pool'] = pool_norm[keep_mask].map(configured_lc)
+
     # Compute annual average balances per pool from monthly data
     avg_balances = {}  # {year: {pool: avg_balance}}
     if not balances.empty:
