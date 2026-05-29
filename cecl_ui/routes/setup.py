@@ -3442,6 +3442,10 @@ def step3_historical():
                         continue
                     pool = (
                         request.form.get(f"pm_pool_{idx}") or "").strip()
+                    # "__ignore__" sentinel from the dropdown means
+                    # intentionally excluded -- store as empty string.
+                    if pool == "__ignore__":
+                        pool = ""
                     pool_map[label] = pool
             mb["pool_map"] = pool_map
             _save_state(state)
