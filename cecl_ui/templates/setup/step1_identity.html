@@ -39,6 +39,19 @@
         </label>
       </div>
       <div>
+        <label>Report period (YYYY-MM)
+          <input type="month" name="report_period"
+                 value="{{ state.report_period }}"
+                 placeholder="e.g., 2026-03">
+          <span class="help">The month-end this CU's next report covers.
+            Used as the global &ldquo;as-of&rdquo; anchor &mdash; data
+            in source files dated <strong>after</strong> this month is
+            ignored (e.g. Apr&ndash;Dec columns in a Jan&ndash;Dec
+            balance-sheet when running March). Leave blank to always
+            use the latest available data.</span>
+        </label>
+      </div>
+      <div>
         <label>State
           <select name="state" id="state-select">
             <option value="">— Select a state —</option>

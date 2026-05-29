@@ -35,6 +35,18 @@
       <span class="muted" style="font-weight:normal;">as of {{ comparison.period }}</span>
     {% endif %}
   </h3>
+  {% if report_period %}
+    <p class="muted" style="margin-top:-4px;">
+      Scoped to report period <strong>{{ report_period }}</strong> &mdash;
+      data dated after this month is ignored.
+      <a href="{{ url_for('setup.step1_identity') }}">Change&nbsp;&rarr;</a>
+    </p>
+  {% else %}
+    <p class="muted" style="margin-top:-4px;">
+      No report period set &mdash; using the latest available data.
+      <a href="{{ url_for('setup.step1_identity') }}">Set on Step 1&nbsp;&rarr;</a>
+    </p>
+  {% endif %}
 
   {% if comparison.rows %}
     <table class="table" style="margin-top:8px;">

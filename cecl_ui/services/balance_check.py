@@ -16,6 +16,34 @@ import pandas as pd
 from cecl_ui.services import monthly_bal_parser
 
 
+def _report_period_cutoff(state: dict[str, Any]) -> str:
+    """Return the global Report Period anchor (Step 1) as an ISO
+    month-end date string ``YYYY-MM-DD``, or ``""`` if not set.
+
+    Used to scope period-keyed balance lookups so data dated AFTER the
+    report period is ignored (e.g. Apr-Dec columns in a Jan-Dec balance
+    sheet when running March).
+    """
+    rp = (state.get("report_period") or "").strip()
+    if not rp:
+        return ""
+    try:
+        y_s, m_s = rp.split("-", 1)[0], rp.split("-", 1)[1][:2]
+        y = int(y_s)
+        m = int(m_s)
+    except (ValueError, IndexError):
+        return ""
+    if not (2000 <= y <= 2100 and 1 <= m <= 12):
+        return ""
+    # Compute the last day of the month without importing calendar.
+    if m == 12:
+        next_first = pd.Timestamp(year=y + 1, month=1, day=1)
+    else:
+        next_first = pd.Timestamp(year=y, month=m + 1, day=1)
+    last = (next_first - pd.Timedelta(days=1)).date()
+    return last.isoformat()
+
+
 def _load_loan_extract(
     path: str | Path,
     has_header: bool,
@@ -348,6 +376,15 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
                     "error": "Annual workbook(s) had period columns but "
                     "no balances mapped to pools. Check the pool map.",
                     "period": "", "by_pool": {}, "raw_rows": []}
+        # Honour the global Report Period anchor: ignore any period
+        # AFTER report_period (Step 1). Falls back to "latest with
+        # data" when report_period is blank or the anchor is earlier
+        # than every populated column.
+        anchor = _report_period_cutoff(state)
+        if anchor:
+            in_range = [p for p in populated if p <= anchor]
+            if in_range:
+                populated = in_range
         latest = max(populated)
         bucket = by_period[latest] or {}
         return {"ok": True, "error": result.get("error"),
@@ -379,7 +416,13 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
                               or "Could not extract any pool balances from "
                               "the per-month files."),
                     "period": "", "by_pool": {}, "raw_rows": []}
-        latest = max(by_period.keys())
+        periods = list(by_period.keys())
+        anchor = _report_period_cutoff(state)
+        if anchor:
+            in_range = [p for p in periods if p <= anchor]
+            if in_range:
+                periods = in_range
+        latest = max(periods)
         bucket = by_period[latest] or {}
         return {"ok": True, "error": result.get("error"),
                 "period": latest,
@@ -395,7 +438,13 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
                     "No manual monthly balances have been entered on the "
                     "Monthly Balance File step.",
                     "period": "", "by_pool": {}, "raw_rows": []}
-        latest = max(months)
+        anchor = _report_period_cutoff(state)
+        candidate_months = months
+        if anchor:
+            in_range = [m for m in months if m <= anchor]
+            if in_range:
+                candidate_months = in_range
+        latest = max(candidate_months)
         by_pool: dict[str, float] = {}
         raw_rows: list[dict[str, Any]] = []
         for pool, row in entries.items():

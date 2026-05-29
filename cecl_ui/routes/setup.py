@@ -126,6 +126,13 @@ def _default_state() -> dict[str, Any]:
         "short_name": "",
         "charter_number": "",
         "data_directory": "",
+        # Report period (YYYY-MM) the user is configuring this CU to
+        # run reports for. Acts as the global "as-of" anchor: any
+        # source file / column whose period is AFTER this is ignored
+        # (e.g. Apr-Dec columns in a Jan-Dec balance sheet when the
+        # report period is 2026-03). Blank means "use the latest
+        # available data".
+        "report_period": "",
         # files
         "file_pattern": r"LOANDATA.*\.(xlsx|xls|csv)$",
         "date_pattern": r"(\d{4})-(\d{2})",
@@ -686,6 +693,32 @@ def step1_identity():
             if charter_raw and not charter_clean:
                 flash("Charter number must contain digits — saved as blank.", "info")
             state["charter_number"] = charter_clean
+            # Global "report period" anchor (YYYY-MM). Used by Step 14
+            # and other steps to ignore data past this period. Accept
+            # blank (= "use latest available"); otherwise normalise to
+            # ``YYYY-MM`` and validate. Anything unparseable -> blank
+            # with an info flash, so a typo never silently locks the
+            # user into a wrong anchor.
+            rp_raw = (request.form.get("report_period") or "").strip()
+            rp_norm = ""
+            if rp_raw:
+                rp_try = rp_raw.replace("/", "-")
+                # Accept YYYY-MM and YYYY-MM-DD; keep only YYYY-MM.
+                parts = rp_try.split("-")
+                try:
+                    y = int(parts[0])
+                    m = int(parts[1])
+                    if 2000 <= y <= 2100 and 1 <= m <= 12:
+                        rp_norm = f"{y:04d}-{m:02d}"
+                except (ValueError, IndexError):
+                    pass
+                if not rp_norm:
+                    flash(
+                        f"Report period '{rp_raw}' isn't a valid YYYY-MM "
+                        "value -- saved as blank (use latest data).",
+                        "info",
+                    )
+            state["report_period"] = rp_norm
             # NOTE: historical data directory is collected later in the
             # wizard (Files step), not on this Identity step.
             state["economic_data"]["state"] = request.form.get("state", "").strip()
@@ -7283,6 +7316,7 @@ def step_balance_check():
         comparison=comparison,
         pool_choices=pool_choices,
         has_warm=has_warm,
+        report_period=state.get("report_period") or "",
         **_wizard_ctx("balance_check"),
     )
 
