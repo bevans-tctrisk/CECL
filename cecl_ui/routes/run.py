@@ -492,6 +492,7 @@ def _all_known_pools(cfg: dict, short_name: str) -> list[str]:
     pool_set.discard("")
     pool_set.discard(None)
     pool_set.discard("Exclude")
+    pool_set.discard("Ignore")
     return sorted(p for p in pool_set if p)
 
 
