@@ -986,14 +986,76 @@
     </table>
 
     {% set acl = mb.acl or {} %}
-    {% set acl_src = acl.source or 'manual' %}
+    {% set acl_src = acl.source or 'monthly_file' %}
     {% set acl_man = acl.manual or {} %}
+    {% set acl_hist = acl.history or {} %}
     <h4 style="margin-top:18px;">Allowance for Credit Loss (ACL)</h4>
     <p class="muted">
-      Enter the three quarter-end ACL balances manually (the annual
-      workbook layout doesn&rsquo;t expose a single ACL row reliably
-      across all years).
+      The annual workbooks usually contain an Allowance for Credit Loss
+      (ALLL) row &mdash; the wizard can auto-detect it across all
+      uploaded year files. Override the row number if needed, or fall
+      back to a separate file or manual entry.
     </p>
+    <label style="display:block; margin:4px 0;">
+      <input type="radio" name="acl_source" value="monthly_file"
+             {% if acl_src == 'monthly_file' %}checked{% endif %}>
+      <strong>Pull from the annual balance workbooks (auto-detect).</strong>
+    </label>
+    {% if acl_src == 'monthly_file' %}
+      <div style="margin:6px 0 12px 24px;">
+        <table style="border-collapse:collapse; font-size:13px;">
+          <tr>
+            <th style="text-align:left; padding:4px 10px;">ACL row (1-based)</th>
+            <td style="padding:4px 10px;">
+              <input type="number" name="acl_row" min="1"
+                     value="{{ acl.row or '' }}" style="width:80px;">
+              <button class="btn btn-secondary" type="submit"
+                      name="action" value="acl_scan_balance_files"
+                      style="margin-left:6px;"
+                      title="Auto-detect the ACL row in every uploaded annual workbook and refresh the history table below.">
+                Scan uploaded balance files
+              </button>
+              {% if acl.label %}
+                <span class="muted" style="margin-left:8px;">
+                  Detected label: <strong>{{ acl.label }}</strong>
+                </span>
+              {% endif %}
+            </td>
+          </tr>
+        </table>
+        {% if acl_hist %}
+          <p class="muted" style="margin:8px 0 4px 0;">
+            <strong>Historical ACL balances</strong>
+            ({{ acl_hist|length }} month{{ '' if acl_hist|length == 1 else 's' }}):
+          </p>
+          <div style="max-height:260px; overflow-y:auto; border:1px solid #ddd; display:inline-block;">
+            <table style="border-collapse:collapse; font-size:13px;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc; background:#f3f3f3; position:sticky; top:0;">Month-end</th>
+                  <th style="text-align:right; padding:4px 10px; border-bottom:1px solid #ccc; background:#f3f3f3; position:sticky; top:0;">ACL Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for d, v in acl_hist|dictsort %}
+                  <tr>
+                    <td style="padding:3px 10px;">{{ d }}</td>
+                    <td style="padding:3px 10px; text-align:right; font-variant-numeric:tabular-nums;">
+                      ${{ '{:,.2f}'.format(v) }}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="muted" style="margin-top:8px;">
+            No ACL row detected yet. Click
+            <em>Scan uploaded balance files</em> to auto-detect.
+          </p>
+        {% endif %}
+      </div>
+    {% endif %}
     <label style="display:block; margin:4px 0;">
       <input type="radio" name="acl_source" value="separate"
              {% if acl_src == 'separate' %}checked{% endif %}>
@@ -1001,7 +1063,7 @@
     </label>
     <label style="display:block; margin:4px 0;">
       <input type="radio" name="acl_source" value="manual"
-             {% if acl_src != 'separate' %}checked{% endif %}>
+             {% if acl_src == 'manual' %}checked{% endif %}>
       Enter manually:
     </label>
     <table style="border-collapse:collapse; font-size:13px; margin-left:24px;">
