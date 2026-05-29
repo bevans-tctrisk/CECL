@@ -415,10 +415,66 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
                     samples.setdefault(code, set())
                 break
 
+    # Also surface any loan_code values present in the historical-data DB
+    # tables (charge-offs, recoveries, delinquency) that don't resolve to
+    # any pool. These come from per-month aggregation, 5300 backfills, and
+    # the wizard's historical-data steps, and are what populate the Vizo
+    # Display CO-Recov-DQ tab. Unmapped codes there silently fall back to
+    # the default pool, so the user needs to see them.
+    db_counts = _scan_unmapped_codes_from_db(cfg, pool_map, split)
+    for code, n in db_counts.items():
+        counts[code] = counts.get(code, 0) + n
+
     return [
         {"code": c, "count": counts[c]}
         for c in sorted(counts, key=lambda k: (-counts[k], k.lower()))
     ]
+
+
+def _scan_unmapped_codes_from_db(cfg: dict, pool_map: dict,
+                                 split: str) -> dict[str, int]:
+    """Pull distinct loan_code values from the historical-data DB tables
+    (chargeoffs, recoveries, delinquency) that don't resolve to any pool
+    via ``cfg['pool_map']``. Returns ``{code: row_count}``.
+
+    Returns an empty dict on any error (missing tables, no DB access).
+    """
+    cu = (cfg.get("credit_union") or "").strip()
+    if not cu:
+        return {}
+    try:
+        from cecl_credentials import get_database_url
+        from sqlalchemy import create_engine, text as _sql_text
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        eng = create_engine(get_database_url())
+    except Exception:  # noqa: BLE001
+        return {}
+
+    counts: dict[str, int] = {}
+    for table in ("loan_code_chargeoff_history",
+                  "loan_code_recovery_history",
+                  "loan_code_delinquency_history"):
+        try:
+            with eng.begin() as conn:
+                rows = conn.execute(
+                    _sql_text(
+                        f"SELECT loan_code, COUNT(*) AS n "
+                        f"FROM {table} WHERE cu = :cu "
+                        f"GROUP BY loan_code"
+                    ),
+                    {"cu": cu},
+                ).fetchall()
+        except Exception:  # noqa: BLE001
+            # Table may not exist yet; skip.
+            continue
+        for r in rows:
+            code = (r[0] or "").strip()
+            if not code or _resolves_to_pool(code, pool_map, split):
+                continue
+            counts[code] = counts.get(code, 0) + int(r[1] or 0)
+    return counts
 
 
 def _all_known_pools(cfg: dict, short_name: str) -> list[str]:
