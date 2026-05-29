@@ -7752,8 +7752,10 @@ def _copy_sample_uploads_to_raw(
     into ``Raw_Uploads/<short_name>/`` so the report engine can find them.
 
     Returns (files_copied, list_of_filenames_copied). Existing files in the
-    destination are left in place (we never overwrite, to preserve real
-    quarterly drops from the CU).
+    destination are left in place UNLESS the wizard-uploaded source is
+    newer (preserves real quarterly drops from the CU while still
+    honoring intentional re-uploads from the wizard, e.g. when the
+    user replaces a wrong impaired-loans file mid-setup).
     """
     dest_dir = config_service.raw_uploads_dir(workspace_root) / short_name
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -7774,7 +7776,11 @@ def _copy_sample_uploads_to_raw(
                 continue
             target = dest_dir / src.name
             if target.exists():
-                continue
+                try:
+                    if src.stat().st_mtime <= target.stat().st_mtime:
+                        continue
+                except OSError:
+                    continue
             try:
                 shutil.copy2(src, target)
             except OSError:
