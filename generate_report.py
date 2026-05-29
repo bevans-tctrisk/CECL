@@ -985,6 +985,54 @@ def _load_monthly_balances_per_month(mb_cfg):
     return pd.DataFrame(records, columns=['pool', 'date', 'balance']), {}
 
 
+def _load_monthly_balances_per_year(mb_cfg):
+    """Read one annual balance-sheet workbook per calendar year and emit
+    (pool, date, bal) rows. Each file is opened on ``layout.sheet`` (or
+    the first/best sheet) and the per-file header row is re-scanned to
+    pull month-end columns. Labels are mapped to wizard pool names via
+    ``pool_map`` (case-insensitive, falls back to the raw label).
+
+    Delegates the heavy lifting to
+    ``cecl_ui.services.monthly_bal_parser.pool_balances_for_per_year_files``
+    so the wizard's auto-detect logic and the runtime importer always
+    agree on column/row interpretation.
+    """
+    try:
+        from cecl_ui.services.monthly_bal_parser import (
+            pool_balances_for_per_year_files,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"    Warning: per_year loader unavailable: {exc}")
+        return pd.DataFrame(columns=['pool', 'date', 'balance']), {}
+
+    layout = mb_cfg.get('layout') or {}
+    raw_map = mb_cfg.get('pool_map') or {}
+    pool_map = {str(k).strip().lower(): str(v).strip()
+                for k, v in raw_map.items()
+                if str(k).strip() and str(v).strip()}
+    year_files = mb_cfg.get('files') or []
+
+    result = pool_balances_for_per_year_files(year_files, layout, pool_map)
+    by_period = result.get('by_period') or {}
+    records = []
+    for period_iso, payload in by_period.items():
+        try:
+            dt = pd.to_datetime(period_iso, errors='coerce')
+        except Exception:
+            continue
+        if pd.isna(dt):
+            continue
+        for pool, bal in (payload.get('by_pool') or {}).items():
+            try:
+                bal_f = float(bal)
+            except (TypeError, ValueError):
+                continue
+            records.append({'pool': pool, 'date': dt, 'balance': bal_f})
+    if result.get('error'):
+        print(f"    Warning: per_year loader: {result['error']}")
+    return pd.DataFrame(records, columns=['pool', 'date', 'balance']), {}
+
+
 def _coerce_balance(v):
     """Convert a cell value to float, stripping $, commas, parens for
     negatives, and whitespace. Returns None on failure."""
@@ -1281,6 +1329,10 @@ def load_monthly_balances(config):
             return df, _merge_acl_history(alll, config)
         # If per_month failed (no files / unreadable), fall through to the
         # legacy scan so the user at least gets the historical context.
+    if mb_source == 'per_year':
+        df, alll = _load_monthly_balances_per_year(mb_cfg)
+        if not df.empty:
+            return df, _merge_acl_history(alll, config)
 
     # Preferred path for "single" mode: use the wizard's saved_path +
     # sheet metadata directly. Honors cfg['balance_title_map'] (label

@@ -594,6 +594,48 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             if pool_map:
                 mb_block["pool_map"] = pool_map
 
+        elif mb_source == "per_year":
+            layout = mb.get("per_year_layout") or {}
+            mb_block["layout"] = {
+                "sheet": layout.get("sheet") or "",
+                "header_row": int(layout.get("header_row") or 1),
+                "label_col": (layout.get("label_col") or "B").upper(),
+                "period_columns": [
+                    {
+                        "col": str(pc.get("col") or "").upper(),
+                        "period": str(pc.get("period") or ""),
+                    }
+                    for pc in (layout.get("period_columns") or [])
+                    if pc.get("col") and pc.get("period")
+                ],
+            }
+            files_out: list[dict[str, Any]] = []
+            for entry in (mb.get("year_files") or []):
+                fn = (entry.get("filename") or "").strip()
+                sp = (entry.get("saved_path") or "").strip()
+                yr = entry.get("year")
+                try:
+                    yr_int = int(yr) if yr is not None else None
+                except (TypeError, ValueError):
+                    yr_int = None
+                if not fn or yr_int is None:
+                    continue
+                files_out.append({
+                    "year": yr_int,
+                    "filename": fn,
+                    "saved_path": sp,
+                })
+            files_out.sort(key=lambda e: e.get("year") or 0)
+            if files_out:
+                mb_block["files"] = files_out
+            pool_map = {
+                str(k).strip(): str(v).strip()
+                for k, v in (mb.get("pool_map") or {}).items()
+                if str(k).strip() and str(v).strip()
+            }
+            if pool_map:
+                mb_block["pool_map"] = pool_map
+
         elif mb_source == "manual":
             months = [
                 (m or "").strip()

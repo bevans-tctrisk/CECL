@@ -52,10 +52,21 @@
       </span>
     </label>
     <label style="display:block; margin:6px 0;">
+      <input type="radio" name="monthly_bal_source" value="per_year"
+             onchange="this.form.submit()"
+             {% if source == 'per_year' %}checked{% endif %}>
+      <strong>3. One file per year (annual balance sheets).</strong>
+      <span class="muted">
+        The CU sends one workbook per calendar year with all twelve
+        month-end balances arranged as columns. Upload one file per
+        year and we&rsquo;ll expand each into twelve month-end rows.
+      </span>
+    </label>
+    <label style="display:block; margin:6px 0;">
       <input type="radio" name="monthly_bal_source" value="manual"
              onchange="this.form.submit()"
              {% if source == 'manual' %}checked{% endif %}>
-      <strong>3. Manually enter balances.</strong>
+      <strong>4. Manually enter balances.</strong>
       <span class="muted">
         Type each pool&rsquo;s month-end balance directly into a grid.
         Use this when no file is available.
@@ -787,6 +798,231 @@
   </form>
 </div>
 {% endif %}{# source == 'per_month' #}
+
+{% if source == 'per_year' %}
+{% set py = mb.per_year_layout or {} %}
+{% set py_files = mb.year_files or [] %}
+<div class="card">
+  <h3>1. Upload one workbook per year</h3>
+  <p class="muted">
+    Upload each annual balance-sheet workbook (e.g.
+    <code>2024 Balance Sheets.xlsx</code>). Each file should contain
+    all twelve month-end balances as columns. We auto-detect the
+    sheet name, header row, label column, and month-end column for
+    each year.
+  </p>
+  <form method="post" enctype="multipart/form-data">
+    <input type="hidden" name="action" value="upload_per_year">
+    <table style="border-collapse:collapse; font-size:13px;">
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Year (optional)</th>
+        <td style="padding:4px 10px;">
+          <input type="number" name="per_year_year" min="2000" max="2099"
+                 placeholder="auto-detected from filename"
+                 style="width:120px;">
+          <span class="muted">leave blank to read from the filename</span>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Annual balance workbook</th>
+        <td style="padding:4px 10px;">
+          <input type="file" name="per_year_file"
+                 accept=".xlsx,.xls,.csv" required>
+          <button class="btn btn-primary" type="submit">Add file</button>
+        </td>
+      </tr>
+    </table>
+  </form>
+
+  {% if py_files %}
+    <h4 style="margin-top:16px;">Uploaded files</h4>
+    <table style="border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc;">Year</th>
+          <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc;">File</th>
+          <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc;">Months detected</th>
+          <th style="padding:4px 10px; border-bottom:1px solid #ccc;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in py_files %}
+          <tr>
+            <td style="padding:4px 10px;">{{ e.year or '?' }}</td>
+            <td style="padding:4px 10px;">
+              <code>{{ e.filename }}</code>
+            </td>
+            <td style="padding:4px 10px;">
+              {{ e.period_count or 0 }}
+            </td>
+            <td style="padding:4px 10px;">
+              <form method="post" style="display:inline;"
+                    onsubmit="return confirm('Remove {{ e.filename }}?');">
+                <input type="hidden" name="filename" value="{{ e.filename }}">
+                <button class="btn btn-secondary" type="submit"
+                        name="action" value="remove_per_year">&times;</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted" style="margin-top:8px;">
+      No annual files uploaded yet.
+    </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>2. Common file layout</h3>
+  <p class="muted">
+    Auto-detected from the first upload. Override only if the parser
+    misread the workbook.
+  </p>
+  <form method="post">
+    <table style="border-collapse:collapse; font-size:13px;">
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Header row (1-based)</th>
+        <td style="padding:4px 10px;">
+          <input type="number" name="py_header_row" min="1"
+                 value="{{ py.header_row or 1 }}" style="width:80px;">
+          <span class="muted">row containing the month-year column headers</span>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Pool/type label column</th>
+        <td style="padding:4px 10px;">
+          <input type="text" name="py_label_col"
+                 value="{{ py.label_col or 'B' }}" maxlength="3"
+                 style="width:60px; text-transform:uppercase;">
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left; padding:4px 10px; vertical-align:top;">Notes</th>
+        <td style="padding:4px 10px;">
+          <textarea name="notes" rows="2" cols="60">{{ mb.notes }}</textarea>
+        </td>
+      </tr>
+    </table>
+
+    <h4 style="margin-top:16px;">Pool label mapping</h4>
+    <p class="muted">
+      Map each pool/type label found in the annual files to one of this
+      CU&rsquo;s pools. Leave blank to ignore a label.
+    </p>
+    {% set _parsed = mb.parsed_pool_labels or [] %}
+    {% set _mapped = mb.pool_map.keys()|list %}
+    {% set _seen = {} %}
+    {% set py_labels = [] %}
+    {% for lab in (_parsed + _mapped) %}
+      {% if lab and lab|lower not in _seen %}
+        {% set _ = py_labels.append(lab) %}
+        {% set _ = _seen.update({lab|lower: True}) %}
+      {% endif %}
+    {% endfor %}
+    {% if not py_labels %}
+      {% set py_labels = [''] %}
+    {% endif %}
+    <table style="border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:4px 10px;">Label in file</th>
+          <th style="text-align:left; padding:4px 10px;">Wizard pool</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for label in py_labels %}
+          <tr>
+            <td style="padding:4px 10px;">
+              <input type="text" name="map_label" value="{{ label }}"
+                     style="width:280px;">
+            </td>
+            <td style="padding:4px 10px;">
+              <select name="map_pool" style="width:240px;">
+                <option value="">&mdash; ignore &mdash;</option>
+                {% for pool in pool_choices %}
+                  <option value="{{ pool }}"
+                    {% if mb.pool_map.get(label) == pool %}selected{% endif %}>
+                    {{ pool }}
+                  </option>
+                {% endfor %}
+              </select>
+            </td>
+          </tr>
+        {% endfor %}
+        <tr>
+          <td style="padding:4px 10px;">
+            <input type="text" name="map_label" value="" style="width:280px;">
+          </td>
+          <td style="padding:4px 10px;">
+            <select name="map_pool" style="width:240px;">
+              <option value="">&mdash; ignore &mdash;</option>
+              {% for pool in pool_choices %}
+                <option value="{{ pool }}">{{ pool }}</option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    {% set acl = mb.acl or {} %}
+    {% set acl_src = acl.source or 'manual' %}
+    {% set acl_man = acl.manual or {} %}
+    <h4 style="margin-top:18px;">Allowance for Credit Loss (ACL)</h4>
+    <p class="muted">
+      Enter the three quarter-end ACL balances manually (the annual
+      workbook layout doesn&rsquo;t expose a single ACL row reliably
+      across all years).
+    </p>
+    <label style="display:block; margin:4px 0;">
+      <input type="radio" name="acl_source" value="separate"
+             {% if acl_src == 'separate' %}checked{% endif %}>
+      Upload separately (configure on Save below, then return).
+    </label>
+    <label style="display:block; margin:4px 0;">
+      <input type="radio" name="acl_source" value="manual"
+             {% if acl_src != 'separate' %}checked{% endif %}>
+      Enter manually:
+    </label>
+    <table style="border-collapse:collapse; font-size:13px; margin-left:24px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:4px 10px;">Month-end</th>
+          <th style="text-align:left; padding:4px 10px;">ACL Balance</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for k in ['month1','month2','month3'] %}
+          <tr>
+            <td style="padding:4px 10px;">
+              <input type="text" name="acl_manual_{{ k }}_date"
+                     value="{{ acl_man[k+'_date'] or '' }}"
+                     placeholder="YYYY-MM-DD" style="width:140px;">
+            </td>
+            <td style="padding:4px 10px;">
+              <input type="text" name="acl_manual_{{ k }}_value"
+                     value="{{ '%.2f' % acl_man[k+'_value'] if acl_man[k+'_value'] is not none else '' }}"
+                     placeholder="0.00" style="width:140px; text-align:right;">
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="btn-row" style="margin-top:18px;">
+      <button class="btn btn-secondary" type="submit"
+              name="action" value="back">&larr; Back</button>
+      <button class="btn btn-secondary" type="submit"
+              name="action" value="save_per_year_layout">Save</button>
+      <button class="btn btn-primary" type="submit"
+              name="action"
+              value="save_per_year_layout_and_next">Save &amp; Next &rarr;</button>
+    </div>
+  </form>
+</div>
+{% endif %}{# source == 'per_year' #}
 
 {% if source == 'manual' %}
 {% set months = mb.manual_months or [] %}

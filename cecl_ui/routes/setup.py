@@ -1241,6 +1241,25 @@ def _persist_per_month_layout(mb: dict, form) -> None:
     _save_acl_form(mb, form)
 
 
+def _persist_per_year_layout(mb: dict, form) -> None:
+    """Persist the per_year layout + pool_map + notes + ACL from ``form``.
+
+    Used by both the ``save_per_year_layout`` (Save) and
+    ``save_per_year_layout_and_next`` (Save & Next) actions.
+    """
+    layout = mb.setdefault("per_year_layout", {})
+    layout["label_col"] = (
+        form.get("py_label_col", "B") or "B"
+    ).strip().upper()
+    try:
+        layout["header_row"] = int(form.get("py_header_row", "1") or 1)
+    except ValueError:
+        layout["header_row"] = 1
+    mb["pool_map"] = _parse_kv_rows(form, "map_label", "map_pool")
+    mb["notes"] = (form.get("notes", "") or "").strip()
+    _save_acl_form(mb, form)
+
+
 def _persist_manual_grid(mb: dict, form) -> int:
     """Persist the manual pool × month grid from ``form``.
 
@@ -1349,6 +1368,14 @@ def step5_monthly_bal():
     # workflow — remembered so the user can re-scan next quarter with
     # a single click.
     mb.setdefault("per_month_source_folder", "")
+    # Per-year mode: one workbook per calendar year, each with all 12
+    # month-end balances as columns. ``year_files`` entries:
+    # ``{filename, saved_path, year, period_count}``.
+    mb.setdefault("year_files", [])
+    mb.setdefault("per_year_layout", {
+        "sheet": "", "label_col": "", "header_row": 0,
+        "period_columns": [],
+    })
     # Manual-entry mode: explicit list of month-end dates plus the
     # {pool_name: {YYYY-MM-DD: float}} grid the user fills in.
     mb.setdefault("manual_months", [])
@@ -1416,6 +1443,8 @@ def step5_monthly_bal():
             src = (mb.get("source") or "single")
             if src == "per_month":
                 action = "save_per_month_layout"
+            elif src == "per_year":
+                action = "save_per_year_layout"
             elif src == "manual":
                 action = "save_manual"
             else:
@@ -1959,6 +1988,142 @@ def step5_monthly_bal():
             _persist_per_month_layout(mb, request.form)
             _save_state(state)
             flash("Saved per-month layout.", "success")
+            return redirect(url_for("setup.step5_grades"))
+
+        if action == "upload_per_year":
+            f = request.files.get("per_year_file")
+            year_raw = (request.form.get("per_year_year") or "").strip()
+            if not f or not f.filename:
+                flash("Choose an annual balance workbook to upload.", "error")
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+            try:
+                target = _save_monthly_bal_upload(f)
+                analysis = monthly_bal_parser.analyse_per_year_file(target)
+                try:
+                    year_int = int(year_raw) if year_raw else None
+                except ValueError:
+                    year_int = None
+                if year_int is None:
+                    year_int = analysis.get("detected_year")
+                if year_int is None:
+                    flash(
+                        f"Saved {target.name}, but no calendar year was "
+                        "supplied and none could be detected from the "
+                        "filename. Enter the year and re-upload.",
+                        "error",
+                    )
+                    _save_state(state)
+                    return redirect(url_for("setup.step5_monthly_bal"))
+
+                entry = {
+                    "filename": target.name,
+                    "saved_path": str(target),
+                    "year": int(year_int),
+                    "period_count": len(analysis.get("period_columns") or []),
+                }
+                files = mb.setdefault("year_files", [])
+                files[:] = [e for e in files
+                            if e.get("filename") != entry["filename"]]
+                files.append(entry)
+                files.sort(key=lambda e: e.get("year") or 0)
+
+                if analysis.get("ok"):
+                    layout = mb.setdefault("per_year_layout", {})
+                    layout["sheet"] = analysis.get("sheet", "")
+                    layout["label_col"] = analysis.get("label_col", "B")
+                    layout["header_row"] = analysis.get("header_row", 1)
+                    # Persist this year's detected period columns as a
+                    # fallback for the importer (per-file headers usually
+                    # re-detect, this is only used if a future file is
+                    # missing its header row).
+                    layout["period_columns"] = analysis.get(
+                        "period_columns", [])
+
+                    existing_labels = list(mb.get("parsed_pool_labels") or [])
+                    seen = {s.lower() for s in existing_labels}
+                    for lab in analysis.get("pool_labels", []):
+                        if lab.lower() not in seen:
+                            existing_labels.append(lab)
+                            seen.add(lab.lower())
+                    mb["parsed_pool_labels"] = existing_labels
+
+                    combined_map: dict[str, str] = {}
+                    for _k, _v in (state.get("balance_title_map")
+                                    or {}).items():
+                        if _k:
+                            combined_map[_k] = (_v or "")
+                    _hpm = state.get("hist_pool_map") or {}
+                    for _k, _v in (_hpm.get("mapping") or {}).items():
+                        if _k and _k not in combined_map:
+                            combined_map[_k] = (_v or "")
+                    seeded, status = monthly_bal_parser.seed_pool_map(
+                        existing_labels, combined_map)
+                    existing_pm = mb.get("pool_map") or {}
+                    for label, pool in seeded.items():
+                        if label not in existing_pm or not existing_pm.get(label):
+                            existing_pm[label] = pool
+                    mb["pool_map"] = existing_pm
+                    mb["label_status"] = status
+
+                    flash(
+                        f"Uploaded {target.name} for {year_int}: detected "
+                        f"sheet {analysis.get('sheet')!r}, header row "
+                        f"{analysis.get('header_row')}, label column "
+                        f"{analysis.get('label_col')}, "
+                        f"{entry['period_count']} month-end column(s), "
+                        f"{len(analysis.get('pool_labels', []))} pool label(s).",
+                        "success",
+                    )
+                else:
+                    flash(
+                        f"Uploaded {target.name} for {year_int}, but "
+                        f"auto-detect failed: "
+                        f"{analysis.get('error', 'unknown error')}. "
+                        "Fill in the layout fields by hand and click Save.",
+                        "warning",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                flash(f"Upload failed: {exc}", "error")
+            _save_state(state)
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "remove_per_year":
+            target_name = (request.form.get("filename") or "").strip()
+            files = mb.get("year_files") or []
+            removed = None
+            for e in files:
+                if e.get("filename") == target_name:
+                    removed = e
+                    break
+            if removed:
+                files.remove(removed)
+                if not removed.get("external"):
+                    sp = removed.get("saved_path") or ""
+                    if sp:
+                        try:
+                            p = Path(sp)
+                            if p.is_file():
+                                p.unlink()
+                        except Exception:  # noqa: BLE001
+                            pass
+                flash(f"Removed {target_name}.", "success")
+            else:
+                flash(f"File '{target_name}' not found.", "error")
+            mb["year_files"] = files
+            _save_state(state)
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "save_per_year_layout":
+            _persist_per_year_layout(mb, request.form)
+            _save_state(state)
+            flash("Saved per-year layout.", "success")
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "save_per_year_layout_and_next":
+            _persist_per_year_layout(mb, request.form)
+            _save_state(state)
+            flash("Saved per-year layout.", "success")
             return redirect(url_for("setup.step5_grades"))
 
         if action == "save_manual":
