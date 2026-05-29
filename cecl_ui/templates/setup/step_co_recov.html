@@ -173,16 +173,25 @@
             <tr>
               <th>#</th>
               {% for col in preview.columns %}
-                <th>{{ col.letter }} <span class="muted">({{ col.index }})</span></th>
+                <th>
+                  {{ col.letter }} <span class="muted">({{ col.index }})</span>
+                  {% if cfg.get('has_header') and col.header %}
+                    <div style="font-weight:600; margin-top:2px;">{{ col.header }}</div>
+                  {% elif col.header %}
+                    <div class="muted" style="font-weight:normal; margin-top:2px;">{{ col.header }}</div>
+                  {% endif %}
+                </th>
               {% endfor %}
             </tr>
           </thead>
           <tbody>
             {% for row in preview.rows %}
+              {% if not (cfg.get('has_header') and loop.first) %}
               <tr>
                 <td class="muted">{{ loop.index }}</td>
                 {% for v in row %}<td>{{ v }}</td>{% endfor %}
               </tr>
+              {% endif %}
             {% endfor %}
           </tbody>
         </table>
