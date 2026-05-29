@@ -4574,6 +4574,32 @@ def step3_historical():
         except Exception as exc:  # noqa: BLE001
             recov_history_view = {"error": str(exc), "row_count": 0,
                                   "months": [], "codes": [], "cells": {}}
+
+    # Auto-refresh CO/Recov column-inspect snapshots if they're stale
+    # (i.e. the cached `<kind>_inspect.filename` no longer matches the
+    # first uploaded file).  This catches the case where the user
+    # uploaded files A, B, C, then later replaced or scanned in a
+    # different set — without this guard the dropdowns keep auto-
+    # populating from the OLD inspection until the user clicks
+    # "Re-inspect" manually.
+    for _kind in ("co", "recov"):
+        _list_key = "monthly_co_files" if _kind == "co" else "monthly_recov_files"
+        _ins_key = "co_inspect" if _kind == "co" else "recov_inspect"
+        _files = (state.get("hist_scan") or {}).get(_list_key) or []
+        _ins = state.get(_ins_key) or {}
+        if not _files:
+            if _ins:
+                state.pop(_ins_key, None)
+                _save_state(state)
+            continue
+        _first_name = (_files[0].get("name") or "").strip()
+        _ins_name = (_ins.get("filename") or "").strip()
+        if _first_name and _first_name != _ins_name:
+            try:
+                _refresh_co_recov_inspect(state, _kind, force=True)
+            except Exception:  # noqa: BLE001
+                # Non-fatal — fall back to whatever inspect is cached.
+                pass
     view_mode = (request.args.get("matrix_view") or "balance").strip()
     if view_mode not in ("balance", "count"):
         view_mode = "balance"
