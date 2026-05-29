@@ -3776,12 +3776,14 @@ def step3_historical():
                     existing = set((hv or {}).get("months") or [])
                 except Exception:  # noqa: BLE001
                     existing = set()
+                db_months_before = set(existing)
                 # Also skip months already provided by uploaded balance
                 # sheet workbooks (annual or per-month). Without this,
                 # the 5300 backfill would happily re-fill quarter-ends
                 # that the user already covered via Excel uploads —
                 # 87 months would be filled even when the annual files
                 # already supply most of them.
+                upload_months: set[str] = set()
                 try:
                     mb_state = state.get("monthly_bal") or {}
                     source = state.get("hist_balance_source") or ""
@@ -3792,19 +3794,49 @@ def step3_historical():
                             mb_state.get("per_year_layout") or {},
                             label_to_pool,
                         )
-                        for period_iso in (ann.get("by_period") or {}).keys():
-                            existing.add(period_iso)
+                        upload_months = set(
+                            (ann.get("by_period") or {}).keys())
                     elif source == "monthly_balance_sheets":
                         pm = monthly_bal_parser.pool_balances_for_per_month_files(
                             mb_state.get("monthly_files") or [],
                             mb_state.get("per_month_layout") or {},
                             label_to_pool,
                         )
-                        for period_iso in (pm.get("by_period") or {}).keys():
-                            existing.add(period_iso)
+                        upload_months = set(
+                            (pm.get("by_period") or {}).keys())
+                    existing |= upload_months
                 except Exception:  # noqa: BLE001
                     # Non-fatal — fall back to history_matrix only.
                     pass
+
+                # Clean up: prior backfills may have written 5300-source
+                # rows for months that the user has now covered via
+                # uploaded balance-sheet workbooks. Those rows are
+                # harmless at report time (uploads win in
+                # _load_balance_history_from_db) but they pollute the
+                # DB and confuse the "X months already filled" math.
+                # Drop any 5300-source rows whose as_of_date matches an
+                # upload month.
+                cleanup_removed = 0
+                try:
+                    overlap = sorted(db_months_before & upload_months)
+                    if overlap:
+                        from sqlalchemy import text as _sql_text
+                        eng = extract_hist_processor._engine_lazy()
+                        with eng.begin() as conn:
+                            res = conn.execute(
+                                _sql_text(
+                                    "DELETE FROM loan_code_history "
+                                    "WHERE cu = :cu "
+                                    "AND source LIKE '5300:%' "
+                                    "AND as_of_date = ANY(:dates)"
+                                ),
+                                {"cu": cu, "dates": overlap},
+                            )
+                            cleanup_removed = int(res.rowcount or 0)
+                except Exception:  # noqa: BLE001
+                    cleanup_removed = 0
+
                 sb["last_run"] = solr_5300_backfill.backfill_missing_quarters(
                     cu, charter_int, sb["solr_url"], sb["core"],
                     period, months,
@@ -3833,6 +3865,18 @@ def step3_historical():
                         f"({lr.get('rows_written', 0)} row(s)); "
                         f"{skipped} skipped, {none_yet} quarter(s) had no Solr doc."
                     )
+                    if filled == 0:
+                        msg += (
+                            f" (Already covered: {len(upload_months)} month(s) "
+                            f"from uploaded workbooks, "
+                            f"{len(db_months_before - upload_months)} month(s) "
+                            f"from prior backfill/extracts.)"
+                        )
+                    if cleanup_removed:
+                        msg += (
+                            f" Removed {cleanup_removed} redundant 5300 row(s) "
+                            f"for month(s) now covered by uploaded workbooks."
+                        )
                     if stale:
                         msg += (
                             f" Removed {stale} stale row(s) for loan codes "
