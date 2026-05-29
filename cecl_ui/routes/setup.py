@@ -39,6 +39,7 @@ from flask import (
 from werkzeug.utils import secure_filename
 
 from cecl_ui.services import balance_check as balance_check_service, chargeoff_hist_processor, co_recov_parser, column_mapping_suggestions, config_service, delinquency_hist_processor, dq_extract_parser, extract_hist_processor, extract_hist_service, geo_service, hist_parser, impaired_parser, monthly_bal_parser, monthly_co_recov_aggregator, pipeline_service, recovery_hist_processor, sample_parser, solr_5300_backfill, solr_5300_co_backfill, solr_5300_delq_backfill, solr_5300_recov_backfill, warm_parser, wizard_drafts
+from cecl_ui.services import admin_defaults
 
 
 setup_bp = Blueprint("setup", __name__)
@@ -73,23 +74,25 @@ WIZARD_STEPS_WARM = [
 WIZARD_STEPS_NO_WARM = [
     ("identity",    "1. CU Identity"),
     ("loan_pools",  "2. Loan Pools"),
-    ("historical",  "3. Historical Data"),
-    ("dq_hist",      "4. Historical DQ"),
-    ("monthly_bal", "5. Monthly Balance File"),
-    ("grades",       "6. Credit Grades and Business Risk Ratings"),
-    ("credit_pull",  "7. Credit Pull"),
-    ("orig_score",  "8. Original Score Baseline"),
-    ("sample",      "9. Loan Data Extract(s)"),
-    ("columns",     "10. Column Mappings"),
-    ("pools",        "11. Loan Code Mapping"),
-    ("balance_check","12. Balance Adjustment"),
-    ("co_recov",     "13. Charge-Offs & Recoveries"),
-    ("impaired",     "14. Impaired Loans"),
-    ("files",        "15. File Format"),
-    ("economic",     "16. Economic Data"),
-    ("mgmt_adj",     "17. Mgmt Adjustments"),
-    ("reports",      "18. Reports"),
-    ("review",       "19. Review & Save"),
+    ("historical",  "3. Historical Balances"),
+    ("co_history",   "4. Historical Charge-Offs"),
+    ("recov_history","5. Historical Recoveries"),
+    ("dq_hist",      "6. Historical DQ"),
+    ("monthly_bal", "7. Monthly Balance File"),
+    ("grades",       "8. Credit Grades and Business Risk Ratings"),
+    ("credit_pull",  "9. Credit Pull"),
+    ("orig_score",  "10. Original Score Baseline"),
+    ("sample",      "11. Loan Data Extract(s)"),
+    ("columns",     "12. Column Mappings"),
+    ("pools",        "13. Loan Code Mapping"),
+    ("balance_check","14. Balance Adjustment"),
+    ("co_recov",     "15. Charge-Offs & Recoveries"),
+    ("impaired",     "16. Impaired Loans"),
+    ("files",        "17. File Format"),
+    ("economic",     "18. Economic Data"),
+    ("mgmt_adj",     "19. Mgmt Adjustments"),
+    ("reports",      "20. Reports"),
+    ("review",       "21. Review & Save"),
 ]
 
 # Steps shown when the user is in the CECL Simple (SCALE) model.
@@ -401,6 +404,22 @@ def _default_state() -> dict[str, Any]:
 def _save_state(state: dict[str, Any]) -> None:
     session[STATE_KEY] = state
     session.modified = True
+    # Auto-save to disk on every step so wizard work survives a session
+    # reset (e.g. clicking "+ New CU" or session expiry). Requires a
+    # short_name/credit_union to have been entered — Step 1 sets these,
+    # so anything past Step 1 auto-persists. Never raise: an auto-save
+    # failure must not block the request.
+    if not (state.get("short_name") or state.get("credit_union")):
+        return
+    try:
+        wizard_drafts.save_draft(
+            current_app.config["WORKSPACE_ROOT"],
+            state,
+            active_step=state.get("_active_step", "") or "",
+            model=state.get("model") or "migration",
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _wizard_ctx(active: str) -> dict[str, Any]:
@@ -435,6 +454,8 @@ STEP_ENDPOINTS: dict[str, str] = {
     "balances":      "setup.step3_balances",
     "baseline":      "setup.step3_baseline",
     "historical":    "setup.step3_historical",
+    "co_history":    "setup.step3a_co_history",
+    "recov_history": "setup.step3b_recov_history",
     "monthly_bal":   "setup.step5_monthly_bal",
     "grades":        "setup.step5_grades",
     "sample":        "setup.step2_sample",
@@ -1164,6 +1185,119 @@ def _save_monthly_bal_upload(file_storage) -> Path:
     return target
 
 
+def _ingest_annual_workbook(
+    state: dict,
+    mb: dict,
+    target: Path,
+    year_raw: str | int | None,
+) -> tuple[str, str]:
+    """Analyse a per-year balance workbook and register it on ``mb``.
+
+    Shared by Step 3 (Historical) and Step 5 (Monthly Balance File) so
+    the same workbook ingest behaviour applies on both pages. Returns
+    ``(category, message)`` where category is one of
+    ``success`` / ``warning`` / ``error`` suitable for ``flash``.
+    """
+    try:
+        analysis = monthly_bal_parser.analyse_per_year_file(target)
+    except Exception as exc:  # noqa: BLE001
+        return ("error", f"Could not analyse {target.name}: {exc}")
+
+    try:
+        year_int = int(year_raw) if year_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        year_int = None
+    if year_int is None:
+        year_int = analysis.get("detected_year")
+    if year_int is None:
+        return (
+            "error",
+            f"Saved {target.name}, but no calendar year was supplied "
+            "and none could be detected from the filename.",
+        )
+
+    entry = {
+        "filename": target.name,
+        "saved_path": str(target),
+        "year": int(year_int),
+        "period_count": len(analysis.get("period_columns") or []),
+    }
+    files = mb.setdefault("year_files", [])
+    files[:] = [e for e in files if e.get("filename") != entry["filename"]]
+    files.append(entry)
+    files.sort(key=lambda e: e.get("year") or 0)
+
+    if not analysis.get("ok"):
+        return (
+            "warning",
+            f"Uploaded {target.name} for {year_int}, but auto-detect "
+            f"failed: {analysis.get('error', 'unknown error')}. "
+            "Fill in the layout fields by hand and click Save.",
+        )
+
+    layout = mb.setdefault("per_year_layout", {})
+    layout["sheet"] = analysis.get("sheet", "")
+    layout["label_col"] = analysis.get("label_col", "B")
+    layout["header_row"] = analysis.get("header_row", 1)
+    layout["period_columns"] = analysis.get("period_columns", [])
+
+    existing_labels = list(mb.get("parsed_pool_labels") or [])
+    seen = {s.lower() for s in existing_labels}
+    for lab in analysis.get("pool_labels", []):
+        if lab.lower() not in seen:
+            existing_labels.append(lab)
+            seen.add(lab.lower())
+    mb["parsed_pool_labels"] = existing_labels
+
+    combined_map: dict[str, str] = {}
+    for _k, _v in (state.get("balance_title_map") or {}).items():
+        if _k:
+            combined_map[_k] = (_v or "")
+    _hpm = state.get("hist_pool_map") or {}
+    for _k, _v in (_hpm.get("mapping") or {}).items():
+        if _k and _k not in combined_map:
+            combined_map[_k] = (_v or "")
+    seeded, status = monthly_bal_parser.seed_pool_map(
+        existing_labels, combined_map)
+    existing_pm = mb.get("pool_map") or {}
+    for label, pool in seeded.items():
+        if label not in existing_pm or not existing_pm.get(label):
+            existing_pm[label] = pool
+    mb["pool_map"] = existing_pm
+    mb["label_status"] = status
+
+    # Merge auto-detected ACL history from this year file (if any) into
+    # mb["acl"]["history"]. Only seeds row/label when the user has not
+    # already set them so manual overrides are preserved.
+    acl_hist = analysis.get("acl_history") or {}
+    acl_row = analysis.get("acl_row")
+    if acl_hist or acl_row:
+        acl_state = mb.setdefault("acl", {})
+        if acl_row and not acl_state.get("row"):
+            acl_state["row"] = int(acl_row)
+            acl_state["label"] = analysis.get("acl_label", "")
+        if acl_hist:
+            existing_hist = acl_state.get("history") or {}
+            existing_hist.update(acl_hist)
+            acl_state["history"] = existing_hist
+    acl_msg = ""
+    if acl_hist:
+        acl_msg = (f" ACL history captured for {len(acl_hist)} "
+                   f"month-end(s) from row {acl_row} "
+                   f"({analysis.get('acl_label','')}).")
+
+    return (
+        "success",
+        f"Uploaded {target.name} for {year_int}: detected sheet "
+        f"{analysis.get('sheet')!r}, header row "
+        f"{analysis.get('header_row')}, label column "
+        f"{analysis.get('label_col')}, "
+        f"{entry['period_count']} month-end column(s), "
+        f"{len(analysis.get('pool_labels', []))} pool label(s)."
+        + acl_msg,
+    )
+
+
 def _save_acl_file_upload(file_storage) -> Path:
     _ACL_FILE_DIR.mkdir(parents=True, exist_ok=True)
     fn = secure_filename(file_storage.filename or "acl.xlsx")
@@ -1237,6 +1371,25 @@ def _persist_per_month_layout(mb: dict, form) -> None:
         layout["header_row"] = 1
     mb["pool_map"] = _parse_kv_rows(form, "map_label", "map_pool")
     mb["file_pattern"] = (form.get("file_pattern", "") or "").strip()
+    mb["notes"] = (form.get("notes", "") or "").strip()
+    _save_acl_form(mb, form)
+
+
+def _persist_per_year_layout(mb: dict, form) -> None:
+    """Persist the per_year layout + pool_map + notes + ACL from ``form``.
+
+    Used by both the ``save_per_year_layout`` (Save) and
+    ``save_per_year_layout_and_next`` (Save & Next) actions.
+    """
+    layout = mb.setdefault("per_year_layout", {})
+    layout["label_col"] = (
+        form.get("py_label_col", "B") or "B"
+    ).strip().upper()
+    try:
+        layout["header_row"] = int(form.get("py_header_row", "1") or 1)
+    except ValueError:
+        layout["header_row"] = 1
+    mb["pool_map"] = _parse_kv_rows(form, "map_label", "map_pool")
     mb["notes"] = (form.get("notes", "") or "").strip()
     _save_acl_form(mb, form)
 
@@ -1345,6 +1498,18 @@ def step5_monthly_bal():
     mb.setdefault("per_month_layout", {
         "sheet": "", "label_col": "", "balance_col": "", "header_row": 0,
     })
+    # Saved source folder for the "scan a folder for more months"
+    # workflow — remembered so the user can re-scan next quarter with
+    # a single click.
+    mb.setdefault("per_month_source_folder", "")
+    # Per-year mode: one workbook per calendar year, each with all 12
+    # month-end balances as columns. ``year_files`` entries:
+    # ``{filename, saved_path, year, period_count}``.
+    mb.setdefault("year_files", [])
+    mb.setdefault("per_year_layout", {
+        "sheet": "", "label_col": "", "header_row": 0,
+        "period_columns": [],
+    })
     # Manual-entry mode: explicit list of month-end dates plus the
     # {pool_name: {YYYY-MM-DD: float}} grid the user fills in.
     mb.setdefault("manual_months", [])
@@ -1403,6 +1568,21 @@ def step5_monthly_bal():
 
     if request.method == "POST":
         action = request.form.get("action", "")
+        # Enter-key submissions in a text input post the form without
+        # any submit-button value, so ``action`` is empty. Pick a sane
+        # default per source mode so the user's typed input is saved
+        # rather than dropped (or worse, the form defaulting to the
+        # first submit button which is "Back").
+        if not action:
+            src = (mb.get("source") or "single")
+            if src == "per_month":
+                action = "save_per_month_layout"
+            elif src == "per_year":
+                action = "save_per_year_layout"
+            elif src == "manual":
+                action = "save_manual"
+            else:
+                action = "save"
 
         if action == "upload":
             f = request.files.get("monthly_bal_file")
@@ -1574,6 +1754,68 @@ def step5_monthly_bal():
                 # Both flows: monthly_bal → grades → credit_pull → sample.
                 return redirect(url_for("setup.step5_grades"))
             flash("Saved monthly balance file settings.", "success")
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "acl_scan_balance_files":
+            # Re-scan all already-uploaded balance files (per-month or
+            # per-year) for the ACL/ALLL line and merge into
+            # mb["acl"]["history"]. Preserves any existing row override.
+            _save_acl_form(mb, request.form)
+            acl_state = mb.setdefault("acl", {})
+            hist = acl_state.get("history") or {}
+            scanned = 0
+            populated = 0
+            for yf in (mb.get("year_files") or []):
+                sp = yf.get("saved_path")
+                if not sp or not Path(sp).is_file():
+                    continue
+                scanned += 1
+                try:
+                    res = monthly_bal_parser.analyse_per_year_file(sp)
+                except Exception:  # noqa: BLE001
+                    continue
+                ah = res.get("acl_history") or {}
+                if ah:
+                    if not acl_state.get("row") and res.get("acl_row"):
+                        acl_state["row"] = int(res["acl_row"])
+                        acl_state["label"] = res.get("acl_label", "")
+                    for k, v in ah.items():
+                        hist[k] = float(v)
+                        populated += 1
+            for mf in (mb.get("monthly_files") or []):
+                sp = mf.get("saved_path")
+                period = mf.get("period")
+                if not sp or not Path(sp).is_file() or not period:
+                    continue
+                scanned += 1
+                try:
+                    res = monthly_bal_parser.analyse_per_month_file(sp)
+                except Exception:  # noqa: BLE001
+                    continue
+                if res.get("acl_value") is not None:
+                    if not acl_state.get("row") and res.get("acl_row"):
+                        acl_state["row"] = int(res["acl_row"])
+                        acl_state["label"] = res.get("acl_label", "")
+                    hist[period] = float(res["acl_value"])
+                    populated += 1
+            acl_state["history"] = hist
+            mb["acl"] = acl_state
+            state["monthly_bal"] = mb
+            _save_state(state)
+            if scanned == 0:
+                flash("No uploaded balance files to scan.", "warning")
+            elif populated == 0:
+                flash(
+                    f"Scanned {scanned} balance file(s), but no ACL/ALLL "
+                    "row was found. Use a Separate file or Manual entry.",
+                    "warning",
+                )
+            else:
+                flash(
+                    f"Scanned {scanned} balance file(s); captured "
+                    f"{populated} ACL value(s).",
+                    "success",
+                )
             return redirect(url_for("setup.step5_monthly_bal"))
 
         if action == "acl_refresh_row":
@@ -1760,13 +2002,32 @@ def step5_monthly_bal():
                         mb["pool_map"] = existing_pm
                         mb["label_status"] = status
 
+                        # Auto-capture ACL balance for this period.
+                        acl_row = analysis.get("acl_row")
+                        acl_value = analysis.get("acl_value")
+                        acl_msg = ""
+                        if acl_row and acl_value is not None:
+                            acl_state = mb.setdefault("acl", {})
+                            if not acl_state.get("row"):
+                                acl_state["row"] = int(acl_row)
+                                acl_state["label"] = analysis.get(
+                                    "acl_label", "")
+                            hist = acl_state.get("history") or {}
+                            hist[period] = float(acl_value)
+                            acl_state["history"] = hist
+                            acl_msg = (
+                                f" ACL ${acl_value:,.0f} captured "
+                                f"from row {acl_row} "
+                                f"({analysis.get('acl_label','')}).")
+
                         flash(
                             f"Uploaded {target.name} for {period}: parsed "
                             f"{len(analysis.get('parsed_pool_labels', []))} "
                             f"pool label(s) from sheet "
                             f"{analysis.get('sheet')!r} "
                             f"(labels in column {analysis.get('pool_name_col')}, "
-                            f"balances in column {analysis.get('balance_col')}).",
+                            f"balances in column {analysis.get('balance_col')})."
+                            + acl_msg,
                             "success",
                         )
                     else:
@@ -1793,19 +2054,153 @@ def step5_monthly_bal():
                     break
             if removed:
                 files.remove(removed)
-                # Best-effort disk cleanup.
-                sp = removed.get("saved_path") or ""
-                if sp:
-                    try:
-                        p = Path(sp)
-                        if p.is_file():
-                            p.unlink()
-                    except Exception:  # noqa: BLE001
-                        pass
+                # Best-effort disk cleanup — but only for files we
+                # actually copied into the managed upload dir. Folder-
+                # scanned entries reference the user's original file
+                # and must NEVER be deleted.
+                if not removed.get("external"):
+                    sp = removed.get("saved_path") or ""
+                    if sp:
+                        try:
+                            p = Path(sp)
+                            if p.is_file():
+                                p.unlink()
+                        except Exception:  # noqa: BLE001
+                            pass
                 flash(f"Removed {target_name}.", "success")
             else:
                 flash(f"File '{target_name}' not found.", "error")
             mb["monthly_files"] = files
+            _save_state(state)
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "scan_per_month_folder":
+            folder_raw = (request.form.get("scan_folder") or "").strip()
+            pattern_raw = (request.form.get("scan_pattern") or "").strip()
+            mb["per_month_source_folder"] = folder_raw
+            if pattern_raw:
+                mb["file_pattern"] = pattern_raw
+            if not folder_raw:
+                flash("Enter a folder path to scan.", "error")
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+            try:
+                folder = Path(folder_raw).expanduser()
+            except Exception as exc:  # noqa: BLE001
+                flash(f"Invalid folder path: {exc}", "error")
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+            if not folder.is_dir():
+                flash(
+                    f"Folder not found or not a directory: {folder}",
+                    "error",
+                )
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+
+            # Compile the regex once. Empty pattern = match every
+            # supported balance-sheet file.
+            try:
+                fp_rx = re.compile(pattern_raw, re.IGNORECASE) \
+                    if pattern_raw else None
+            except re.error as exc:
+                flash(f"Filename pattern is not a valid regex: {exc}",
+                      "error")
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+
+            supported_exts = {".xls", ".xlsx", ".xlsm", ".csv"}
+            files = mb.setdefault("monthly_files", [])
+            # Build period+filename indexes for de-dupe.
+            existing_by_name = {e.get("filename"): e for e in files}
+            existing_periods = {e.get("period") for e in files
+                                if e.get("period")}
+
+            scanned = 0
+            added: list[str] = []
+            replaced: list[str] = []
+            skipped_no_period: list[str] = []
+            skipped_parse: list[str] = []
+            for entry_path in sorted(folder.iterdir()):
+                if not entry_path.is_file():
+                    continue
+                if entry_path.suffix.lower() not in supported_exts:
+                    continue
+                if fp_rx is not None and not fp_rx.search(entry_path.name):
+                    continue
+                scanned += 1
+                analysis = monthly_bal_parser.analyse_per_month_file(
+                    entry_path)
+                period = analysis.get("detected_period") or ""
+                if not period:
+                    skipped_no_period.append(entry_path.name)
+                    continue
+                if not analysis.get("ok") and not analysis.get(
+                        "parsed_pool_labels"):
+                    # Parser failed AND we found nothing useful — still
+                    # add the entry so the importer can try with the
+                    # saved layout, but warn.
+                    skipped_parse.append(entry_path.name)
+                # Auto-capture ACL value into mb["acl"]["history"].
+                _acl_row = analysis.get("acl_row")
+                _acl_val = analysis.get("acl_value")
+                if _acl_row and _acl_val is not None:
+                    _acl_state = mb.setdefault("acl", {})
+                    if not _acl_state.get("row"):
+                        _acl_state["row"] = int(_acl_row)
+                        _acl_state["label"] = analysis.get("acl_label", "")
+                    _hist = _acl_state.get("history") or {}
+                    _hist[period] = float(_acl_val)
+                    _acl_state["history"] = _hist
+                entry = {
+                    "filename": entry_path.name,
+                    "saved_path": str(entry_path),
+                    "period": period,
+                    "external": True,
+                }
+                if entry_path.name in existing_by_name:
+                    files[:] = [e for e in files
+                                if e.get("filename") != entry_path.name]
+                    files.append(entry)
+                    replaced.append(entry_path.name)
+                elif period in existing_periods:
+                    # Skip duplicate periods so we don't double-count.
+                    continue
+                else:
+                    files.append(entry)
+                    existing_periods.add(period)
+                    added.append(entry_path.name)
+
+            files.sort(key=lambda e: e.get("period") or "")
+
+            msgs = []
+            if added:
+                msgs.append(f"added {len(added)} new file(s)")
+            if replaced:
+                msgs.append(f"refreshed {len(replaced)}")
+            if skipped_no_period:
+                msgs.append(
+                    f"skipped {len(skipped_no_period)} with no detectable "
+                    f"month-end (rename them to include YYYYMMDD or add "
+                    "an 'As of:' cell)"
+                )
+            if skipped_parse:
+                msgs.append(
+                    f"{len(skipped_parse)} file(s) couldn't be parsed; "
+                    "they'll be retried at run time using the saved layout"
+                )
+            if scanned == 0:
+                flash(
+                    f"Scanned {folder}: no matching files found "
+                    f"(pattern={pattern_raw!r}).",
+                    "warning",
+                )
+            else:
+                flash(
+                    f"Scanned {folder}: {scanned} file(s) matched; "
+                    + ", ".join(msgs) + ".",
+                    "success" if added or replaced else "warning",
+                )
             _save_state(state)
             return redirect(url_for("setup.step5_monthly_bal"))
 
@@ -1819,6 +2214,61 @@ def step5_monthly_bal():
             _persist_per_month_layout(mb, request.form)
             _save_state(state)
             flash("Saved per-month layout.", "success")
+            return redirect(url_for("setup.step5_grades"))
+
+        if action == "upload_per_year":
+            f = request.files.get("per_year_file")
+            year_raw = (request.form.get("per_year_year") or "").strip()
+            if not f or not f.filename:
+                flash("Choose an annual balance workbook to upload.", "error")
+                _save_state(state)
+                return redirect(url_for("setup.step5_monthly_bal"))
+            try:
+                target = _save_monthly_bal_upload(f)
+                category, message = _ingest_annual_workbook(
+                    state, mb, target, year_raw)
+                flash(message, category)
+            except Exception as exc:  # noqa: BLE001
+                flash(f"Upload failed: {exc}", "error")
+            _save_state(state)
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "remove_per_year":
+            target_name = (request.form.get("filename") or "").strip()
+            files = mb.get("year_files") or []
+            removed = None
+            for e in files:
+                if e.get("filename") == target_name:
+                    removed = e
+                    break
+            if removed:
+                files.remove(removed)
+                if not removed.get("external"):
+                    sp = removed.get("saved_path") or ""
+                    if sp:
+                        try:
+                            p = Path(sp)
+                            if p.is_file():
+                                p.unlink()
+                        except Exception:  # noqa: BLE001
+                            pass
+                flash(f"Removed {target_name}.", "success")
+            else:
+                flash(f"File '{target_name}' not found.", "error")
+            mb["year_files"] = files
+            _save_state(state)
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "save_per_year_layout":
+            _persist_per_year_layout(mb, request.form)
+            _save_state(state)
+            flash("Saved per-year layout.", "success")
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "save_per_year_layout_and_next":
+            _persist_per_year_layout(mb, request.form)
+            _save_state(state)
+            flash("Saved per-year layout.", "success")
             return redirect(url_for("setup.step5_grades"))
 
         if action == "save_manual":
@@ -2528,8 +2978,10 @@ def _refresh_co_recov_inspect(
             "loan_code":     suggested.get("code") or "",
             "amount":        suggested.get(suggested_field) or "",
             "date":          suggested.get("date") or existing.get("date") or "",
-            "member_number": existing.get("member_number") or "",
-            "loan_suffix":   existing.get("loan_suffix") or "",
+            "member_number": (existing.get("member_number")
+                              or suggested.get("member") or ""),
+            "loan_suffix":   (existing.get("loan_suffix")
+                              or suggested.get("account") or ""),
             "member_account": ma,
         }
     _save_state(state)
@@ -2954,15 +3406,38 @@ def _remove_hist_extract_anchor(state: dict[str, Any], name: str) -> bool:
 
 
 @setup_bp.route("/step/historical", methods=["GET", "POST"])
+@setup_bp.route("/step/co-history", methods=["GET", "POST"],
+                endpoint="step3a_co_history")
+@setup_bp.route("/step/recov-history", methods=["GET", "POST"],
+                endpoint="step3b_recov_history")
 def step3_historical():
     """Historical Data step — only shown for CUs without a WARM file.
 
-    Collects three file types:
-      - Historical loan balances by pool/type (required)
-      - Historical charge-offs (required)
-      - Historical recoveries (optional — checkbox to skip)
+    Split across three wizard steps (one URL each) so the page stays
+    navigable; the same view function handles all three by branching on
+    ``request.endpoint``:
+
+      - ``/step/historical``       — Historical loan balances by pool/type
+      - ``/step/co-history``       — Historical charge-offs
+      - ``/step/recov-history``    — Historical recoveries (optional)
     """
     state = _state()
+
+    # Which slice of the legacy combined page is this URL rendering?
+    _ep = request.endpoint or "setup.step3_historical"
+    if _ep.endswith("step3a_co_history"):
+        section = "co"
+        active_key = "co_history"
+        next_endpoint = "setup.step3b_recov_history"
+    elif _ep.endswith("step3b_recov_history"):
+        section = "recov"
+        active_key = "recov_history"
+        next_endpoint = "setup.step_dq_hist"
+    else:
+        section = "balances"
+        active_key = "historical"
+        next_endpoint = "setup.step3a_co_history"
+    back_endpoint = _ep if _ep.startswith("setup.") else f"setup.{_ep}"
 
     if request.method == "POST":
         action = request.form.get("action", "next")
@@ -2978,11 +3453,148 @@ def step3_historical():
                 "single_workbook",
                 "monthly_loan_extracts",
                 "monthly_balance_sheets",
+                "annual_balance_sheets",
             ):
                 state["hist_balance_source"] = choice
+                # Annual balance sheets feed the SAME pipeline as Step 5's
+                # per_year monthly-balance mode. Auto-flip the Step 5 source
+                # so the user only configures it in one place.
+                if choice == "annual_balance_sheets":
+                    mb = state.setdefault("monthly_bal", {})
+                    mb["source"] = "per_year"
                 _save_state(state)
-                return redirect(url_for("setup.step3_historical"))
-            flash("Please choose one of the three balance-source options.", "error")
+                return redirect(url_for(back_endpoint))
+            flash("Please choose one of the balance-source options.", "error")
+
+        elif action == "upload_annual_year":
+            mb = state.setdefault("monthly_bal", {})
+            mb["source"] = "per_year"
+            f = request.files.get("annual_year_file")
+            year_raw = (request.form.get("annual_year") or "").strip()
+            if not f or not f.filename:
+                flash("Choose an annual balance workbook to upload.", "error")
+            else:
+                try:
+                    target = _save_monthly_bal_upload(f)
+                    category, message = _ingest_annual_workbook(
+                        state, mb, target, year_raw)
+                    flash(message, category)
+                except Exception as exc:  # noqa: BLE001
+                    flash(f"Upload failed: {exc}", "error")
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "scan_annual_folder":
+            mb = state.setdefault("monthly_bal", {})
+            mb["source"] = "per_year"
+            folder_raw = (request.form.get("annual_folder") or "").strip()
+            folder = _normalize_folder_path(folder_raw)
+            mb["annual_folder"] = folder
+            if not folder:
+                flash("Enter a folder path to scan.", "error")
+            else:
+                try:
+                    p = Path(folder)
+                    if not p.is_dir():
+                        flash(
+                            f"Folder not found or not accessible: {folder}",
+                            "error",
+                        )
+                    else:
+                        candidates = [
+                            f for f in sorted(p.iterdir())
+                            if f.is_file()
+                            and f.suffix.lower() in (".xlsx", ".xlsm", ".xls")
+                            and not f.name.startswith(("~$", "."))
+                        ]
+                        if not candidates:
+                            flash(
+                                f"No .xlsx/.xls workbooks found in {folder}.",
+                                "warning",
+                            )
+                        else:
+                            import shutil
+                            ok_n, warn_n, err_n = 0, 0, 0
+                            for src in candidates:
+                                _MONTHLY_BAL_DIR.mkdir(
+                                    parents=True, exist_ok=True)
+                                fn = secure_filename(src.name)
+                                dest = _MONTHLY_BAL_DIR / fn
+                                try:
+                                    if dest.resolve() != src.resolve():
+                                        shutil.copy2(src, dest)
+                                except Exception:  # noqa: BLE001
+                                    dest = src
+                                category, _msg = _ingest_annual_workbook(
+                                    state, mb, dest, year_raw="")
+                                if category == "success":
+                                    ok_n += 1
+                                elif category == "warning":
+                                    warn_n += 1
+                                else:
+                                    err_n += 1
+                            parts = [f"Scanned {folder}:",
+                                     f"{ok_n} ingested"]
+                            if warn_n:
+                                parts.append(f"{warn_n} layout warning(s)")
+                            if err_n:
+                                parts.append(f"{err_n} skipped")
+                            flash(
+                                ", ".join(parts) + ".",
+                                "success" if ok_n else "warning",
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    flash(f"Folder scan failed: {exc}", "error")
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "remove_annual_year":
+            mb = state.setdefault("monthly_bal", {})
+            target_name = (request.form.get("filename") or "").strip()
+            files = mb.get("year_files") or []
+            removed = None
+            for e in files:
+                if e.get("filename") == target_name:
+                    removed = e
+                    break
+            if removed:
+                files.remove(removed)
+                sp = removed.get("saved_path") or ""
+                if sp and not removed.get("external"):
+                    try:
+                        p = Path(sp)
+                        if p.is_file():
+                            p.unlink()
+                    except Exception:  # noqa: BLE001
+                        pass
+                flash(f"Removed {target_name}.", "success")
+            else:
+                flash(f"File '{target_name}' not found.", "error")
+            mb["year_files"] = files
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "save_annual_pool_map":
+            mb = state.setdefault("monthly_bal", {})
+            pool_map = mb.setdefault("pool_map", {})
+            for key in list(request.form.keys()):
+                if key.startswith("pm_label_"):
+                    idx = key[len("pm_label_"):]
+                    label = (request.form.get(key) or "").strip()
+                    if not label:
+                        continue
+                    pool = (
+                        request.form.get(f"pm_pool_{idx}") or "").strip()
+                    # "__ignore__" sentinel from the dropdown means
+                    # intentionally excluded -- store as empty string.
+                    if pool == "__ignore__":
+                        pool = ""
+                    pool_map[label] = pool
+            mb["pool_map"] = pool_map
+            _save_state(state)
+            flash("Saved pool mapping for annual balance workbooks.",
+                  "success")
+            return redirect(url_for(back_endpoint))
 
         elif action == "set_hist_extract_target":
             he = _ensure_hist_extracts(state)
@@ -3307,6 +3919,67 @@ def step3_historical():
                     existing = set((hv or {}).get("months") or [])
                 except Exception:  # noqa: BLE001
                     existing = set()
+                db_months_before = set(existing)
+                # Also skip months already provided by uploaded balance
+                # sheet workbooks (annual or per-month). Without this,
+                # the 5300 backfill would happily re-fill quarter-ends
+                # that the user already covered via Excel uploads —
+                # 87 months would be filled even when the annual files
+                # already supply most of them.
+                upload_months: set[str] = set()
+                try:
+                    mb_state = state.get("monthly_bal") or {}
+                    source = state.get("hist_balance_source") or ""
+                    label_to_pool = mb_state.get("pool_map") or {}
+                    if source == "annual_balance_sheets":
+                        ann = monthly_bal_parser.pool_balances_for_per_year_files(
+                            mb_state.get("year_files") or [],
+                            mb_state.get("per_year_layout") or {},
+                            label_to_pool,
+                        )
+                        upload_months = set(
+                            (ann.get("by_period") or {}).keys())
+                    elif source == "monthly_balance_sheets":
+                        pm = monthly_bal_parser.pool_balances_for_per_month_files(
+                            mb_state.get("monthly_files") or [],
+                            mb_state.get("per_month_layout") or {},
+                            label_to_pool,
+                        )
+                        upload_months = set(
+                            (pm.get("by_period") or {}).keys())
+                    existing |= upload_months
+                except Exception:  # noqa: BLE001
+                    # Non-fatal — fall back to history_matrix only.
+                    pass
+
+                # Clean up: prior backfills may have written 5300-source
+                # rows for months that the user has now covered via
+                # uploaded balance-sheet workbooks. Those rows are
+                # harmless at report time (uploads win in
+                # _load_balance_history_from_db) but they pollute the
+                # DB and confuse the "X months already filled" math.
+                # Drop any 5300-source rows whose as_of_date matches an
+                # upload month.
+                cleanup_removed = 0
+                try:
+                    overlap = sorted(db_months_before & upload_months)
+                    if overlap:
+                        from sqlalchemy import text as _sql_text
+                        eng = extract_hist_processor._engine_lazy()
+                        with eng.begin() as conn:
+                            res = conn.execute(
+                                _sql_text(
+                                    "DELETE FROM loan_code_history "
+                                    "WHERE cu = :cu "
+                                    "AND source LIKE '5300:%' "
+                                    "AND as_of_date = ANY(:dates)"
+                                ),
+                                {"cu": cu, "dates": overlap},
+                            )
+                            cleanup_removed = int(res.rowcount or 0)
+                except Exception:  # noqa: BLE001
+                    cleanup_removed = 0
+
                 sb["last_run"] = solr_5300_backfill.backfill_missing_quarters(
                     cu, charter_int, sb["solr_url"], sb["core"],
                     period, months,
@@ -3335,6 +4008,18 @@ def step3_historical():
                         f"({lr.get('rows_written', 0)} row(s)); "
                         f"{skipped} skipped, {none_yet} quarter(s) had no Solr doc."
                     )
+                    if filled == 0:
+                        msg += (
+                            f" (Already covered: {len(upload_months)} month(s) "
+                            f"from uploaded workbooks, "
+                            f"{len(db_months_before - upload_months)} month(s) "
+                            f"from prior backfill/extracts.)"
+                        )
+                    if cleanup_removed:
+                        msg += (
+                            f" Removed {cleanup_removed} redundant 5300 row(s) "
+                            f"for month(s) now covered by uploaded workbooks."
+                        )
                     if stale:
                         msg += (
                             f" Removed {stale} stale row(s) for loan codes "
@@ -3885,7 +4570,7 @@ def step3_historical():
 
         elif action in ("next", "skip"):
             _save_state(state)
-            return redirect(url_for("setup.step_dq_hist"))
+            return redirect(url_for(next_endpoint))
 
         _save_state(state)
 
@@ -4003,6 +4688,32 @@ def step3_historical():
         except Exception as exc:  # noqa: BLE001
             recov_history_view = {"error": str(exc), "row_count": 0,
                                   "months": [], "codes": [], "cells": {}}
+
+    # Auto-refresh CO/Recov column-inspect snapshots if they're stale
+    # (i.e. the cached `<kind>_inspect.filename` no longer matches the
+    # first uploaded file).  This catches the case where the user
+    # uploaded files A, B, C, then later replaced or scanned in a
+    # different set — without this guard the dropdowns keep auto-
+    # populating from the OLD inspection until the user clicks
+    # "Re-inspect" manually.
+    for _kind in ("co", "recov"):
+        _list_key = "monthly_co_files" if _kind == "co" else "monthly_recov_files"
+        _ins_key = "co_inspect" if _kind == "co" else "recov_inspect"
+        _files = (state.get("hist_scan") or {}).get(_list_key) or []
+        _ins = state.get(_ins_key) or {}
+        if not _files:
+            if _ins:
+                state.pop(_ins_key, None)
+                _save_state(state)
+            continue
+        _first_name = (_files[0].get("name") or "").strip()
+        _ins_name = (_ins.get("filename") or "").strip()
+        if _first_name and _first_name != _ins_name:
+            try:
+                _refresh_co_recov_inspect(state, _kind, force=True)
+            except Exception:  # noqa: BLE001
+                # Non-fatal — fall back to whatever inspect is cached.
+                pass
     view_mode = (request.args.get("matrix_view") or "balance").strip()
     if view_mode not in ("balance", "count"):
         view_mode = "balance"
@@ -4029,7 +4740,8 @@ def step3_historical():
         solr_canonical_map=solr_5300_backfill.load_canonical_map(),
         co_canonical_map=solr_5300_co_backfill.load_canonical_map(),
         recov_canonical_map=solr_5300_recov_backfill.load_canonical_map(),
-        **_wizard_ctx("historical"),
+        section=section,
+        **_wizard_ctx(active_key),
     )
 
 
@@ -5239,6 +5951,8 @@ def _suggest_file_patterns(filename: str) -> dict[str, str] | None:
         (r"(20\d{2})[-_./ ](\d{2})(?!\d)",         r"(\d{4})[-_./ ](\d{2})"),
         # YYYYMMDD (8 contiguous digits starting 19xx/20xx)
         (r"(20\d{2})(\d{2})(\d{2})",               r"(\d{4})(\d{2})\d{2}"),
+        # MMDDYYYY (8 contiguous digits ending in 19xx/20xx)
+        (r"(\d{2})(\d{2})(20\d{2})",               r"\d{2}\d{2}(\d{4})"),
         # YYYYMM (6 contiguous digits)
         (r"(20\d{2})(\d{2})(?!\d)",                r"(\d{4})(\d{2})"),
         # MM-DD-YYYY
@@ -5248,10 +5962,22 @@ def _suggest_file_patterns(filename: str) -> dict[str, str] | None:
     date_match: _re.Match[str] | None = None
     for finder, dp in candidates:
         m = _re.search(finder, stem)
-        if m:
-            date_match = m
-            date_re = dp
-            break
+        if not m:
+            continue
+        # Validate the captured month-of-year is real (1-12). Year-first
+        # patterns capture month at group(2); month-first patterns at group(1).
+        try:
+            if finder.startswith("(20"):
+                if not 1 <= int(m.group(2)) <= 12:
+                    continue
+            else:
+                if not 1 <= int(m.group(1)) <= 12:
+                    continue
+        except (ValueError, IndexError):
+            continue
+        date_match = m
+        date_re = dp
+        break
     if not date_match:
         return None
 
@@ -6567,6 +7293,21 @@ def step_balance_check():
 @setup_bp.route("/step/grades", methods=["GET", "POST"])
 def step5_grades():
     state = _state()
+    # Global bounds (admin-configurable). Top grade's max auto-fills to
+    # ``score_ceiling``; bottom grade's min auto-fills to
+    # ``score_floor``. All other maxes derive as
+    # ``next_higher_grade.min - 1``.
+    _admin_cfg = admin_defaults.load() or {}
+    try:
+        score_floor = int(_admin_cfg.get("credit_score_min", 350))
+    except (TypeError, ValueError):
+        score_floor = 350
+    try:
+        score_ceiling = int(_admin_cfg.get("credit_score_max", 900))
+    except (TypeError, ValueError):
+        score_ceiling = 900
+    if score_floor >= score_ceiling:
+        score_floor, score_ceiling = 350, 900
     if request.method == "POST":
         action = request.form.get("action", "save")
 
@@ -6595,42 +7336,89 @@ def step5_grades():
         # Default action = save: parse rows, validate, store.
         labels = request.form.getlist("grade_label")
         mins = request.form.getlist("grade_min")
-        maxs = request.form.getlist("grade_max")
+        # Max is derived from admin bounds + adjacent mins; the form no
+        # longer collects it. Any legacy hidden ``grade_max`` values are
+        # ignored on purpose.
         # Preserve any existing reserve_rate values keyed by label so we
         # don't lose data the user set in a previous (now-removed) field.
         existing_rates = {
             (g.get("label") or "").strip(): float(g.get("reserve_rate") or 0.0)
             for g in (state.get("credit_grades") or [])
         }
-        grades: list[dict[str, Any]] = []
+        # Collect (label, min) pairs, dropping wholly-empty rows.
+        raw_rows: list[tuple[str, int | None]] = []
         errors: list[str] = []
-        for idx, (lbl, mn, mx) in enumerate(
-            zip(labels, mins, maxs), start=1
-        ):
+        for idx, (lbl, mn) in enumerate(zip(labels, mins), start=1):
             lbl = (lbl or "").strip()
-            if not lbl and not (mn or mx):
+            mn_raw = (mn or "").strip()
+            if not lbl and not mn_raw:
                 continue  # skip totally-empty row
             if not lbl:
                 errors.append(f"Row {idx}: label is required.")
                 continue
-            try:
-                mn_i = int(mn or 0)
-                mx_i = int(mx or 0)
-            except ValueError:
-                errors.append(f"Row {idx} ({lbl}): min/max must be integers.")
-                continue
-            if mn_i > mx_i:
+            mn_val: int | None
+            if mn_raw == "":
+                mn_val = None
+            else:
+                try:
+                    mn_val = int(mn_raw)
+                except ValueError:
+                    errors.append(
+                        f"Row {idx} ({lbl}): min Credit Score must be an integer."
+                    )
+                    continue
+            raw_rows.append((lbl, mn_val))
+
+        # The bottom grade's min is auto-set to the admin floor; if the
+        # user left the bottom row's min blank that's expected.
+        if raw_rows:
+            last_lbl, last_mn = raw_rows[-1]
+            if last_mn is None:
+                raw_rows[-1] = (last_lbl, score_floor)
+
+        # Every other row needs a min within bounds.
+        for idx, (lbl, mn_val) in enumerate(raw_rows, start=1):
+            if mn_val is None:
                 errors.append(
-                    f"Row {idx} ({lbl}): min Credit Score ({mn_i}) > "
-                    f"max Credit Score ({mx_i})."
+                    f"Row {idx} ({lbl}): enter a Min Credit Score "
+                    "(only the bottom grade may leave it blank)."
                 )
                 continue
-            grades.append({
-                "label": lbl,
-                "min_score": mn_i,
-                "max_score": mx_i,
-                "reserve_rate": existing_rates.get(lbl, 0.0),
-            })
+            if mn_val < score_floor or mn_val > score_ceiling:
+                errors.append(
+                    f"Row {idx} ({lbl}): Min Credit Score {mn_val} is "
+                    f"outside the admin bounds [{score_floor}, "
+                    f"{score_ceiling}]."
+                )
+
+        # Sort highest-min first (the table is rendered top-down by
+        # range), then derive each row's max.
+        if not errors and raw_rows:
+            raw_rows.sort(key=lambda t: (t[1] if t[1] is not None else -1),
+                          reverse=True)
+            grades: list[dict[str, Any]] = []
+            for i, (lbl, mn_val) in enumerate(raw_rows):
+                if i == 0:
+                    mx_val = score_ceiling
+                else:
+                    prev_min = raw_rows[i - 1][1]
+                    mx_val = (prev_min - 1) if prev_min is not None else score_ceiling
+                if i == len(raw_rows) - 1:
+                    mn_val = score_floor  # enforce floor on bottom
+                if mn_val is not None and mn_val > mx_val:
+                    errors.append(
+                        f"Row {i + 1} ({lbl}): Min {mn_val} must be at "
+                        f"most {mx_val} (one less than the next-higher "
+                        "grade's Min)."
+                    )
+                grades.append({
+                    "label": lbl,
+                    "min_score": mn_val if mn_val is not None else score_floor,
+                    "max_score": mx_val,
+                    "reserve_rate": existing_rates.get(lbl, 0.0),
+                })
+        else:
+            grades = []
 
         if errors:
             for e in errors:
@@ -6638,36 +7426,25 @@ def step5_grades():
             return render_template(
                 "setup/step5_grades.html",
                 draft_grades=[
-                    {"label": (l or "").strip(), "min_score": m, "max_score": x,
+                    {"label": (l or "").strip(),
+                     "min_score": (int(m) if (m or "").strip().lstrip("-").isdigit() else None),
+                     "max_score": None,
                      "reserve_rate": existing_rates.get((l or "").strip(), 0.0)}
-                    for l, m, x in zip(labels, mins, maxs)
+                    for l, m in zip(labels, mins)
                 ],
+                admin_min=score_floor,
+                admin_max=score_ceiling,
                 **_wizard_ctx("grades"),
             )
 
         if not grades:
             flash("Define at least one credit-grade band.", "error")
             return render_template(
-                "setup/step5_grades.html", **_wizard_ctx("grades")
+                "setup/step5_grades.html",
+                admin_min=score_floor,
+                admin_max=score_ceiling,
+                **_wizard_ctx("grades"),
             )
-
-        # Soft warnings: overlapping ranges and gap detection.
-        sorted_g = sorted(grades, key=lambda g: g["min_score"])
-        for a, b in zip(sorted_g, sorted_g[1:]):
-            if b["min_score"] <= a["max_score"]:
-                flash(
-                    f"Bands '{a['label']}' (max {a['max_score']}) and "
-                    f"'{b['label']}' (min {b['min_score']}) overlap — loans in "
-                    f"the overlap will use whichever band sorts first.",
-                    "info",
-                )
-            elif b["min_score"] > a["max_score"] + 1:
-                flash(
-                    f"Gap between '{a['label']}' (max {a['max_score']}) and "
-                    f"'{b['label']}' (min {b['min_score']}) — scores in "
-                    f"between will fall through to no_score_label.",
-                    "info",
-                )
 
         state["credit_grades"] = grades
         state["no_score_label"] = request.form.get(
@@ -6691,7 +7468,12 @@ def step5_grades():
         _save_state(state)
         # Both flows: grades → credit_pull → sample.
         return redirect(url_for("setup.step6_credit_pull"))
-    return render_template("setup/step5_grades.html", **_wizard_ctx("grades"))
+    return render_template(
+        "setup/step5_grades.html",
+        admin_min=score_floor,
+        admin_max=score_ceiling,
+        **_wizard_ctx("grades"),
+    )
 
 
 # =================================================================
@@ -7598,8 +8380,10 @@ def _copy_sample_uploads_to_raw(
     into ``Raw_Uploads/<short_name>/`` so the report engine can find them.
 
     Returns (files_copied, list_of_filenames_copied). Existing files in the
-    destination are left in place (we never overwrite, to preserve real
-    quarterly drops from the CU).
+    destination are left in place UNLESS the wizard-uploaded source is
+    newer (preserves real quarterly drops from the CU while still
+    honoring intentional re-uploads from the wizard, e.g. when the
+    user replaces a wrong impaired-loans file mid-setup).
     """
     dest_dir = config_service.raw_uploads_dir(workspace_root) / short_name
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -7620,7 +8404,11 @@ def _copy_sample_uploads_to_raw(
                 continue
             target = dest_dir / src.name
             if target.exists():
-                continue
+                try:
+                    if src.stat().st_mtime <= target.stat().st_mtime:
+                        continue
+                except OSError:
+                    continue
             try:
                 shutil.copy2(src, target)
             except OSError:

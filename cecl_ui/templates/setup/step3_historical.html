@@ -2,6 +2,14 @@
 {% block title %}Historical Data{% endblock %}
 {% block content %}
 {% include "setup/_stepper.html" %}
+{# `section` is passed in by the view ('balances' | 'co' | 'recov'); legacy
+   callers may render with no value -> treat as 'all'. #}
+{% set section = section or 'all' %}
+{# Shared variables referenced by both the CO and Recov sections so they
+   stay defined even when one section is rendered in isolation. #}
+{% set he = state.hist_extracts or {} %}
+{% set tgt_period = he.get('target_period') or '' %}
+{% set tgt_months = he.get('history_months') or '' %}
 
 {# Renders a "what's loaded" month-by-loan-code matrix card identical in
    style to the Balances history-matrix card. ``hv`` is the dict returned
@@ -275,14 +283,22 @@
     historical period used by the CECL model for trending, loss-rate
     calibration, and comparison reporting.
   </p>
+  {% if section == 'all' %}
   <p class="muted">
     <strong>Balances</strong> and <strong>Charge-offs</strong> are required.
     <strong>Recoveries</strong> are optional &mdash; check the box below if
     this CU has no recovery history.
   </p>
+  {% elif section == 'balances' %}
+  <p class="muted">This step collects the monthly <strong>loan balances by pool / type</strong>. Charge-offs and recoveries are now collected in their own steps.</p>
+  {% elif section == 'co' %}
+  <p class="muted">This step collects the <strong>historical charge-offs</strong>. Balances are configured in the previous step; recoveries in the next.</p>
+  {% elif section == 'recov' %}
+  <p class="muted">This step collects the <strong>historical recoveries</strong> (optional &mdash; check the box below if this CU has no recovery history).</p>
+  {% endif %}
 </div>
 
-{# â”€â”€ 1. Historical Balances â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ #}
+{% if section in ('all', 'balances') %}
 {% set hist_source = state.hist_balance_source or 'single_workbook' %}
 <div class="card">
   <h3>1. Historical Loan Balances by Pool / Type
@@ -327,6 +343,17 @@
           <span class="muted">One balance sheet per month. The wizard will
           pull pool balances out of each balance sheet to build the
           historical database.</span>
+        </span>
+      </label>
+      <label class="radio-option" style="display:flex; gap:8px; align-items:flex-start;">
+        <input type="radio" name="hist_balance_source" value="annual_balance_sheets"
+               onchange="this.form.submit()"
+               {% if hist_source == 'annual_balance_sheets' %}checked{% endif %}>
+        <span>
+          <strong>Annual balance sheet workbooks (one file per year)</strong><br>
+          <span class="muted">One workbook per year, with all 12 months as
+          columns (e.g. <code>2024 Balance Sheets.xlsx</code>). The wizard
+          will read pool balances out of each year's workbook.</span>
         </span>
       </label>
     </div>
@@ -669,28 +696,6 @@
         var modes = (row.getAttribute('data-show-modes') || '').split(',');
         row.style.display = (modes.indexOf(mode) >= 0) ? '' : 'none';
       });
-    }
-
-    // Show/hide the suffix-length / delimiter / Account-column inputs for
-    // the per-file CO/Recov Column Mapping cards.  ``which`` is "co" or
-    // "recov".
-    function updateCoRecovMode(which) {
-      var picked = document.querySelector(
-        'input[name="' + which + '_member_account_mode"]:checked'
-      );
-      if (!picked) return;
-      var mode = picked.value;
-      var suffixLabel = document.getElementById(which + '-ma-suffix-len');
-      var delimLabel  = document.getElementById(which + '-ma-delim');
-      var accountFld  = document.getElementById(which + '-fld-account');
-      if (suffixLabel)
-        suffixLabel.style.display =
-          (mode === 'fixed_suffix') ? 'inline-block' : 'none';
-      if (delimLabel)
-        delimLabel.style.display =
-          (mode === 'delimiter') ? 'inline-block' : 'none';
-      if (accountFld)
-        accountFld.style.display = (mode === 'split') ? '' : 'none';
     }
     </script>
     {% endif %}
@@ -1324,6 +1329,161 @@
       You'll be able to drop in one balance sheet per month and the wizard
       will pull pool balances out of each one to build the historical database.
     </div>
+  {% elif hist_source == 'annual_balance_sheets' %}
+    {% set mb_ann = state.monthly_bal or {} %}
+    {% set yfiles = mb_ann.year_files or [] %}
+    {% set ann_layout = mb_ann.per_year_layout or {} %}
+    {% set ann_pool_map = mb_ann.pool_map or {} %}
+    {% set ann_labels = mb_ann.parsed_pool_labels or [] %}
+    {% set ann_folder = mb_ann.annual_folder or '' %}
+
+    <div class="flash info" style="margin-top:16px;">
+      <strong>Annual balance sheet workbooks.</strong>
+      Upload a sample workbook to auto-detect the layout, then point us at
+      the folder containing every year's workbook so we can pull the full
+      historical balance history in one pass. The same data feeds Step 5
+      (current quarter) automatically.
+    </div>
+
+    {# -- Upload a single sample year (for layout detection or one-offs) -- #}
+    <form method="post" enctype="multipart/form-data" style="margin-top:16px;">
+      <input type="hidden" name="action" value="upload_annual_year">
+      <h4 style="margin-bottom:6px;">Upload one annual workbook</h4>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <label style="flex:1 1 280px;">Annual balance workbook
+          <input type="file" name="annual_year_file"
+                 accept=".xlsx,.xlsm,.xls">
+          <span class="help">e.g. <code>2024 Balance Sheets.xlsx</code></span>
+        </label>
+        <label style="flex:0 0 140px;">Year (optional)
+          <input type="number" name="annual_year" min="2000" max="2099"
+                 placeholder="auto-detect">
+          <span class="help">Leave blank to auto-detect from filename.</span>
+        </label>
+        <button class="btn btn-secondary" type="submit">Upload Sample</button>
+      </div>
+    </form>
+
+    {# -- Bulk folder scan -- #}
+    <form method="post" style="margin-top:16px;">
+      <input type="hidden" name="action" value="scan_annual_folder">
+      <h4 style="margin-bottom:6px;">Or scan a folder for all yearly workbooks</h4>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <label style="flex:1 1 480px;">Folder path
+          <input type="text" name="annual_folder"
+                 value="{{ ann_folder }}"
+                 placeholder="Z:\Shared\Clients\... \Historical Files\Balance Sheets"
+                 style="font-family: Consolas, monospace;">
+          <span class="help">Every <code>.xlsx</code> / <code>.xls</code> file
+          in this folder will be parsed as one calendar year.</span>
+        </label>
+        <button class="btn btn-secondary" type="submit">Scan Folder</button>
+      </div>
+    </form>
+
+    {# -- Files table -- #}
+    {% if yfiles %}
+      <h4 style="margin-top:20px; margin-bottom:6px;">
+        Ingested annual workbooks ({{ yfiles|length }})
+      </h4>
+      <table class="data-table" style="width:100%; margin-top:4px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;">File</th>
+            <th style="text-align:left;">Year</th>
+            <th style="text-align:left;">Month-end columns</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for yf in yfiles %}
+            <tr>
+              <td><code>{{ yf.filename }}</code></td>
+              <td>{{ yf.year }}</td>
+              <td>{{ yf.period_count or 0 }}</td>
+              <td style="text-align:right;">
+                <form method="post" style="display:inline;">
+                  <input type="hidden" name="action" value="remove_annual_year">
+                  <input type="hidden" name="filename" value="{{ yf.filename }}">
+                  <button type="submit" class="btn btn-link" style="color:#a33;">
+                    Remove
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    {# -- Detected layout summary -- #}
+    {% if ann_layout.sheet %}
+      <div class="muted" style="margin-top:12px;">
+        Detected layout: sheet <code>{{ ann_layout.sheet }}</code>,
+        header row {{ ann_layout.header_row }}, label column
+        <code>{{ ann_layout.label_col }}</code>.
+      </div>
+    {% endif %}
+
+    {# -- Pool mapping table -- #}
+    {% set all_labels = [] %}
+    {% for lbl in ann_labels %}{% if lbl and lbl not in all_labels %}{% set _ = all_labels.append(lbl) %}{% endif %}{% endfor %}
+    {% for lbl in ann_pool_map.keys() %}{% if lbl and lbl not in all_labels %}{% set _ = all_labels.append(lbl) %}{% endif %}{% endfor %}
+    {% if all_labels %}
+      <form method="post" style="margin-top:16px;">
+        <input type="hidden" name="action" value="save_annual_pool_map">
+        <h4 style="margin-bottom:6px;">Pool mapping</h4>
+        <p class="muted" style="margin-top:0;">
+          Map each label found in the workbook's label column to one of the
+          pools defined on Step 2 &mdash; Loan Pools. Choose
+          <em>&mdash; ignore &mdash;</em> to exclude.
+        </p>
+        <table class="data-table" style="width:100%; max-width:780px;">
+          <thead>
+            <tr>
+              <th style="text-align:left;">Workbook label</th>
+              <th style="text-align:left;">Maps to pool</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for lbl in all_labels %}
+              {% set current = ann_pool_map.get(lbl, '') %}
+              <tr>
+                <td>
+                  <input type="hidden" name="pm_label_{{ loop.index0 }}" value="{{ lbl }}">
+                  <code>{{ lbl }}</code>
+                </td>
+                <td>
+                  <select name="pm_pool_{{ loop.index0 }}" style="width:100%;">
+                    <option value="__ignore__"
+                      {% if not current %}selected{% endif %}>
+                      &mdash; ignore &mdash;
+                    </option>
+                    {% for pool in step2_pools %}
+                      <option value="{{ pool }}"
+                        {% if current == pool %}selected{% endif %}>
+                        {{ pool }}
+                      </option>
+                    {% endfor %}
+                    {# If the saved value isn't in step2_pools (e.g. pool
+                       was renamed/removed), keep it visible so the user
+                       can re-pick rather than silently lose it. #}
+                    {% if current and current not in step2_pools %}
+                      <option value="{{ current }}" selected>
+                        {{ current }} (not in Step 2)
+                      </option>
+                    {% endif %}
+                  </select>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <button class="btn btn-secondary" type="submit" style="margin-top:8px;">
+          Save Pool Mapping
+        </button>
+      </form>
+    {% endif %}
   {% endif %}
 </div>
 
@@ -1332,6 +1492,9 @@
 {% set sb_test = sb.get('last_test') %}
 {% set sb_run = sb.get('last_run') %}
 {% set cmap = solr_canonical_map or [] %}
+{% set _he_1a = state.hist_extracts or {} %}
+{% set _tp_1a = _he_1a.get('target_period') or '' %}
+{% set _hm_1a = _he_1a.get('history_months') or '' %}
 <div class="card" style="border:1px solid #c9d6e8; background:#f4f8ff;">
   <h3 style="margin-top:0;">
     1a. Fill missing months from NCUA 5300
@@ -1353,6 +1516,46 @@
     available from 5300 data &mdash; those columns will be empty for
     backfilled months.
   </p>
+
+  {# Target period + history depth — required for the backfill action.
+     Only shown directly here when the user isn't on the monthly_loan_extracts
+     source (which has its own copy of this form above). For annual /
+     single-workbook / monthly-balance-sheet sources, this is the only
+     place to set them. #}
+  {% if hist_source != 'monthly_loan_extracts' %}
+  <form method="post" style="margin:8px 0 14px 0;
+        padding:10px 14px; background:#fff; border:1px solid #c9d6e8;
+        border-radius:6px;">
+    <input type="hidden" name="action" value="set_hist_extract_target">
+    <div style="display:flex; gap:16px; flex-wrap:wrap;
+          align-items:flex-end;">
+      <label style="flex:1; min-width:220px;">
+        <strong>Target reporting period</strong>
+        <input type="date" name="target_period"
+               value="{{ _tp_1a }}">
+        <span class="help">Pick the last day of the month you're
+        reporting on (e.g. 2026-03-31).</span>
+      </label>
+      <label style="flex:0 0 160px;">
+        <strong>History depth (months)</strong>
+        <input type="number" name="history_months" min="1" max="240"
+               value="{{ _hm_1a or 84 }}">
+        <span class="help">Default 84 (7 years).</span>
+      </label>
+      <button class="btn btn-secondary" type="submit"
+              style="margin-bottom:18px;">
+        Save target &amp; depth
+      </button>
+    </div>
+    {% if not _tp_1a %}
+      <div class="flash warning" style="margin-top:8px;">
+        Set the target reporting period and click <em>Save</em> before
+        running the backfill below.
+      </div>
+    {% endif %}
+  </form>
+  {% endif %}
+
   {% set _ch = state.charter_number or '' %}
   {% if not _ch %}
     <div class="flash warning" style="margin:8px 0;">
@@ -1608,7 +1811,9 @@
   {% endif %}
 </div>
 {% endif %}
+{% endif %}{# section in ('all','balances') #}
 
+{% if section in ('all', 'co') %}
 {# -- 2. Historical Charge-Offs -------------------------------------------- #}
 {% set co_src = state.get('hist_co_source') or 'single_workbook' %}
 {% set co_files = (state.hist_scan or {}).get('co_files', []) %}
@@ -2182,7 +2387,9 @@
         'Nothing in the charge-off history database yet for this CU. '
         'Click Aggregate above to load the first month(s).') }}
 </div>
+{% endif %}{# section in ('all','co') #}
 
+{% if section in ('all', 'recov') %}
 {# -- 3. Historical Recoveries ------------------------------------------- #}
 {% set recov_src = state.get('hist_recov_source') or 'single_workbook' %}
 {% set recov_files = (state.hist_scan or {}).get('recov_files', []) %}
@@ -2762,41 +2969,64 @@
         'Nothing in the recovery history database yet for this CU. '
         'Click Aggregate above to load the first month(s).') }}
 </div>
+{% endif %}{# section in ('all','recov') #}
 
-{# â”€â”€ Navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ #}
+{# Navigation: per-section Back / Next destinations + completeness check. #}
+{% set hist_scan = state.hist_scan or {} %}
+{% set _mb_nav = state.monthly_bal or {} %}
+{# Balances may arrive via several sources depending on hist_balance_source:
+     - monthly_loan_extracts -> history_view.row_count > 0
+     - annual_balance_sheets -> monthly_bal.year_files
+     - monthly_balance_sheets -> monthly_bal.monthly_files (per-month)
+     - single_workbook / legacy folder scan -> hist_scan.monthly_files     Treat the section as complete if ANY of these supplied data. #}
+{% set has_balances = hist_scan.get('monthly_files')
+      or (history_view and history_view.row_count)
+      or _mb_nav.get('year_files')
+      or _mb_nav.get('monthly_files') %}
+{% set has_co = hist_scan.get('co_files')
+      or hist_scan.get('monthly_co_files')
+      or (co_history_view and co_history_view.row_count) %}
+{% set has_recov = hist_scan.get('recov_files')
+      or hist_scan.get('monthly_recov_files')
+      or state.no_hist_recoveries
+      or (recov_history_view and recov_history_view.row_count) %}
+{% set hpm2 = state.hist_pool_map or {} %}
+{% set mapping_required = hist_scan.get('monthly_files')
+      and (hpm2.get('labels') | length) > 0 %}
+{% set ns = namespace(complete=True) %}
+{% if mapping_required %}
+  {% for lbl in hpm2.get('labels', []) %}
+    {% if not (hpm2.get('mapping') or {}).get(lbl) %}
+      {% set ns.complete = False %}
+    {% endif %}
+  {% endfor %}
+{% endif %}
+
+{% if section == 'balances' %}
+  {% set _back_url = url_for('setup.step_loan_pools') %}
+  {% set _next_label = 'Save & Next: Historical Charge-Offs &rarr;' %}
+  {% set _section_complete = has_balances and ns.complete %}
+{% elif section == 'co' %}
+  {% set _back_url = url_for('setup.step3_historical') %}
+  {% set _next_label = 'Save & Next: Historical Recoveries &rarr;' %}
+  {% set _section_complete = has_co %}
+{% elif section == 'recov' %}
+  {% set _back_url = url_for('setup.step3a_co_history') %}
+  {% set _next_label = 'Save & Next: Historical DQ &rarr;' %}
+  {% set _section_complete = has_recov %}
+{% else %}
+  {% set _back_url = url_for('setup.step_loan_pools') %}
+  {% set _next_label = 'Save & Next: Monthly Balance File &rarr;' %}
+  {% set _section_complete = has_balances and has_co and has_recov and ns.complete %}
+{% endif %}
+
 <div class="card">
   <form method="post">
     <div class="btn-row">
-      <a class="btn btn-secondary" href="{{ url_for('setup.step_loan_pools') }}">&larr; Back</a>
-
-      {% set hist_scan = state.hist_scan or {} %}
-      {# Consider the step satisfied if EITHER file uploads completed OR
-         rows already exist in the history DB (e.g. populated via the
-         5300 backfill). #}
-      {% set has_balances = hist_scan.get('monthly_files')
-            or (history_view and history_view.row_count) %}
-      {% set has_co = hist_scan.get('co_files')
-            or (co_history_view and co_history_view.row_count) %}
-      {% set has_recov = hist_scan.get('recov_files')
-            or state.no_hist_recoveries
-            or (recov_history_view and recov_history_view.row_count) %}
-
-      {# Mapping is required once a balance file has been uploaded. #}
-      {% set hpm2 = state.hist_pool_map or {} %}
-      {% set mapping_required = hist_scan.get('monthly_files')
-            and (hpm2.get('labels') | length) > 0 %}
-      {% set ns = namespace(complete=True) %}
-      {% if mapping_required %}
-        {% for lbl in hpm2.get('labels', []) %}
-          {% if not (hpm2.get('mapping') or {}).get(lbl) %}
-            {% set ns.complete = False %}
-          {% endif %}
-        {% endfor %}
-      {% endif %}
-
-      {% if has_balances and has_co and has_recov and ns.complete %}
+      <a class="btn btn-secondary" href="{{ _back_url }}">&larr; Back</a>
+      {% if _section_complete %}
         <button class="btn btn-primary" type="submit" name="action" value="next">
-          Save &amp; Next: Monthly Balance File &rarr;
+          {{ _next_label | safe }}
         </button>
       {% else %}
         <button class="btn btn-secondary" type="submit" name="action" value="skip">
@@ -2806,4 +3036,49 @@
     </div>
   </form>
 </div>
+
+{# CO/Recov column-mapping JS — placed at end of block so it loads for ALL
+   hist_source choices (single_workbook / monthly_loan_extracts /
+   monthly_balance_sheets / annual_balance_sheets). The CO mapping form
+   itself renders at any hist_source when co_src == 'monthly_files'. #}
+<script>
+(function () {
+  function updateCoRecovMode(which) {
+    var picked = document.querySelector(
+      'input[name="' + which + '_member_account_mode"]:checked'
+    );
+    if (!picked) return;
+    var mode = picked.value;
+    var suffixLabel = document.getElementById(which + '-ma-suffix-len');
+    var delimLabel  = document.getElementById(which + '-ma-delim');
+    var accountFld  = document.getElementById(which + '-fld-account');
+    if (suffixLabel)
+      suffixLabel.style.display =
+        (mode === 'fixed_suffix') ? 'inline-block' : 'none';
+    if (delimLabel)
+      delimLabel.style.display =
+        (mode === 'delimiter') ? 'inline-block' : 'none';
+    if (accountFld)
+      accountFld.style.display = (mode === 'split') ? '' : 'none';
+  }
+  window.updateCoRecovMode = updateCoRecovMode;
+  function bindRadios(which) {
+    var radios = document.querySelectorAll(
+      'input[name="' + which + '_member_account_mode"]'
+    );
+    radios.forEach(function (r) {
+      r.addEventListener('change', function () {
+        updateCoRecovMode(which);
+      });
+    });
+    updateCoRecovMode(which);
+  }
+  function init() { bindRadios('co'); bindRadios('recov'); }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
 {% endblock %}

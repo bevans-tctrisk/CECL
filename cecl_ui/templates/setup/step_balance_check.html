@@ -174,16 +174,38 @@
   {% if comparison.loan_summary.unmapped_codes %}
     <h4 style="margin-top:16px;">Raw codes not in your pool map</h4>
     <p class="muted">
-      Add these codes on the Loan Code Mapping step (or upload an updated
-      pool-map file there) so they roll up into the right pool.
+      Pick a pool for each code below to add it to your pool map &mdash;
+      saves immediately and refreshes the totals. (You can also bulk-edit
+      these on the Loan Code Mapping step.)
     </p>
     <table class="table">
-      <thead><tr><th>Code</th><th style="text-align:right;">Balance</th></tr></thead>
+      <thead>
+        <tr>
+          <th>Code</th>
+          <th style="text-align:right;">Balance</th>
+          <th>Assign to pool</th>
+          <th></th>
+        </tr>
+      </thead>
       <tbody>
       {% for code, bal in comparison.loan_summary.unmapped_codes[:30] %}
         <tr>
           <td><code>{{ code }}</code></td>
           <td style="text-align:right;">${{ '{:,.2f}'.format(bal) }}</td>
+          <td colspan="2">
+            <form method="post" style="display:flex; gap:6px; margin:0;">
+              <input type="hidden" name="action" value="remap_code">
+              <input type="hidden" name="code" value="{{ code }}">
+              <select name="new_pool" style="min-width:200px;">
+                <option value="">(unmapped &mdash; use default)</option>
+                {% for choice in pool_choices %}
+                  <option value="{{ choice }}">{{ choice }}</option>
+                {% endfor %}
+              </select>
+              <button class="btn btn-secondary" type="submit"
+                      style="padding:2px 10px;">Save &amp; refresh</button>
+            </form>
+          </td>
         </tr>
       {% endfor %}
       </tbody>

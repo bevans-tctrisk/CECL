@@ -25,6 +25,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from cecl_engine import assign_credit_grade, build_grade_order
+from import_data import derive_member_account, _normalize_col_map_for_no_header
 
 load_dotenv()
 # Honour CECL_WORKSPACE_ROOT so the data root can be decoupled from the
@@ -736,6 +737,205 @@ def _sheet_all_loans(wb, cu, snap, df):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Raw-extract enrichment (used when no WARM 'All Loans' tab exists)
+# ═══════════════════════════════════════════════════════════════════
+# Fields we want to pull from the configured loan_data_extracts (or the
+# top-level column_mappings) when only the slim monthly_loan_data row is
+# available. Each value is the column_mappings key whose mapped column
+# holds the raw value for that field.
+_EXTRACT_FIELDS = [
+    'loan_type',                # from loan_pool_code
+    'open_date',
+    'interest_rate',
+    'days_delinquent',
+    'original_loan_amount',
+    'total_available_credit',
+]
+
+
+def _resolve_extract_path(file_pattern, search_dirs):
+    """Find the first file in any search_dir whose name matches file_pattern."""
+    if not file_pattern:
+        return None
+    try:
+        rx = re.compile(file_pattern)
+    except re.error:
+        return None
+    for sdir in search_dirs:
+        if not sdir or not os.path.isdir(sdir):
+            continue
+        for root, _dirs, files in os.walk(sdir):
+            for f in files:
+                if f.startswith('~$') or f.upper().startswith('DNU'):
+                    continue
+                if rx.search(f):
+                    return os.path.join(root, f)
+    return None
+
+
+def _split_suffix_for_row(member_only, full_account, ma_cfg, raw_suffix):
+    """Return the user-facing loan-suffix string for one row.
+
+    For 'split' mode, raw_suffix already holds the suffix column value.
+    For 'delimiter' mode, the suffix is whatever follows the delimiter,
+    which here we reconstruct from full_account = member_only + suffix.
+    For 'fixed_suffix' mode, the trailing N chars of full_account.
+    """
+    if raw_suffix is not None and str(raw_suffix).strip() not in ('', 'nan', 'None'):
+        return str(raw_suffix).strip()
+    mode = (ma_cfg or {}).get('mode') or 'fixed_suffix'
+    full = str(full_account or '').strip()
+    mem = str(member_only or '').strip()
+    if not full or not mem:
+        return ''
+    if mode == 'delimiter' and full.startswith(mem):
+        return full[len(mem):]
+    if mode == 'fixed_suffix':
+        try:
+            n = int((ma_cfg or {}).get('suffix_length') or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0 and len(full) > n:
+            return full[-n:]
+    return ''
+
+
+def _load_extract_enrichment(config, workspace_root):
+    """Read configured loan extract files to populate the All Loans tab
+    fields that don't live in monthly_loan_data (loan_type, open_date,
+    interest_rate, days_delinquent, original_loan_amount,
+    total_available_credit) plus the per-loan Member# / Suffix split.
+
+    Returns a dict keyed by full_account_str (str) -> dict of fields.
+    Falls back to {} when no extracts can be located.
+    """
+    enrich = {}
+    data_dir = config.get('data_directory', '')
+    if data_dir and not os.path.isabs(data_dir):
+        data_dir = os.path.join(workspace_root, data_dir)
+    search_dirs = [data_dir] if data_dir and os.path.isdir(data_dir) else []
+
+    extracts = list(config.get('loan_data_extracts') or [])
+    if not extracts:
+        # Synthesize one entry from top-level config so this single code
+        # path works for both styles.
+        extracts = [{
+            'label': 'top-level',
+            'file_pattern': config.get('file_pattern'),
+            'column_mappings': config.get('column_mappings') or {},
+            'member_account': config.get('member_account'),
+            'has_header': config.get('has_header', True),
+            'header_row': config.get('header_row'),
+        }]
+
+    for ex in extracts:
+        col_map = dict(ex.get('column_mappings') or {})
+        if not col_map:
+            continue
+        path = _resolve_extract_path(ex.get('file_pattern'), search_dirs)
+        if not path:
+            print(f"    Extract '{ex.get('label')}' not found in {data_dir}; skipping enrichment.")
+            continue
+        has_header = ex.get('has_header', True)
+        try:
+            hr_cfg = int(ex.get('header_row') or 0)
+        except (TypeError, ValueError):
+            hr_cfg = 0
+        pd_header = (hr_cfg - 1) if hr_cfg > 1 else 0
+        ext_lc = os.path.splitext(path)[1].lower()
+        try:
+            if has_header:
+                if ext_lc == '.csv':
+                    df = pd.read_csv(path, header=pd_header)
+                else:
+                    df = pd.read_excel(path, header=pd_header)
+                df.columns = [str(c).strip() for c in df.columns]
+            else:
+                if ext_lc == '.csv':
+                    df = pd.read_csv(path, header=None)
+                else:
+                    df = pd.read_excel(path, header=None)
+                col_map = _normalize_col_map_for_no_header(col_map)
+        except Exception as e:
+            print(f"    WARNING: could not read extract '{path}': {e}")
+            continue
+
+        # Build a per-row config snapshot derive_member_account expects.
+        per_cfg = dict(config)
+        per_cfg['column_mappings'] = col_map
+        per_cfg['member_account'] = ex.get('member_account') or config.get('member_account')
+        try:
+            member_only, full_account = derive_member_account(df, per_cfg, has_header)
+        except Exception as e:
+            print(f"    WARNING: derive_member_account failed for '{path}': {e}")
+            continue
+
+        ma_cfg = per_cfg.get('member_account') or {}
+        # Suffix column when in split mode
+        raw_suffix_series = None
+        if (ma_cfg.get('mode') == 'split') and col_map.get('loan_suffix') is not None:
+            try:
+                raw_suffix_series = (
+                    df[col_map['loan_suffix']] if has_header
+                    else df.iloc[:, col_map['loan_suffix']]
+                )
+            except Exception:
+                raw_suffix_series = None
+
+        # Map our impdet field names to the column_mappings keys.
+        FIELD_TO_MAPKEY = {
+            'loan_type':              'loan_pool_code',
+            'open_date':              'open_date',
+            'interest_rate':          'interest_rate',
+            'days_delinquent':        'days_delinquent',
+            'original_loan_amount':   'original_loan_amount',
+            'total_available_credit': 'total_available_credit',
+        }
+        # Pre-resolve column series once per field
+        field_series = {}
+        for our_field, map_key in FIELD_TO_MAPKEY.items():
+            ref = col_map.get(map_key)
+            if ref is None or (isinstance(ref, str) and not ref):
+                continue
+            try:
+                field_series[our_field] = (
+                    df[ref] if has_header else df.iloc[:, ref]
+                )
+            except (KeyError, IndexError):
+                continue
+
+        n_added = 0
+        for i in range(len(df)):
+            full_str = str(full_account.iloc[i] or '').strip()
+            if not full_str:
+                continue
+            mem_str = str(member_only.iloc[i] or '').strip()
+            raw_suf = raw_suffix_series.iloc[i] if raw_suffix_series is not None else None
+            suffix = _split_suffix_for_row(mem_str, full_str, ma_cfg, raw_suf)
+            row_out = {
+                'member_number_raw': mem_str,
+                'loan_suffix': suffix,
+                'member_suffix': full_str,
+            }
+            for our_field, ser in field_series.items():
+                val = ser.iloc[i]
+                if pd.isna(val):
+                    continue
+                row_out[our_field] = val
+            # Prefer the richest record; don't let an extract that lacks
+            # most columns overwrite a fuller one.
+            prev = enrich.get(full_str)
+            if prev is None or len([k for k in row_out if row_out.get(k) not in (None, '')]) > \
+                              len([k for k in prev if prev.get(k) not in (None, '')]):
+                enrich[full_str] = row_out
+            n_added += 1
+        print(f"    Loaded {n_added} row(s) from extract '{ex.get('label')}'")
+
+    print(f"  Enrichment dictionary: {len(enrich)} unique loan(s) from extracts")
+    return enrich
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Main orchestration
 # ═══════════════════════════════════════════════════════════════════
 def generate_report(client, snap=None):
@@ -830,14 +1030,58 @@ def generate_report(client, snap=None):
             axis=1,
         )
         df['contingency_risk'] = 0.0
-        df['loan_suffix'] = None
-        df['member_suffix'] = None
-        df['loan_type'] = None
-        df['open_date'] = None
-        df['interest_rate'] = None
-        df['days_delinquent'] = None
-        df['original_loan_amount'] = None
-        df['total_available_credit'] = None
+
+        # Try to enrich from the configured loan_data_extracts so the
+        # All Loans tab has Member#/Suffix split + Loan Type / Open Date /
+        # Interest Rate / Days Delinquent / Original Loan Amount / Credit
+        # Limit even without a WARM workbook on disk.
+        enrich = _load_extract_enrichment(config, BASE)
+
+        def _enr_get(acct, field, default=None):
+            row = enrich.get(str(acct).strip()) if enrich else None
+            if not row:
+                return default
+            val = row.get(field, default)
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                return default
+            return val
+
+        # Member#/Suffix split — fall back to DB member_number when no
+        # extract row matches (preserves existing behavior for CUs
+        # without loan_data_extracts).
+        df['member_number_raw'] = df['member_number'].apply(
+            lambda a: _enr_get(a, 'member_number_raw', str(a))
+        )
+        df['loan_suffix'] = df['member_number'].apply(
+            lambda a: _enr_get(a, 'loan_suffix', '')
+        )
+        df['member_suffix'] = df['member_number'].apply(
+            lambda a: _enr_get(a, 'member_suffix', str(a))
+        )
+        # Re-point the "Member #" column written to the All Loans tab so
+        # it shows the member-only string (matches WARM-mode output).
+        df['member_number'] = df['member_number_raw']
+
+        df['loan_type'] = df['member_suffix'].apply(lambda a: _enr_get(a, 'loan_type'))
+        df['open_date'] = df['member_suffix'].apply(lambda a: _enr_get(a, 'open_date'))
+        df['interest_rate'] = df['member_suffix'].apply(lambda a: _enr_get(a, 'interest_rate'))
+        df['days_delinquent'] = df['member_suffix'].apply(lambda a: _enr_get(a, 'days_delinquent'))
+        df['original_loan_amount'] = df['member_suffix'].apply(
+            lambda a: _enr_get(a, 'original_loan_amount')
+        )
+        df['total_available_credit'] = df['member_suffix'].apply(
+            lambda a: _enr_get(a, 'total_available_credit')
+        )
+
+        # Interest rate convention: WARM stores as a percent (e.g. 6.625)
+        # but the All Loans tab formats column L as "0.0000%" which expects
+        # a decimal fraction. Convert >1 values down to fraction.
+        df['interest_rate'] = df['interest_rate'].apply(
+            lambda v: (v / 100.0) if isinstance(v, (int, float)) and v is not None
+                      and not (isinstance(v, float) and pd.isna(v)) and v > 1
+                      else v
+        )
+
         df['balance_other_lender'] = None
         df['collateral_value'] = None
         df['total_loans'] = df['current_balance']

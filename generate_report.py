@@ -985,6 +985,54 @@ def _load_monthly_balances_per_month(mb_cfg):
     return pd.DataFrame(records, columns=['pool', 'date', 'balance']), {}
 
 
+def _load_monthly_balances_per_year(mb_cfg):
+    """Read one annual balance-sheet workbook per calendar year and emit
+    (pool, date, bal) rows. Each file is opened on ``layout.sheet`` (or
+    the first/best sheet) and the per-file header row is re-scanned to
+    pull month-end columns. Labels are mapped to wizard pool names via
+    ``pool_map`` (case-insensitive, falls back to the raw label).
+
+    Delegates the heavy lifting to
+    ``cecl_ui.services.monthly_bal_parser.pool_balances_for_per_year_files``
+    so the wizard's auto-detect logic and the runtime importer always
+    agree on column/row interpretation.
+    """
+    try:
+        from cecl_ui.services.monthly_bal_parser import (
+            pool_balances_for_per_year_files,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"    Warning: per_year loader unavailable: {exc}")
+        return pd.DataFrame(columns=['pool', 'date', 'balance']), {}
+
+    layout = mb_cfg.get('layout') or {}
+    raw_map = mb_cfg.get('pool_map') or {}
+    pool_map = {str(k).strip().lower(): str(v).strip()
+                for k, v in raw_map.items()
+                if str(k).strip() and str(v).strip()}
+    year_files = mb_cfg.get('files') or []
+
+    result = pool_balances_for_per_year_files(year_files, layout, pool_map)
+    by_period = result.get('by_period') or {}
+    records = []
+    for period_iso, payload in by_period.items():
+        try:
+            dt = pd.to_datetime(period_iso, errors='coerce')
+        except Exception:
+            continue
+        if pd.isna(dt):
+            continue
+        for pool, bal in (payload.get('by_pool') or {}).items():
+            try:
+                bal_f = float(bal)
+            except (TypeError, ValueError):
+                continue
+            records.append({'pool': pool, 'date': dt, 'balance': bal_f})
+    if result.get('error'):
+        print(f"    Warning: per_year loader: {result['error']}")
+    return pd.DataFrame(records, columns=['pool', 'date', 'balance']), {}
+
+
 def _coerce_balance(v):
     """Convert a cell value to float, stripping $, commas, parens for
     negatives, and whitespace. Returns None on failure."""
@@ -1281,6 +1329,10 @@ def load_monthly_balances(config):
             return df, _merge_acl_history(alll, config)
         # If per_month failed (no files / unreadable), fall through to the
         # legacy scan so the user at least gets the historical context.
+    if mb_source == 'per_year':
+        df, alll = _load_monthly_balances_per_year(mb_cfg)
+        if not df.empty:
+            return df, _merge_acl_history(alll, config)
 
     # Preferred path for "single" mode: use the wizard's saved_path +
     # sheet metadata directly. Honors cfg['balance_title_map'] (label
@@ -1499,6 +1551,14 @@ def _compute_balance_adjustments(df, hist, config, snapshot_date):
     all_pools = set(loan_bals.keys())
     matched_loan_pools = set()
     nrr_set = set(config.get('not_risk_rated', []) or [])
+    # Configured loan pools — used to drop balance-sheet line items that
+    # aren't loan pools (e.g. "ACH Clearing", "Accrued Interest"). Anything
+    # not in this set AND not already a loan-extract pool is ignored.
+    configured_pools = set(pool_order)
+    configured_pools.update(p.get('name') for p in (config.get('pools') or [])
+                            if p and p.get('name'))
+    configured_pools.update(nrr_set)
+    skipped_non_pool: list[str] = []
 
     for mp, mb_val in monthly_bals.items():
         lp = _match_pool(mp)
@@ -1506,8 +1566,20 @@ def _compute_balance_adjustments(df, hist, config, snapshot_date):
             # Monthly-balance pool with no loan-extract counterpart (e.g.
             # non-risk-rated pools like Loan Participation, Repo/Foreclosed).
             # Treat the full monthly balance as an adjustment so it shows up
-            # in the per-pool "Loans Not Risk Rated and Adjustments" row.
+            # in the per-pool "Loans Not Risk Rated and Adjustments" row —
+            # but ONLY when the name is a configured loan pool. Balance-sheet
+            # line items like ACH Clearing have no place on the ACL tabs.
             mp_clean = str(mp).strip()
+            if configured_pools and mp_clean not in configured_pools:
+                # Try case-insensitive match before giving up.
+                lc = mp_clean.lower()
+                hit = next((c for c in configured_pools
+                            if str(c).strip().lower() == lc), None)
+                if hit is None:
+                    if mb_val and abs(mb_val) > 0.005:
+                        skipped_non_pool.append(f"{mp_clean} (${mb_val:,.2f})")
+                    continue
+                mp_clean = hit
             if mb_val and abs(mb_val) > 0.005:
                 balance_adjustments[mp_clean] = round(float(mb_val), 2)
                 total_adj += float(mb_val)
@@ -1585,6 +1657,11 @@ def _compute_balance_adjustments(df, hist, config, snapshot_date):
     print(f"    Balance adjustments: {n_adj} pools, "
           f"total adj: ${total_adj:,.2f}, "
           f"total in portfolio: ${total_in_portfolio:,.2f}")
+    if skipped_non_pool:
+        print(f"    Skipped {len(skipped_non_pool)} balance-sheet line "
+              f"item(s) not mapped to any loan pool: "
+              f"{', '.join(skipped_non_pool[:8])}"
+              f"{'...' if len(skipped_non_pool) > 8 else ''}")
 
 
 def load_delinquency_history(config):
@@ -2866,8 +2943,84 @@ def load_historical_data(config):
     """Load all historical data for a client. Returns a dict with all historical DataFrames."""
     print("  Loading historical data...")
     co_rec = load_chargeoff_recovery_history(config)
+    # Overlay charge-off / recovery rows from the wizard's DB tables
+    # (loan_code_chargeoff_history, loan_code_recovery_history). DB rows
+    # take precedence over file-derived rows for any (year, pool) cell
+    # present in the DB; file-only cells are preserved.
+    db_corc = _load_co_rc_history_from_db(config)
+    if db_corc.get('years'):
+        for yr, by_pool in db_corc['chargeoffs'].items():
+            co_rec['chargeoffs'].setdefault(yr, {}).update(by_pool)
+        for yr, by_pool in db_corc['recoveries'].items():
+            co_rec['recoveries'].setdefault(yr, {}).update(by_pool)
+        co_m = co_rec.setdefault('co_monthly', {})
+        for ym, by_pool in db_corc['co_monthly'].items():
+            co_m.setdefault(ym, {}).update(by_pool)
+        rc_m = co_rec.setdefault('rc_monthly', {})
+        for ym, by_pool in db_corc['rc_monthly'].items():
+            rc_m.setdefault(ym, {}).update(by_pool)
+        co_rec['years'] = sorted(
+            set(co_rec.get('years', []))
+            | set(co_rec['chargeoffs'])
+            | set(co_rec['recoveries'])
+        )
     balances, alll_by_date = load_monthly_balances(config)
     dq = load_delinquency_history(config)
+
+    # Drop balance-sheet line items that aren't loan pools (e.g. "ACH
+    # Clearing", "ATM Machine", "Vizo Financial Corp ..."). The monthly
+    # balance file is often a full balance sheet; we only want rows that
+    # map to a configured loan pool. Anything else would pollute
+    # hist_bal_data, avg_balances, and downstream Vizo/TCT tabs.
+    if not balances.empty:
+        nrr_set = set(config.get('not_risk_rated', []) or [])
+        configured_pools = set(config.get('pool_order', []) or [])
+        configured_pools.update(
+            p.get('name') for p in (config.get('pools') or [])
+            if p and p.get('name')
+        )
+        configured_pools.update(nrr_set)
+        if configured_pools:
+            configured_lc = {str(p).strip().lower(): str(p).strip()
+                             for p in configured_pools if p}
+            pool_norm = balances['pool'].astype(str).str.strip().str.lower()
+            keep_mask = pool_norm.isin(configured_lc.keys())
+            dropped = sorted(set(
+                balances.loc[~keep_mask, 'pool'].astype(str).str.strip()
+            ))
+            if dropped:
+                print(f"    Dropped {len(dropped)} non-loan balance-sheet "
+                      f"line item(s) from monthly balances: "
+                      f"{', '.join(dropped[:5])}"
+                      f"{'...' if len(dropped) > 5 else ''}")
+            balances = balances.loc[keep_mask].copy()
+            # Canonicalize pool names to the configured spelling so downstream
+            # exact-match lookups (e.g. set membership in pool_order) work.
+            balances['pool'] = pool_norm[keep_mask].map(configured_lc)
+
+    # Collapse same-pool/same-date rows by summing balances. When several
+    # source labels (e.g. "Home Equity Fixed Rate Loans", "HELOC",
+    # "Mortgage Loans", "Mortgage Portfolio", "Mobile Home Loans") all map
+    # to a single configured pool (e.g. "Real Estate") via
+    # cfg['monthly_balance']['pool_map'], the per_month loader emits one row
+    # per source label. Without this collapse, avg_balances would average
+    # sub-pool balances (instead of summing them) and
+    # build_hist_bal_from_monthly would dedupe by date and silently drop
+    # all but the first sub-pool's value, producing wildly understated
+    # historical balances on the Display Hist Bal tab.
+    if not balances.empty:
+        before = len(balances)
+        balances = (
+            balances.groupby(['pool', 'date'], as_index=False)['balance']
+            .sum()
+            .sort_values(['pool', 'date'])
+            .reset_index(drop=True)
+        )
+        after = len(balances)
+        if after < before:
+            print(f"    Collapsed {before - after} duplicate "
+                  f"(pool, date) row(s) into {after} aggregated row(s) "
+                  f"(multi-label pools summed)")
 
     # Compute annual average balances per pool from monthly data
     avg_balances = {}  # {year: {pool: avg_balance}}
@@ -2876,6 +3029,29 @@ def load_historical_data(config):
         for (year, pool), grp in balances.groupby(['year', 'pool']):
             avg_balances.setdefault(int(year), {})
             avg_balances[int(year)][pool] = grp['balance'].mean()
+
+    # Overlay annual balances from the wizard's 5300 backfill (DB table
+    # ``loan_code_history``). Only fills (year, pool) cells NOT already
+    # populated by the per_month / monthly_balances file — per_month
+    # remains authoritative wherever it covers a year. This lets the
+    # Vizo "Display Hist Bal" tab fill the early-year columns (e.g.
+    # 2019-2022 for an 84-month Life-of-Loan Real Estate pool when the
+    # per_month file only starts in 2023).
+    db_bal = _load_balance_history_from_db(config)
+    if db_bal:
+        added_cells = 0
+        added_years = set()
+        for yr, by_pool in db_bal.items():
+            existing = avg_balances.setdefault(yr, {})
+            for pool, bal in by_pool.items():
+                if not existing.get(pool):
+                    existing[pool] = bal
+                    added_cells += 1
+                    added_years.add(yr)
+        if added_cells:
+            yrs = sorted(added_years)
+            print(f"    Filled {added_cells} missing avg-balance cell(s) "
+                  f"from 5300 backfill ({yrs[0]}-{yrs[-1]})")
 
     # Compute delinquency % per pool per year
     dq_pct = {}  # {year: {pool: dq_pct}}
@@ -4249,8 +4425,395 @@ def load_wizard_impaired(config):
     return result
 
 
+def _resolve_pool_ci(code, pool_map_ci, default_pool):
+    """Case-insensitive pool_map lookup. ``pool_map_ci`` is the pool_map
+    with keys lower-cased and stripped. Returns the mapped pool name or
+    ``default_pool`` (or '' when default is also empty/ignore). Returns
+    None when the result should be skipped (empty / 'ignore' / 'exclude').
+    """
+    if code is None:
+        return None
+    key = str(code).strip().lower()
+    if not key:
+        return None
+    pool = pool_map_ci.get(key)
+    if not pool:
+        # Try with collapsed whitespace.
+        key2 = ' '.join(key.split())
+        pool = pool_map_ci.get(key2)
+    if not pool:
+        pool = (default_pool or '').strip()
+    if not pool or pool.lower() in ('ignore', 'exclude'):
+        return None
+    return pool
+
+
+# ── NCUA 5300 canonical-name → pool inference ─────────────────────────
+# The wizard's 5300 backfill populates loan_code_history /
+# loan_code_chargeoff_history / loan_code_recovery_history with NCUA
+# canonical names (e.g. 'First Liens', 'Used Vehicles', 'Unsecured
+# Credit Card'). A CU's pool_map usually contains only the CU's own
+# local loan codes ('17', '40', 'GL-12', ...) and not these NCUA
+# names. Without a fallback, every 5300-derived row collapses into
+# ``default_pool`` (typically 'Other/Uncategorized') and the older
+# years on the Vizo "Display Hist Bal" tab show no Real Estate /
+# Consumer breakdown.
+#
+# Below maps each known NCUA canonical name to a generic category
+# tag. Each tag has a list of keyword fragments — we pick whichever
+# configured pool name contains one of those keywords. This way the
+# inference adapts to per-CU pool naming (Real Estate vs Mortgage,
+# Consumer Secured vs Auto, etc.) without per-CU YAML edits.
+_NCUA_CANONICAL_TAG = {
+    '1st mortgage real estate':         'real_estate',
+    'first liens':                      'real_estate',
+    'other real estate':                'real_estate',
+    'junior liens':                     'real_estate',
+    'other real estate (other)':        'real_estate',
+    'commercial real estate':           'commercial',
+    'new vehicles':                     'consumer_secured',
+    'used vehicles':                    'consumer_secured',
+    'leases receivable':                'consumer_secured',
+    'unsecured credit card':            'consumer_unsecured',
+    'all other unsecured':              'consumer_unsecured',
+    'payday alternative loans':         'consumer_unsecured',
+    'non-federally guaranteed student': 'consumer_unsecured',
+    'all other':                        'consumer_unsecured',
+    'all other loans':                  'consumer_unsecured',
+    'commercial (non-re)':              'commercial',
+}
+# Tag -> ordered list of keyword fragments to scan in configured pool
+# names. First pool whose lower-cased name contains any keyword wins.
+_NCUA_TAG_KEYWORDS = {
+    'real_estate':        ('real estate', 'mortgage', 'realestate'),
+    'consumer_secured':   ('consumer secured', 'secured', 'auto', 'vehicle'),
+    'consumer_unsecured': ('consumer unsecured', 'unsecured', 'credit card',
+                           'signature'),
+    'commercial':         ('commercial', 'business', 'mbl'),
+}
+
+
+def _build_ncua_canonical_pool_lookup(config):
+    """Return ``{canonical_name_lower: pool_name}`` for NCUA canonical
+    names auto-classified into the CU's configured pools. Used as a
+    fallback for the 5300-history loaders so older-year rows land in
+    real pools rather than collapsing into ``default_pool``. Returns
+    an empty dict when no configured pool matches a tag's keywords.
+    """
+    pool_names = []
+    for p in (config.get('pools') or []):
+        n = (p.get('name') or '').strip()
+        if n:
+            pool_names.append(n)
+    for n in (config.get('pool_order') or []):
+        n = (n or '').strip()
+        if n and n not in pool_names:
+            pool_names.append(n)
+    if not pool_names:
+        return {}
+    excluded = {(s or '').strip().lower()
+                for s in (config.get('excluded_pools') or [])}
+    excluded.add('exclude')
+    excluded.add('ignore')
+    pool_lc = [(n.lower(), n) for n in pool_names
+               if n.lower() not in excluded]
+
+    def _pool_for_tag(tag):
+        for kw in _NCUA_TAG_KEYWORDS.get(tag, ()):
+            for n_lc, n in pool_lc:
+                if kw in n_lc:
+                    return n
+        return None
+
+    lookup: dict[str, str] = {}
+    for canonical, tag in _NCUA_CANONICAL_TAG.items():
+        pool = _pool_for_tag(tag)
+        if pool:
+            lookup[canonical] = pool
+    return lookup
+
+
+def _resolve_pool_with_ncua(code, pool_map_ci, ncua_lookup, default_pool):
+    """Like :func:`_resolve_pool_ci` but consults the NCUA canonical
+    inference map BEFORE falling back to ``default_pool``. The user's
+    explicit ``pool_map`` always wins.
+    """
+    if code is None:
+        return None
+    key = str(code).strip().lower()
+    if not key:
+        return None
+    pool = pool_map_ci.get(key) or pool_map_ci.get(' '.join(key.split()))
+    if not pool and ncua_lookup:
+        pool = ncua_lookup.get(key) or ncua_lookup.get(' '.join(key.split()))
+    if not pool:
+        pool = (default_pool or '').strip()
+    if not pool or pool.lower() in ('ignore', 'exclude'):
+        return None
+    return pool
+
+
+def _load_co_rc_history_from_db(config):
+    """Aggregate ``loan_code_chargeoff_history`` and
+    ``loan_code_recovery_history`` rows into annual + monthly per-pool
+    totals, mirroring the shape returned by
+    :func:`load_chargeoff_recovery_history`.
+
+    Returns ``{'chargeoffs', 'recoveries', 'co_monthly', 'rc_monthly',
+    'years'}`` — empty dicts when nothing is available (missing tables,
+    no rows, DB unavailable).
+
+    Codes are mapped to pools via ``cfg['pool_map']`` (case-insensitive)
+    with fallback to ``cfg['default_pool']``. Rows whose mapped pool is
+    empty / 'ignore' / 'exclude' are dropped.
+    """
+    empty = {'chargeoffs': {}, 'recoveries': {},
+             'co_monthly': {}, 'rc_monthly': {}, 'years': []}
+    cu = (config.get('credit_union') or '').strip()
+    if not cu:
+        return empty
+    raw_map = config.get('pool_map') or {}
+    pool_map_ci = {str(k).strip().lower(): str(v).strip()
+                   for k, v in raw_map.items()
+                   if str(k).strip() and str(v).strip()}
+    default_pool = config.get('default_pool') or ''
+    try:
+        from cecl_credentials import get_database_url
+        from sqlalchemy import create_engine, text as _sql_text
+    except Exception:  # noqa: BLE001
+        return empty
+    try:
+        eng = create_engine(get_database_url())
+    except Exception as exc:  # noqa: BLE001
+        print(f"    CO/Recovery DB skipped: {type(exc).__name__}: {exc}")
+        return empty
+
+    def _read(table, amt_col):
+        try:
+            with eng.begin() as conn:
+                rows = conn.execute(
+                    _sql_text(
+                        f"SELECT as_of_date, loan_code, {amt_col} "
+                        f"FROM {table} WHERE cu = :cu"
+                    ),
+                    {"cu": cu},
+                ).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            print(f"    {table} read skipped: {type(exc).__name__}: {exc}")
+            return []
+        return rows
+
+    co_rows = _read('loan_code_chargeoff_history', 'chargeoff_amount')
+    rc_rows = _read('loan_code_recovery_history', 'recovery_amount')
+    if not co_rows and not rc_rows:
+        return empty
+
+    ncua_lookup = _build_ncua_canonical_pool_lookup(config)
+
+    def _aggregate(rows):
+        annual: dict[int, dict[str, float]] = {}
+        monthly: dict[tuple[int, int], dict[str, float]] = {}
+        for r in rows:
+            d = r[0]
+            try:
+                yr = int(d.year)
+                mo = int(d.month)
+            except Exception:
+                continue
+            if not (2000 <= yr <= 2099):
+                continue
+            pool = _resolve_pool_with_ncua(
+                r[1], pool_map_ci, ncua_lookup, default_pool,
+            )
+            if not pool:
+                continue
+            try:
+                amt = float(r[2] or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if not amt:
+                continue
+            annual.setdefault(yr, {})
+            annual[yr][pool] = annual[yr].get(pool, 0.0) + amt
+            ym = (yr, mo)
+            monthly.setdefault(ym, {})
+            monthly[ym][pool] = monthly[ym].get(pool, 0.0) + amt
+        return annual, monthly
+
+    co_annual, co_monthly = _aggregate(co_rows)
+    rc_annual, rc_monthly = _aggregate(rc_rows)
+    years = sorted(set(co_annual) | set(rc_annual))
+    n_co_cells = sum(len(v) for v in co_annual.values())
+    n_rc_cells = sum(len(v) for v in rc_annual.values())
+    if n_co_cells or n_rc_cells:
+        print(f"    Loaded CO/Recovery history from DB: "
+              f"{len(co_rows)} CO row(s) -> {n_co_cells} pool-year cell(s); "
+              f"{len(rc_rows)} recovery row(s) -> {n_rc_cells} pool-year cell(s).")
+    return {
+        'chargeoffs': co_annual,
+        'recoveries': rc_annual,
+        'co_monthly': co_monthly,
+        'rc_monthly': rc_monthly,
+        'years': years,
+    }
+
+
+def _load_balance_history_from_db(config):
+    """Aggregate ``loan_code_history.total_balance`` into per-year/per-pool
+    average balances, suitable for overlaying onto
+    ``hist['avg_balances']`` for years that aren't covered by the per_month
+    file or single-snapshot ``monthly_balances`` data.
+
+    The wizard's 5300 backfill writes one row per (cu, as_of_date,
+    loan_code) into ``loan_code_history``, covering several years of
+    quarterly history before the per_month / WARM coverage begins.
+    Without this overlay the Vizo "Display Hist Bal" tab leaves the
+    early-year columns blank for long Life-of-Loan pools (e.g. Real
+    Estate at 84 months needs 2019-2022 data when the report quarter
+    is 2026-03).
+
+    Codes are mapped to pools via ``cfg['pool_map']`` (case-insensitive)
+    with fallback to ``cfg['default_pool']``. Rows whose mapped pool is
+    empty / 'ignore' / 'exclude' are dropped. For each (year, pool) the
+    annual average is computed across the available month-end snapshots
+    in that year (typical 5300 coverage = 4 quarter-ends).
+
+    Returns ``{year: {pool: avg_balance}}`` — empty dict when nothing
+    is available.
+    """
+    cu = (config.get('credit_union') or '').strip()
+    if not cu:
+        return {}
+    raw_map = config.get('pool_map') or {}
+    pool_map_ci = {str(k).strip().lower(): str(v).strip()
+                   for k, v in raw_map.items()
+                   if str(k).strip() and str(v).strip()}
+    default_pool = config.get('default_pool') or ''
+    try:
+        from cecl_credentials import get_database_url
+        from sqlalchemy import create_engine, text as _sql_text
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        eng = create_engine(get_database_url())
+    except Exception as exc:  # noqa: BLE001
+        print(f"    Balance history DB skipped: {type(exc).__name__}: {exc}")
+        return {}
+    try:
+        with eng.begin() as conn:
+            rows = conn.execute(
+                _sql_text(
+                    "SELECT as_of_date, loan_code, total_balance "
+                    "FROM loan_code_history WHERE cu = :cu"
+                ),
+                {"cu": cu},
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        print(f"    loan_code_history read skipped: "
+              f"{type(exc).__name__}: {exc}")
+        return {}
+    if not rows:
+        return {}
+
+    # NCUA 5300 schema quirk: a few field codes have parent/child overlap
+    # where both the rollup and the lien-detail are reported with the
+    # SAME total. Mapping both into the same pool double-counts the
+    # balance. Drop child rows when the parent code is present for the
+    # same (cu, as_of_date). loan_code -> set of child loan_codes that
+    # should be skipped when this parent has a row.
+    _PARENT_CHILDREN = {
+        '1st mortgage real estate': {'first liens'},          # A703 vs A703A
+        'other real estate': {'junior liens', 'other real estate (other)'},  # A386 vs A386A/A386B
+    }
+    by_date_codes: dict[str, set[str]] = {}
+    for r in rows:
+        d = r[0]
+        if not d:
+            continue
+        # Only treat a code as "present" on this date if its balance is
+        # non-zero. NCUA backfill writes a row per canonical field even
+        # when the value is 0, so the presence of '1st Mortgage Real
+        # Estate' with $0 must not suppress 'First Liens' with $15M.
+        try:
+            bal = float(r[2] or 0.0)
+        except (TypeError, ValueError):
+            bal = 0.0
+        if bal <= 0:
+            continue
+        by_date_codes.setdefault(d.isoformat(), set()).add(
+            str(r[1] or '').strip().lower()
+        )
+    suppressed_children: dict[str, set[str]] = {}
+    for iso, codes in by_date_codes.items():
+        skip: set[str] = set()
+        for parent, children in _PARENT_CHILDREN.items():
+            if parent in codes:
+                skip.update(children & codes)
+        if skip:
+            suppressed_children[iso] = skip
+
+    ncua_lookup = _build_ncua_canonical_pool_lookup(config)
+
+    # Sum balances per (year, month-end, pool), then average per (year, pool).
+    by_year_month: dict[int, dict[str, dict[str, float]]] = {}
+    n_skipped = 0
+    for r in rows:
+        d = r[0]
+        try:
+            yr = int(d.year)
+            mo_key = d.isoformat()
+        except Exception:
+            continue
+        if not (2000 <= yr <= 2099):
+            continue
+        code_lc = str(r[1] or '').strip().lower()
+        if code_lc in suppressed_children.get(mo_key, ()):
+            n_skipped += 1
+            continue
+        pool = _resolve_pool_with_ncua(
+            r[1], pool_map_ci, ncua_lookup, default_pool,
+        )
+        if not pool:
+            continue
+        try:
+            bal = float(r[2] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        by_year_month.setdefault(yr, {}).setdefault(mo_key, {})
+        by_year_month[yr][mo_key][pool] = (
+            by_year_month[yr][mo_key].get(pool, 0.0) + bal
+        )
+
+    annual: dict[int, dict[str, float]] = {}
+    for yr, by_mo in by_year_month.items():
+        # Per pool: average across the month-ends present for that year.
+        pool_sums: dict[str, float] = {}
+        pool_cnts: dict[str, int] = {}
+        for mo_key, by_pool in by_mo.items():
+            for pool, bal in by_pool.items():
+                if bal <= 0:
+                    continue
+                pool_sums[pool] = pool_sums.get(pool, 0.0) + bal
+                pool_cnts[pool] = pool_cnts.get(pool, 0) + 1
+        for pool, total in pool_sums.items():
+            cnt = pool_cnts[pool]
+            if cnt:
+                annual.setdefault(yr, {})[pool] = total / cnt
+
+    n_cells = sum(len(v) for v in annual.values())
+    if n_cells:
+        yrs = sorted(annual.keys())
+        msg = (f"    Loaded balance history from DB: {len(rows)} row(s) -> "
+               f"{n_cells} pool-year cell(s) ({yrs[0]}-{yrs[-1]})")
+        if n_skipped:
+            msg += f"; skipped {n_skipped} duplicate parent/child 5300 row(s)"
+        print(msg)
+    return annual
+
+
 def _load_dq_history_from_db(config):
     """Aggregate ``loan_code_delinquency_history`` into per-year/per-pool DQ%.
+
 
     Returns ``{year: {pool: dq_pct}}`` suitable for overlaying onto
     ``hist['impaired']['warm_dq_pct']``. Rows are bucketed to the most
@@ -4530,12 +5093,22 @@ def load_standalone_impaired(config, snap, df=None):
         # Look up grade from df using member+suffix
         grade = ''
         if member is not None and suffix is not None:
-            mem_key = f"{int(member)}{int(suffix):0{suffix_len}d}"
-            grade = grade_lookup.get(mem_key, '')
-            if not grade:
-                # Try with string suffix as-is
-                mem_key2 = f"{int(member)}{str(int(suffix)).zfill(suffix_len)}"
-                grade = grade_lookup.get(mem_key2, '')
+            try:
+                mem_int = int(float(member))
+                suf_int = int(float(suffix))
+            except (TypeError, ValueError):
+                # Spreadsheet placeholders like 'xxxx' or blanks — skip
+                # grade lookup for this row rather than crashing the
+                # whole report. The balance still aggregates into the
+                # pool below.
+                mem_int = suf_int = None
+            if mem_int is not None:
+                mem_key = f"{mem_int}{suf_int:0{suffix_len}d}"
+                grade = grade_lookup.get(mem_key, '')
+                if not grade:
+                    # Try with string suffix as-is
+                    mem_key2 = f"{mem_int}{str(suf_int).zfill(suffix_len)}"
+                    grade = grade_lookup.get(mem_key2, '')
 
         spec_id_by_pool.setdefault(pool, {})
         spec_id_by_pool[pool][grade] = (
@@ -4544,6 +5117,46 @@ def load_standalone_impaired(config, snap, df=None):
         total_removed += removed_val
 
     wb.close()
+
+    # ── Distribute "unknown grade" bucket proportionally ──
+    # When the impaired file has sanitized member#/suffix values
+    # (e.g. 'xxxx' placeholders) the per-row grade lookup returns ''
+    # and the balance lands under an empty-grade key. Without this
+    # redistribution the ACL Env by Pool tab only renders the pool
+    # Total row, leaving every per-grade column at $0. Fan the
+    # unknown-grade bucket across the actual grade rows using each
+    # pool's current_balance distribution in df. If df has no
+    # balance for the pool (e.g. excluded pools), the unknown bucket
+    # is left in place so it still contributes to pool totals.
+    if (df is not None and not df.empty
+            and 'loan_pool' in df.columns
+            and 'current_grade' in df.columns
+            and 'current_balance' in df.columns):
+        redistributed_total = 0.0
+        redistributed_pools = 0
+        for pool, grade_map in list(spec_id_by_pool.items()):
+            unknown_amt = grade_map.get('', 0)
+            if not unknown_amt:
+                continue
+            pool_df = df[df['loan_pool'] == pool]
+            if pool_df.empty:
+                continue
+            grade_bals = pool_df.groupby('current_grade')['current_balance'].sum()
+            grade_bals = grade_bals[grade_bals > 0]
+            total_bal = float(grade_bals.sum())
+            if total_bal <= 0:
+                continue
+            # Remove the unknown bucket and redistribute
+            del grade_map['']
+            for g, bal in grade_bals.items():
+                share = unknown_amt * (float(bal) / total_bal)
+                grade_map[g] = grade_map.get(g, 0) + share
+            redistributed_total += unknown_amt
+            redistributed_pools += 1
+        if redistributed_pools:
+            print(f"    Distributed ${redistributed_total:,.2f} of unknown-grade "
+                  f"Spec ID across {redistributed_pools} pool(s) using current "
+                  f"pool grade-balance mix")
 
     result = {
         'acl_impaired': acl_impaired,

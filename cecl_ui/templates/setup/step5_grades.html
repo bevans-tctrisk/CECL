@@ -9,6 +9,16 @@
     6-tier industry layout (A+ through E) &mdash; adjust as needed.
     Not all credit unions use FICO &mdash; "Credit Score" here means
     whichever bureau score this CU pulls.</p>
+  <p class="muted" style="margin-top:6px;">
+    The top grade's <strong>Max</strong> is fixed at the admin ceiling
+    (<strong>{{ admin_max }}</strong>); the bottom grade's
+    <strong>Min</strong> is fixed at the admin floor
+    (<strong>{{ admin_min }}</strong>). All other Maxes auto-fill as
+    <code>(next-higher-grade.Min &minus; 1)</code> &mdash; you only
+    enter a Min on each row, so bands can never overlap or leave gaps.
+    Edit the global ceiling/floor on the
+    <a href="{{ url_for('admin.index') }}">Admin page</a>.
+  </p>
 
   {% set warm_grades = (state.warm and state.warm.grades) or [] %}
   {% if warm_grades %}
@@ -21,6 +31,8 @@
 
   {# Either the just-submitted draft (on validation error) or the saved state. #}
   {% set rows = draft_grades if draft_grades is defined else state.credit_grades %}
+  {# Sort highest-min first so the table reads top-down by range. #}
+  {% set rows = (rows or []) | sort(attribute='min_score', reverse=True) %}
 
   <form method="post">
     <div class="grade-row" style="font-weight:700;">
@@ -29,17 +41,97 @@
       <div>Max Credit Score</div>
       <div></div>
     </div>
-    <div id="grade-rows">
+    <div id="grade-rows" data-admin-min="{{ admin_min }}" data-admin-max="{{ admin_max }}">
       {% for g in rows %}
-      <div class="grade-row">
+      <div class="grade-row" data-grade-row>
         <input type="text"   name="grade_label" value="{{ g.label }}">
-        <input type="number" name="grade_min"   value="{{ g.min_score }}" min="0" max="900">
-        <input type="number" name="grade_max"   value="{{ g.max_score }}" min="0" max="900">
-        <button type="button" class="icon-btn" onclick="this.parentElement.remove()" title="Remove band">&times;</button>
+        <input type="number" name="grade_min"   value="{{ g.min_score if g.min_score is not none else '' }}"
+               min="{{ admin_min }}" max="{{ admin_max }}"
+               data-grade-min>
+        <input type="number" value="{{ g.max_score if g.max_score is not none else '' }}"
+               min="{{ admin_min }}" max="{{ admin_max }}"
+               data-grade-max readonly tabindex="-1"
+               style="background:#f3f3f3; color:#555;">
+        <button type="button" class="icon-btn" onclick="this.parentElement.remove(); recomputeGradeMaxes();" title="Remove band">&times;</button>
       </div>
       {% endfor %}
     </div>
     <button type="button" class="btn btn-secondary" onclick="addGradeRow()" style="margin-top:8px;">+ Add grade</button>
+
+    <script>
+      (function () {
+        var container = document.getElementById('grade-rows');
+        var ADMIN_MIN = parseInt(container.getAttribute('data-admin-min'), 10);
+        var ADMIN_MAX = parseInt(container.getAttribute('data-admin-max'), 10);
+
+        function recompute() {
+          var rows = Array.prototype.slice.call(
+            container.querySelectorAll('[data-grade-row]')
+          );
+          // Lock by DOM position so live typing never reclassifies which
+          // row is "the top" or "the bottom" (which would otherwise
+          // grey-out and overwrite the user's in-progress digits).
+          // Server-side resorts on save by min descending.
+          for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var minInput = row.querySelector('[data-grade-min]');
+            var maxInput = row.querySelector('[data-grade-max]');
+            var isTop = (i === 0);
+            var isBottom = (i === rows.length - 1);
+            // Top: max = ADMIN_MAX. Others: max = previous-row min - 1.
+            var maxVal;
+            if (isTop) {
+              maxVal = ADMIN_MAX;
+            } else {
+              var prevMin = parseInt(
+                rows[i - 1].querySelector('[data-grade-min]').value, 10
+              );
+              maxVal = isNaN(prevMin) ? '' : prevMin - 1;
+            }
+            maxInput.value = (maxVal === '' ? '' : maxVal);
+            // Bottom row's min is locked to admin floor.
+            if (isBottom) {
+              minInput.value = ADMIN_MIN;
+              minInput.readOnly = true;
+              minInput.tabIndex = -1;
+              minInput.style.background = '#f3f3f3';
+              minInput.style.color = '#555';
+              minInput.title = 'Bottom grade — auto-set to admin floor (' + ADMIN_MIN + ').';
+            } else {
+              minInput.readOnly = false;
+              minInput.tabIndex = 0;
+              minInput.style.background = '';
+              minInput.style.color = '';
+              minInput.removeAttribute('title');
+            }
+          }
+        }
+        window.recomputeGradeMaxes = recompute;
+
+        function wireMinInput(input) {
+          input.addEventListener('input', recompute);
+          input.addEventListener('change', recompute);
+        }
+        container.querySelectorAll('[data-grade-min]').forEach(wireMinInput);
+
+        window.addGradeRow = function () {
+          var row = document.createElement('div');
+          row.className = 'grade-row';
+          row.setAttribute('data-grade-row', '');
+          row.innerHTML =
+            '<input type="text" name="grade_label" value="">' +
+            '<input type="number" name="grade_min" value="" min="' + ADMIN_MIN + '" max="' + ADMIN_MAX + '" data-grade-min>' +
+            '<input type="number" value="" min="' + ADMIN_MIN + '" max="' + ADMIN_MAX + '" data-grade-max readonly tabindex="-1" style="background:#f3f3f3; color:#555;">' +
+            '<button type="button" class="icon-btn" onclick="this.parentElement.remove(); recomputeGradeMaxes();" title="Remove band">&times;</button>';
+          container.appendChild(row);
+          wireMinInput(row.querySelector('[data-grade-min]'));
+          recompute();
+        };
+
+        // Initial compute on load.
+        recompute();
+      })();
+    </script>
 
     <label style="margin-top:24px; display:block;">Label for missing / zero scores
       <input type="text" name="no_score_label" value="{{ state.no_score_label }}">

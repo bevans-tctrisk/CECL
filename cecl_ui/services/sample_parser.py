@@ -99,12 +99,20 @@ def _match_columns(headers: list[str]) -> dict[str, str]:
 # ---------- Filename pattern guessing ----------
 
 _DATE_RX_CANDIDATES: list[tuple[str, str]] = [
-    # (description, regex)
-    ("YYYY-MM",       r"(\d{4})-(\d{2})"),
-    ("YYYY_MM",       r"(\d{4})_(\d{2})"),
-    ("YYYYMM",        r"(\d{4})(\d{2})"),
-    ("MM-YYYY",       r"(\d{2})-(\d{4})"),
-    ("MMDDYY",        r"(\d{2})(\d{2})(\d{2})"),
+    # (description, regex). Year-anchored (``20\d{2}``) where we can, so
+    # heuristic doesn't grab e.g. "0331" as a year out of "03312026".
+    # Order is most-specific first.
+    ("YYYY-MM-DD",    r"(20\d{2})-(\d{2})-(\d{2})"),
+    ("YYYY_MM_DD",    r"(20\d{2})_(\d{2})_(\d{2})"),
+    ("YYYYMMDD",      r"(20\d{2})(\d{2})(\d{2})"),
+    ("MM-DD-YYYY",    r"(\d{2})-(\d{2})-(20\d{2})"),
+    ("MM_DD_YYYY",    r"(\d{2})_(\d{2})_(20\d{2})"),
+    ("MMDDYYYY",      r"(\d{2})(\d{2})(20\d{2})"),
+    ("YYYY-MM",       r"(20\d{2})-(\d{2})"),
+    ("YYYY_MM",       r"(20\d{2})_(\d{2})"),
+    ("YYYYMM",        r"(20\d{2})(\d{2})(?!\d)"),
+    ("MM-YYYY",       r"(\d{2})-(20\d{2})"),
+    ("MMDDYY",        r"(\d{2})(\d{2})(\d{2})(?!\d)"),
     # Month-name forms — the import engine knows how to translate these.
     ("Mon_YYYY",      r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[-_ \.]+(20\d{2})"),
     ("YYYY_Mon",      r"(?i)(20\d{2})[-_ \.]+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"),
@@ -112,7 +120,11 @@ _DATE_RX_CANDIDATES: list[tuple[str, str]] = [
 
 
 def guess_filename_patterns(filename: str) -> dict[str, str]:
-    """Derive sensible defaults for file_pattern and date_pattern."""
+    """Derive sensible defaults for file_pattern + date_pattern.
+
+    Returns a dict with ``file_pattern``, ``date_pattern`` and ``date_format``
+    (one of ``"YYYY-MM"``, ``"MMDDYY"`` — the formats ``import_data`` knows).
+    """
     p = Path(filename)
     stem = p.stem
     ext = p.suffix.lower().lstrip(".")
@@ -128,14 +140,46 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
         ext_part = ext or r"(xlsx|xls|csv)"
     file_pattern = f"{re.escape(prefix)}.*\\.{ext_part}$"
 
-    # Date pattern: scan filename for the first matching candidate.
-    date_pattern = r"(\d{4})-(\d{2})"  # default
-    for _desc, rx in _DATE_RX_CANDIDATES:
-        if re.search(rx, stem):
-            date_pattern = rx
-            break
+    # Date pattern: scan filename for the first candidate that matches AND
+    # produces a sensible month (1-12). Default = YYYY-MM with YYYY-MM format.
+    date_pattern = r"(\d{4})-(\d{2})"
+    date_format = "YYYY-MM"
+    for desc, rx in _DATE_RX_CANDIDATES:
+        m = re.search(rx, stem)
+        if not m:
+            continue
+        # Validate the match implies a real month-of-year, so we don't
+        # save a regex that will explode at import time. Month-name forms
+        # always produce valid months (the regex restricts to jan..dec).
+        if desc.startswith(("YYYY-MM-DD", "YYYY_MM_DD", "YYYYMMDD",
+                            "YYYY-MM", "YYYY_MM", "YYYYMM")):
+            try:
+                if not 1 <= int(m.group(2)) <= 12:
+                    continue
+            except (ValueError, IndexError):
+                continue
+        elif desc.startswith(("MM-DD-YYYY", "MM_DD_YYYY", "MMDDYYYY",
+                              "MM-YYYY", "MMDDYY")):
+            try:
+                if not 1 <= int(m.group(1)) <= 12:
+                    continue
+            except (ValueError, IndexError):
+                continue
+        date_pattern = rx
+        # Pick the date_format extract_snapshot_date expects. Month-first
+        # 3-group patterns use 'MMDDYY' (it handles 2- or 4-digit years).
+        if desc in ("MM-DD-YYYY", "MM_DD_YYYY", "MMDDYYYY", "MMDDYY"):
+            date_format = "MMDDYY"
+        elif desc in ("YYYY-MM-DD", "YYYY_MM_DD", "YYYYMMDD"):
+            date_format = "YYYYMMDD"
+        elif desc == "MM-YYYY":
+            date_format = "MMYYYY"
+        else:
+            date_format = "YYYY-MM"
+        break
 
-    return {"file_pattern": file_pattern, "date_pattern": date_pattern}
+    return {"file_pattern": file_pattern, "date_pattern": date_pattern,
+            "date_format": date_format}
 
 
 # ---------- Header detection ----------

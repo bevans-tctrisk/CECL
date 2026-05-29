@@ -38,6 +38,18 @@ _LOAN_CODE_HEADERS = (
     "loan type code", "loan_type_code", "loan code", "loan_code",
     "type code", "type_code", "pool code", "pool_code",
     "security code", "security_code",
+    "loan type", "loan_type", "loan class", "loan_class",
+    "product code", "product_code", "product type", "product_type",
+)
+_MEMBER_HEADERS = (
+    "member number", "member_number", "member#", "member #", "member id",
+    "member", "acct member", "member no",
+)
+_ACCOUNT_HEADERS = (
+    "account number", "account_number", "account#", "account #",
+    "loan number", "loan_number", "loan#", "loan #",
+    "suffix", "account suffix", "loan suffix", "share suffix",
+    "id",  # last-resort fallback
 )
 _CO_AMOUNT_HEADERS = (
     "charge off amount", "charge-off amount", "chargeoff amount",
@@ -56,7 +68,12 @@ _DATE_HEADERS = (
 
 
 def _read_rows(path: Path) -> list[list[Any]]:
-    """Return all sheet rows as a list of lists. CSV or XLSX/XLSM/XLS."""
+    """Return all sheet rows as a list of lists. CSV or XLSX/XLSM/XLS.
+
+    For multi-sheet workbooks, picks the worksheet with the most
+    non-blank cells — prevents an empty leading sheet from masking
+    the real data tab.
+    """
     ext = path.suffix.lower()
     if ext == ".csv":
         import csv
@@ -70,11 +87,20 @@ def _read_rows(path: Path) -> list[list[Any]]:
     from openpyxl import load_workbook
 
     wb = load_workbook(path, read_only=True, data_only=True)
-    rows: list[list[Any]] = []
+    best_rows: list[list[Any]] = []
+    best_score = -1
     for ws in wb.worksheets:
+        sheet_rows: list[list[Any]] = []
         for r in ws.iter_rows(values_only=True):
-            rows.append(list(r) if r else [])
-    return rows
+            sheet_rows.append(list(r) if r else [])
+        score = sum(
+            1 for row in sheet_rows
+            for c in row if c not in (None, "")
+        )
+        if score > best_score:
+            best_score = score
+            best_rows = sheet_rows
+    return best_rows
 
 
 def _norm(v: Any) -> str:
@@ -203,15 +229,38 @@ def inspect_file(path: Path) -> dict[str, Any]:
 
     hdr_idx = _find_header_row(raw)
     if hdr_idx is None:
-        out["error"] = (
-            "Could not find a header row. Pick the columns manually below."
-        )
-        # Still expose the first row as a best-effort header list.
-        out["headers"] = [
-            str(c) if c is not None else "" for c in (raw[0] if raw else [])
-        ]
-        out["preview_rows"] = [list(r) for r in raw[1:6]]
-        return out
+        # Fallback: the keyword heuristic missed (file uses non-standard
+        # header text). Pick the row with the most non-blank string
+        # cells inside the first 25 rows so the manual dropdowns at
+        # least get useful options.
+        best_i, best_score = -1, 0
+        for i, row in enumerate(raw[:25]):
+            score = sum(
+                1 for c in row
+                if isinstance(c, str) and c.strip()
+            )
+            if score > best_score:
+                best_score, best_i = score, i
+        if best_score >= 2:
+            hdr_idx = best_i
+            out["error"] = (
+                "Couldn't auto-detect the header row from the usual "
+                "keywords \u2014 used the row with the most text cells "
+                f"(row {best_i + 1}) as a best guess. Confirm and pick "
+                "the columns manually below."
+            )
+        else:
+            out["error"] = (
+                "Could not find a header row. Pick the columns "
+                "manually below."
+            )
+            # Still expose the first row as a best-effort header list.
+            out["headers"] = [
+                str(c) if c is not None else ""
+                for c in (raw[0] if raw else [])
+            ]
+            out["preview_rows"] = [list(r) for r in raw[1:6]]
+            return out
 
     headers = [str(c) if c is not None else "" for c in raw[hdr_idx]]
 
@@ -231,6 +280,8 @@ def inspect_file(path: Path) -> dict[str, Any]:
             _pick_column(headers, _RECOV_AMOUNT_HEADERS)
         ),
         "date": _name_at(_pick_column(headers, _DATE_HEADERS)),
+        "member": _name_at(_pick_column(headers, _MEMBER_HEADERS)),
+        "account": _name_at(_pick_column(headers, _ACCOUNT_HEADERS)),
     }
     out["ok"] = True
     return out
@@ -283,11 +334,25 @@ def parse_file(
 
     hdr_idx = _find_header_row(raw)
     if hdr_idx is None:
-        out["error"] = (
-            "Could not find a header row with a Loan Code column and an "
-            "amount column."
-        )
-        return out
+        # Fallback to densest-text-row heuristic so files with
+        # non-standard header text still parse when the user has
+        # supplied an explicit column mapping.
+        best_i, best_score = -1, 0
+        for i, row in enumerate(raw[:25]):
+            score = sum(
+                1 for c in row
+                if isinstance(c, str) and c.strip()
+            )
+            if score > best_score:
+                best_score, best_i = score, i
+        if best_score >= 2 and (code_header or amount_header):
+            hdr_idx = best_i
+        else:
+            out["error"] = (
+                "Could not find a header row with a Loan Code column and an "
+                "amount column."
+            )
+            return out
 
     headers = [str(c) if c is not None else "" for c in raw[hdr_idx]]
     if code_header:

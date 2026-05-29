@@ -155,6 +155,39 @@ def _is_acl_label(value: Any) -> bool:
     return any(p in s for p in _ACL_LABEL_PATTERNS)
 
 
+def _find_acl_row_in_grid(
+    rows: list[list[Any]],
+    preferred_col: int | None = None,
+) -> tuple[int | None, str, int | None]:
+    """Scan a 2D grid for the row holding the ACL/ALLL line item.
+
+    Returns ``(row_idx_0based, label, col_idx_0based)`` or
+    ``(None, "", None)``. The ACL label often sits OUTSIDE the LOANS
+    section (e.g. in 'Other Liabilities' or as a contra-asset), so we
+    search the entire grid. ``preferred_col`` is checked first when
+    given, then we fall back to any column.
+    """
+    cols_to_try: list[int | None]
+    if preferred_col is not None:
+        cols_to_try = [preferred_col, None]
+    else:
+        cols_to_try = [None]
+    for col_pref in cols_to_try:
+        for r, row in enumerate(rows):
+            if col_pref is not None:
+                if col_pref < len(row) and _is_acl_label(row[col_pref]):
+                    return r, str(row[col_pref]).strip(), col_pref
+            else:
+                for c, v in enumerate(row):
+                    if _is_acl_label(v):
+                        return r, str(v).strip(), c
+        if col_pref is not None:
+            # If we found a hit in preferred column we'd have returned;
+            # otherwise loop continues with col_pref=None.
+            continue
+    return None, "", None
+
+
 def _is_label_row(value: Any) -> bool:
     if not isinstance(value, str):
         return False
@@ -849,6 +882,17 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
                 "parsed_pool_labels": [], "rows": [],
                 "detected_period": period_iso}
 
+    # Detect ACL/ALLL line. The row may sit far below the LOANS section
+    # (typically under 'Other Liabilities' or as a contra-asset). Scan
+    # the whole grid; prefer hits in the same label column we picked.
+    acl_row_idx, acl_label, _acl_col = _find_acl_row_in_grid(
+        rows, preferred_col=detail_col)
+    acl_value: float | None = None
+    if acl_row_idx is not None and balance_col < len(rows[acl_row_idx]):
+        acl_value = _coerce_number(rows[acl_row_idx][balance_col])
+        if acl_value is not None:
+            acl_value = abs(acl_value)
+
     return {
         "ok": True,
         "error": None,
@@ -859,6 +903,9 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
         "parsed_pool_labels": parsed_labels,
         "rows": extracted,
         "detected_period": period_iso,
+        "acl_row": (acl_row_idx + 1) if acl_row_idx is not None else None,
+        "acl_label": acl_label,
+        "acl_value": acl_value,
     }
 
 
@@ -950,6 +997,355 @@ def pool_balances_for_per_month_files(
             if mapped and bal is not None:
                 by_pool[mapped] = by_pool.get(mapped, 0.0) + bal
         by_period[period] = {"by_pool": by_pool, "raw_rows": raw_rows}
+
+    return {"ok": True,
+            "error": "; ".join(errors) if errors else None,
+            "by_period": by_period}
+
+
+# ---------------------------------------------------------------------------
+# Per-YEAR balance-sheet files
+# ---------------------------------------------------------------------------
+#
+# Some CUs (e.g. Census FCU) keep a single workbook per calendar year with
+# all 12 month-end balances arranged as columns. Layout (Census 2024):
+#
+#   Row 2:  | | | DEC 2024 | NOV 2024 | OCT 2024 | ... | JAN 2024 | DEC 2023 | NET CHANGE
+#   Row 5:  | LOANS
+#   Row 6+: <#> | <Pool Name> | <bal> | <bal> | ...
+#   Row N:  | TOTAL LOANS    (stop here)
+#
+# ``analyse_per_year_file`` finds the header row + label/period columns; the
+# runtime aggregator ``pool_balances_for_per_year_files`` walks the LOANS
+# section once per year file and emits per-period rows.
+
+
+def _parse_period_header_cell(v: Any) -> date | None:
+    """Parse a single header cell into a month-end date, or None.
+
+    Accepts datetime objects and the common ``"MMM YYYY"`` / ``"MMM YY"``
+    spelling used in the Census workbook header row (``"DEC 2024"``,
+    ``"SEPT 2024"``, ``"JULY 2024"`` …). Falls back to the general
+    ``normalize_to_month_end`` for ISO and slash dates.
+    """
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return _last_day(v.year, v.month)
+    if isinstance(v, date):
+        return _last_day(v.year, v.month)
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    if not s:
+        return None
+    # "MONTH YEAR" (case-insensitive). Try the explicit per-year header
+    # spelling first so we don't accidentally hit fallback paths.
+    m = re.match(r"^([A-Za-z]+)\s+(\d{2,4})$", s)
+    if m:
+        mo = _MONTHS.get(m.group(1).lower())
+        y = int(m.group(2))
+        if y < 100:
+            y += 2000 if y < 70 else 1900
+        if mo:
+            return _last_day(y, mo)
+    return normalize_to_month_end(s)
+
+
+def _detect_year_from_name(name: str) -> int | None:
+    m = re.search(r"(20\d{2})", name)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def analyse_per_year_file(path: str | Path) -> dict[str, Any]:
+    """Detect layout + pool labels in a single-year balance-sheet file.
+
+    Returns::
+
+        {
+          "ok": bool,
+          "error": str | None,
+          "sheet": str,
+          "header_row": int,           # 1-based row carrying the period labels
+          "label_col": str,            # column letter of the pool-name column
+          "period_columns": [          # one entry per detected month-end column
+              {"col": "C", "period": "2024-12-31"},
+              ...
+          ],
+          "pool_labels": [str],
+          "detected_year": int | None,
+        }
+    """
+    p = Path(path)
+    empty = {
+        "ok": False, "error": "", "sheet": "", "header_row": 0,
+        "label_col": "", "period_columns": [], "pool_labels": [],
+        "detected_year": _detect_year_from_name(p.name),
+    }
+    if not p.exists():
+        empty["error"] = f"File not found: {path}"
+        return empty
+
+    loaded = _load_grid(p)
+    if loaded is None:
+        empty["error"] = f"Unsupported or unreadable file type: {p.suffix}"
+        return empty
+    sheet_name, rows = loaded
+    if not rows:
+        empty["sheet"] = sheet_name
+        empty["error"] = "Sheet is empty."
+        return empty
+
+    # Find the header row: pick the row in the first 15 with the most
+    # parseable month-year cells (>=3).
+    best_hdr_idx: int | None = None
+    best_hdr_cols: list[tuple[int, date]] = []
+    for r in range(min(15, len(rows))):
+        parsed_here: list[tuple[int, date]] = []
+        for c, v in enumerate(rows[r]):
+            d = _parse_period_header_cell(v)
+            if d:
+                parsed_here.append((c, d))
+        if len(parsed_here) >= 3 and len(parsed_here) > len(best_hdr_cols):
+            best_hdr_idx = r
+            best_hdr_cols = parsed_here
+    if best_hdr_idx is None:
+        empty["sheet"] = sheet_name
+        empty["error"] = ("No header row with month-year labels was found "
+                          "in the first 15 rows.")
+        return empty
+
+    # Restrict to a single calendar year when possible — use the filename
+    # year hint to filter out the trailing 'DEC 2023' carryover.
+    yr_hint = _detect_year_from_name(p.name)
+    if yr_hint:
+        filtered = [(c, d) for c, d in best_hdr_cols if d.year == yr_hint]
+        if filtered:
+            best_hdr_cols = filtered
+
+    # Pick the label column: the first column to the LEFT of the leftmost
+    # period column whose value at any LOANS-section row is a non-empty
+    # text label.
+    leftmost_period_col = min(c for c, _ in best_hdr_cols)
+    loans_idx = _find_loan_section(rows[best_hdr_idx + 1:])
+    if loans_idx is None:
+        empty["sheet"] = sheet_name
+        empty["header_row"] = best_hdr_idx + 1
+        empty["error"] = ("Header row detected but no LOANS section found "
+                          "below it.")
+        return empty
+    loans_idx += best_hdr_idx + 1  # back to absolute row index
+
+    label_col: int | None = None
+    for c in range(leftmost_period_col - 1, -1, -1):
+        text_hits = 0
+        for r in range(loans_idx + 1,
+                       min(loans_idx + 30, len(rows))):
+            if c >= len(rows[r]):
+                continue
+            v = rows[r][c]
+            if isinstance(v, str) and v.strip():
+                text_hits += 1
+        if text_hits >= 3:
+            label_col = c
+            break
+    if label_col is None:
+        empty["sheet"] = sheet_name
+        empty["header_row"] = best_hdr_idx + 1
+        empty["error"] = "Could not locate the pool-name column."
+        return empty
+
+    # Walk from LOANS row downward, collecting pool labels until we hit a
+    # TOTAL/section-end marker.
+    pool_labels: list[str] = []
+    seen: set[str] = set()
+    for r in range(loans_idx + 1, len(rows)):
+        row = rows[r]
+        if label_col >= len(row):
+            continue
+        cell = row[label_col]
+        if not isinstance(cell, str):
+            continue
+        label = cell.strip()
+        if not label:
+            continue
+        lc = label.lower()
+        if lc in _LOAN_SECTION_END:
+            break
+        if lc in _PER_MONTH_SKIP_PHRASES:
+            continue
+        # Require at least one numeric value in any of the period columns.
+        has_num = False
+        for c, _d in best_hdr_cols:
+            if c < len(row) and _coerce_number(row[c]) is not None:
+                has_num = True
+                break
+        if not has_num:
+            continue
+        if lc in seen:
+            continue
+        seen.add(lc)
+        pool_labels.append(label)
+
+    if not pool_labels:
+        return {
+            "ok": False,
+            "error": "No pool rows with numeric balances were found.",
+            "sheet": sheet_name, "header_row": best_hdr_idx + 1,
+            "label_col": get_column_letter(label_col + 1),
+            "period_columns": [], "pool_labels": [],
+            "detected_year": yr_hint,
+        }
+
+    period_columns = [
+        {"col": get_column_letter(c + 1), "period": d.isoformat()}
+        for c, d in sorted(best_hdr_cols, key=lambda t: t[1])
+    ]
+
+    # Detect ACL/ALLL line. Scan the whole grid (it usually lives below
+    # the LOANS section in 'Other Liabilities' or as a contra-asset);
+    # prefer the same label column we chose for pools.
+    acl_row_idx, acl_label, _acl_col = _find_acl_row_in_grid(
+        rows, preferred_col=label_col)
+    acl_history: dict[str, float] = {}
+    if acl_row_idx is not None:
+        acl_row_data = rows[acl_row_idx]
+        for c, d in best_hdr_cols:
+            if c < len(acl_row_data):
+                v = _coerce_number(acl_row_data[c])
+                if v is not None:
+                    acl_history[d.isoformat()] = abs(v)
+
+    return {
+        "ok": True, "error": None,
+        "sheet": sheet_name, "header_row": best_hdr_idx + 1,
+        "label_col": get_column_letter(label_col + 1),
+        "period_columns": period_columns,
+        "pool_labels": pool_labels,
+        "detected_year": yr_hint,
+        "acl_row": (acl_row_idx + 1) if acl_row_idx is not None else None,
+        "acl_label": acl_label,
+        "acl_history": acl_history,
+    }
+
+
+def pool_balances_for_per_year_files(
+    year_files: list[dict[str, Any]],
+    layout: dict[str, Any],
+    label_to_pool: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Aggregate per-pool balances across a list of single-year files.
+
+    ``year_files`` is the wizard's ``monthly_bal.year_files`` list:
+    each entry has ``{filename, saved_path, year}``. ``layout`` is
+    ``monthly_bal.per_year_layout`` with ``sheet`` / ``header_row`` /
+    ``label_col`` keys; per-file period columns are re-detected by
+    re-parsing the header row using ``_parse_period_header_cell`` so
+    different years (whose column letters typically match) all line
+    up. If the wizard has stored an explicit ``period_columns`` list
+    it is used as a fallback when the per-file header can't be read.
+
+    Returns ``{ok, error, by_period: {period_iso: {by_pool: {pool: amt},
+    raw_rows: [...]}}}``.
+    """
+    layout = layout or {}
+    label_col = (layout.get("label_col") or "A").upper()
+    try:
+        header_row = int(layout.get("header_row") or 1)
+    except (TypeError, ValueError):
+        header_row = 1
+    fallback_period_cols = layout.get("period_columns") or []
+    label_col_idx = _col_letter_to_idx(label_col) or 1
+
+    ltp = {
+        (k or "").strip().lower(): (v or "").strip()
+        for k, v in (label_to_pool or {}).items()
+    }
+
+    by_period: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    for entry in (year_files or []):
+        saved_path = entry.get("saved_path") or ""
+        year_hint = entry.get("year")
+        if not saved_path:
+            continue
+        p = Path(saved_path)
+        if not p.exists():
+            errors.append(f"{year_hint or p.name}: file missing")
+            continue
+        loaded = _load_grid(p)
+        if loaded is None:
+            errors.append(f"{p.name}: unreadable file")
+            continue
+        _sn, rows = loaded
+
+        # Re-detect period columns on this file's header row so the
+        # importer doesn't depend on every file sharing the same
+        # column layout. Fall back to layout.period_columns if header
+        # parse misses.
+        period_cols: list[tuple[int, date]] = []
+        if 1 <= header_row <= len(rows):
+            for c, v in enumerate(rows[header_row - 1]):
+                d = _parse_period_header_cell(v)
+                if d:
+                    period_cols.append((c, d))
+        # Filter to the year hint if we have one (drops trailing prior-Dec).
+        if year_hint:
+            try:
+                yi = int(year_hint)
+                filt = [(c, d) for c, d in period_cols if d.year == yi]
+                if filt:
+                    period_cols = filt
+            except (TypeError, ValueError):
+                pass
+        if not period_cols and fallback_period_cols:
+            for spec in fallback_period_cols:
+                ci = _col_letter_to_idx(spec.get("col") or "") or 0
+                try:
+                    d = date.fromisoformat(spec.get("period") or "")
+                except (TypeError, ValueError):
+                    continue
+                if ci:
+                    period_cols.append((ci - 1, _last_day(d.year, d.month)))
+        if not period_cols:
+            errors.append(f"{p.name}: no period columns detected")
+            continue
+
+        for c, d in period_cols:
+            period_iso = d.isoformat()
+            slot = by_period.setdefault(
+                period_iso, {"by_pool": {}, "raw_rows": []})
+            seen: set[str] = set()
+            for r in range(header_row, len(rows)):
+                row = rows[r]
+                if label_col_idx - 1 >= len(row):
+                    continue
+                cell = row[label_col_idx - 1]
+                if not isinstance(cell, str):
+                    continue
+                label = cell.strip()
+                if not label:
+                    continue
+                lc = label.lower()
+                if lc in _LOAN_SECTION_END:
+                    break
+                if lc in _PER_MONTH_SKIP_PHRASES:
+                    continue
+                key = lc
+                if key in seen:
+                    continue
+                seen.add(key)
+                bal = (_coerce_number(row[c]) if c < len(row) else None)
+                mapped = ltp.get(key, "")
+                slot["raw_rows"].append({
+                    "label": label, "balance": bal,
+                    "mapped_pool": mapped, "period": period_iso,
+                })
+                if mapped and bal is not None:
+                    slot["by_pool"][mapped] = (
+                        slot["by_pool"].get(mapped, 0.0) + bal)
 
     return {"ok": True,
             "error": "; ".join(errors) if errors else None,

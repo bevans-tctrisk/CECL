@@ -52,10 +52,21 @@
       </span>
     </label>
     <label style="display:block; margin:6px 0;">
+      <input type="radio" name="monthly_bal_source" value="per_year"
+             onchange="this.form.submit()"
+             {% if source == 'per_year' %}checked{% endif %}>
+      <strong>3. One file per year (annual balance sheets).</strong>
+      <span class="muted">
+        The CU sends one workbook per calendar year with all twelve
+        month-end balances arranged as columns. Upload one file per
+        year and we&rsquo;ll expand each into twelve month-end rows.
+      </span>
+    </label>
+    <label style="display:block; margin:6px 0;">
       <input type="radio" name="monthly_bal_source" value="manual"
              onchange="this.form.submit()"
              {% if source == 'manual' %}checked{% endif %}>
-      <strong>3. Manually enter balances.</strong>
+      <strong>4. Manually enter balances.</strong>
       <span class="muted">
         Type each pool&rsquo;s month-end balance directly into a grid.
         Use this when no file is available.
@@ -308,17 +319,26 @@
       </label>
 
       {% if acl_src == 'monthly_file' %}
+      {% set _has_balance_uploads = mb.filename or (mb.year_files and mb.year_files|length > 0) or (mb.monthly_files and mb.monthly_files|length > 0) %}
       <div style="margin:6px 0 14px 28px;">
-        {% if mb.filename %}
+        {% if _has_balance_uploads %}
           <table style="border-collapse:collapse; font-size:13px;">
             <tr>
               <th style="text-align:left; padding:4px 10px;">ACL row (1-based)</th>
               <td style="padding:4px 10px;">
                 <input type="number" name="acl_row" min="1"
                        value="{{ acl.row or '' }}" style="width:80px;">
+                {% if mb.filename %}
+                  <button class="btn btn-secondary" type="submit"
+                          name="action" value="acl_refresh_row"
+                          style="margin-left:6px;">Refresh history</button>
+                {% endif %}
                 <button class="btn btn-secondary" type="submit"
-                        name="action" value="acl_refresh_row"
-                        style="margin-left:6px;">Refresh history</button>
+                        name="action" value="acl_scan_balance_files"
+                        style="margin-left:6px;"
+                        title="Auto-detect the ACL row in every uploaded balance file and refresh the history table below.">
+                  Scan uploaded balance files
+                </button>
                 {% if acl.label %}
                   <span class="muted" style="margin-left:8px;">
                     Detected label: <strong>{{ acl.label }}</strong>
@@ -352,12 +372,13 @@
             </table>
           {% else %}
             <p class="muted" style="margin-top:8px;">
-              No ACL row detected yet. If the file has one, set the row
-              number above and click <em>Refresh history</em>.
+              No ACL row detected yet. Click
+              <em>Scan uploaded balance files</em> to auto-detect, or set
+              the row number above and refresh.
             </p>
           {% endif %}
         {% else %}
-          <p class="muted">Upload a monthly balance file (Section 1)
+          <p class="muted">Upload a balance file (Section 1)
             to enable auto-detection.</p>
         {% endif %}
       </div>
@@ -522,13 +543,22 @@
         {% for e in pm_files %}
           <tr>
             <td style="padding:4px 10px;">{{ e.period }}</td>
-            <td style="padding:4px 10px;"><code>{{ e.filename }}</code></td>
+            <td style="padding:4px 10px;">
+              <code>{{ e.filename }}</code>
+              {% if e.external %}
+                <span class="muted"
+                      title="Folder-linked: file lives in the scanned folder; removing here just forgets the reference."
+                      style="margin-left:6px; font-size:11px;">
+                  &mdash; folder link
+                </span>
+              {% endif %}
+            </td>
             <td style="padding:4px 10px;">
               <form method="post" style="display:inline;"
-                    onsubmit="return confirm('Remove {{ e.filename }}?');">
-                <input type="hidden" name="action" value="remove_per_month">
+                    onsubmit="return confirm('Remove {{ e.filename }}?{% if e.external %}\n\n(The actual file in the folder will NOT be deleted.){% endif %}');">
                 <input type="hidden" name="filename" value="{{ e.filename }}">
-                <button class="btn btn-secondary" type="submit">&times;</button>
+                <button class="btn btn-secondary" type="submit"
+                        name="action" value="remove_per_month">&times;</button>
               </form>
             </td>
           </tr>
@@ -543,6 +573,52 @@
 </div>
 
 <div class="card">
+  <h3>1b. Or scan a folder for many months at once</h3>
+  <p class="muted">
+    Already have a folder full of monthly balance sheets? Point us at
+    it and we&rsquo;ll pull in each file, detect the month-end date
+    from inside the file (or the filename), and add them to the list
+    above. The files stay where they are &mdash; we just remember the
+    paths. Next quarter you can re-scan with one click to pick up new
+    months.
+  </p>
+  <form method="post">
+    <table style="border-collapse:collapse; font-size:13px;">
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Folder path</th>
+        <td style="padding:4px 10px;">
+          <input type="text" name="scan_folder"
+                 value="{{ mb.per_month_source_folder or '' }}"
+                 placeholder="e.g. Z:\Shared\TCT Files\CECL - CM Files\Raw_Uploads\central_keystone_fcu"
+                 style="width:560px;">
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">
+          Filename pattern
+        </th>
+        <td style="padding:4px 10px;">
+          <input type="text" name="scan_pattern"
+                 value="{{ mb.file_pattern or '' }}"
+                 placeholder="e.g. Detailed.*Balance.*Sheet.*\.xls$  (leave blank to scan every .xls/.xlsx/.csv)"
+                 style="width:560px;">
+          <div class="muted" style="margin-top:2px;">
+            Optional case-insensitive regex; only files whose name
+            matches are picked up.
+          </div>
+        </td>
+      </tr>
+    </table>
+    <div class="btn-row" style="margin-top:10px;">
+      <button class="btn btn-primary" type="submit"
+              name="action" value="scan_per_month_folder">
+        Scan folder
+      </button>
+    </div>
+  </form>
+</div>
+
+<div class="card">
   <h3>2. Common file layout</h3>
   <p class="muted">
     Tell us once where the pool labels and balances sit inside each
@@ -550,7 +626,11 @@
     uploaded above.
   </p>
   <form method="post">
-    <input type="hidden" name="action" value="save_per_month_layout">
+    {# Each button below carries its own name="action" value="..." so the
+       form picks the right handler. Do NOT add a hidden ``action`` input
+       here — Flask's ``request.form.get('action')`` would return that
+       first value and ignore the clicked button, which made "Save & Next"
+       silently redirect back to this same page. #}
     <table style="border-collapse:collapse; font-size:13px;">
       <tr>
         <th style="text-align:left; padding:4px 10px;">Sheet name</th>
@@ -729,6 +809,301 @@
 </div>
 {% endif %}{# source == 'per_month' #}
 
+{% if source == 'per_year' %}
+{% set py = mb.per_year_layout or {} %}
+{% set py_files = mb.year_files or [] %}
+<div class="card">
+  {% if state.hist_balance_source == 'annual_balance_sheets' %}
+  <div class="flash info" style="margin-bottom:12px;">
+    <strong>Annual workbooks are configured on Step 3 &mdash; Historical
+    Data.</strong> Anything you upload or edit below also shows up there.
+    For most CUs the historical scan on Step 3 covers every period
+    including the current quarter, so this step is informational.
+  </div>
+  {% endif %}
+  <h3>1. Upload one workbook per year</h3>
+  <p class="muted">
+    Upload each annual balance-sheet workbook (e.g.
+    <code>2024 Balance Sheets.xlsx</code>). Each file should contain
+    all twelve month-end balances as columns. We auto-detect the
+    sheet name, header row, label column, and month-end column for
+    each year.
+  </p>
+  <form method="post" enctype="multipart/form-data">
+    <input type="hidden" name="action" value="upload_per_year">
+    <table style="border-collapse:collapse; font-size:13px;">
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Year (optional)</th>
+        <td style="padding:4px 10px;">
+          <input type="number" name="per_year_year" min="2000" max="2099"
+                 placeholder="auto-detected from filename"
+                 style="width:120px;">
+          <span class="muted">leave blank to read from the filename</span>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Annual balance workbook</th>
+        <td style="padding:4px 10px;">
+          <input type="file" name="per_year_file"
+                 accept=".xlsx,.xls,.csv" required>
+          <button class="btn btn-primary" type="submit">Add file</button>
+        </td>
+      </tr>
+    </table>
+  </form>
+
+  {% if py_files %}
+    <h4 style="margin-top:16px;">Uploaded files</h4>
+    <table style="border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc;">Year</th>
+          <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc;">File</th>
+          <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc;">Months detected</th>
+          <th style="padding:4px 10px; border-bottom:1px solid #ccc;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in py_files %}
+          <tr>
+            <td style="padding:4px 10px;">{{ e.year or '?' }}</td>
+            <td style="padding:4px 10px;">
+              <code>{{ e.filename }}</code>
+            </td>
+            <td style="padding:4px 10px;">
+              {{ e.period_count or 0 }}
+            </td>
+            <td style="padding:4px 10px;">
+              <form method="post" style="display:inline;"
+                    onsubmit="return confirm('Remove {{ e.filename }}?');">
+                <input type="hidden" name="filename" value="{{ e.filename }}">
+                <button class="btn btn-secondary" type="submit"
+                        name="action" value="remove_per_year">&times;</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted" style="margin-top:8px;">
+      No annual files uploaded yet.
+    </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>2. Common file layout</h3>
+  <p class="muted">
+    Auto-detected from the first upload. Override only if the parser
+    misread the workbook.
+  </p>
+  <form method="post">
+    <table style="border-collapse:collapse; font-size:13px;">
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Header row (1-based)</th>
+        <td style="padding:4px 10px;">
+          <input type="number" name="py_header_row" min="1"
+                 value="{{ py.header_row or 1 }}" style="width:80px;">
+          <span class="muted">row containing the month-year column headers</span>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left; padding:4px 10px;">Pool/type label column</th>
+        <td style="padding:4px 10px;">
+          <input type="text" name="py_label_col"
+                 value="{{ py.label_col or 'B' }}" maxlength="3"
+                 style="width:60px; text-transform:uppercase;">
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left; padding:4px 10px; vertical-align:top;">Notes</th>
+        <td style="padding:4px 10px;">
+          <textarea name="notes" rows="2" cols="60">{{ mb.notes }}</textarea>
+        </td>
+      </tr>
+    </table>
+
+    <h4 style="margin-top:16px;">Pool label mapping</h4>
+    <p class="muted">
+      Map each pool/type label found in the annual files to one of this
+      CU&rsquo;s pools. Leave blank to ignore a label.
+    </p>
+    {% set _parsed = mb.parsed_pool_labels or [] %}
+    {% set _mapped = mb.pool_map.keys()|list %}
+    {% set _seen = {} %}
+    {% set py_labels = [] %}
+    {% for lab in (_parsed + _mapped) %}
+      {% if lab and lab|lower not in _seen %}
+        {% set _ = py_labels.append(lab) %}
+        {% set _ = _seen.update({lab|lower: True}) %}
+      {% endif %}
+    {% endfor %}
+    {% if not py_labels %}
+      {% set py_labels = [''] %}
+    {% endif %}
+    <table style="border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:4px 10px;">Label in file</th>
+          <th style="text-align:left; padding:4px 10px;">Wizard pool</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for label in py_labels %}
+          <tr>
+            <td style="padding:4px 10px;">
+              <input type="text" name="map_label" value="{{ label }}"
+                     style="width:280px;">
+            </td>
+            <td style="padding:4px 10px;">
+              <select name="map_pool" style="width:240px;">
+                <option value="">&mdash; ignore &mdash;</option>
+                {% for pool in pool_choices %}
+                  <option value="{{ pool }}"
+                    {% if mb.pool_map.get(label) == pool %}selected{% endif %}>
+                    {{ pool }}
+                  </option>
+                {% endfor %}
+              </select>
+            </td>
+          </tr>
+        {% endfor %}
+        <tr>
+          <td style="padding:4px 10px;">
+            <input type="text" name="map_label" value="" style="width:280px;">
+          </td>
+          <td style="padding:4px 10px;">
+            <select name="map_pool" style="width:240px;">
+              <option value="">&mdash; ignore &mdash;</option>
+              {% for pool in pool_choices %}
+                <option value="{{ pool }}">{{ pool }}</option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    {% set acl = mb.acl or {} %}
+    {% set acl_src = acl.source or 'monthly_file' %}
+    {% set acl_man = acl.manual or {} %}
+    {% set acl_hist = acl.history or {} %}
+    <h4 style="margin-top:18px;">Allowance for Credit Loss (ACL)</h4>
+    <p class="muted">
+      The annual workbooks usually contain an Allowance for Credit Loss
+      (ALLL) row &mdash; the wizard can auto-detect it across all
+      uploaded year files. Override the row number if needed, or fall
+      back to a separate file or manual entry.
+    </p>
+    <label style="display:block; margin:4px 0;">
+      <input type="radio" name="acl_source" value="monthly_file"
+             {% if acl_src == 'monthly_file' %}checked{% endif %}>
+      <strong>Pull from the annual balance workbooks (auto-detect).</strong>
+    </label>
+    {% if acl_src == 'monthly_file' %}
+      <div style="margin:6px 0 12px 24px;">
+        <table style="border-collapse:collapse; font-size:13px;">
+          <tr>
+            <th style="text-align:left; padding:4px 10px;">ACL row (1-based)</th>
+            <td style="padding:4px 10px;">
+              <input type="number" name="acl_row" min="1"
+                     value="{{ acl.row or '' }}" style="width:80px;">
+              <button class="btn btn-secondary" type="submit"
+                      name="action" value="acl_scan_balance_files"
+                      style="margin-left:6px;"
+                      title="Auto-detect the ACL row in every uploaded annual workbook and refresh the history table below.">
+                Scan uploaded balance files
+              </button>
+              {% if acl.label %}
+                <span class="muted" style="margin-left:8px;">
+                  Detected label: <strong>{{ acl.label }}</strong>
+                </span>
+              {% endif %}
+            </td>
+          </tr>
+        </table>
+        {% if acl_hist %}
+          <p class="muted" style="margin:8px 0 4px 0;">
+            <strong>Historical ACL balances</strong>
+            ({{ acl_hist|length }} month{{ '' if acl_hist|length == 1 else 's' }}):
+          </p>
+          <div style="max-height:260px; overflow-y:auto; border:1px solid #ddd; display:inline-block;">
+            <table style="border-collapse:collapse; font-size:13px;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc; background:#f3f3f3; position:sticky; top:0;">Month-end</th>
+                  <th style="text-align:right; padding:4px 10px; border-bottom:1px solid #ccc; background:#f3f3f3; position:sticky; top:0;">ACL Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for d, v in acl_hist|dictsort %}
+                  <tr>
+                    <td style="padding:3px 10px;">{{ d }}</td>
+                    <td style="padding:3px 10px; text-align:right; font-variant-numeric:tabular-nums;">
+                      ${{ '{:,.2f}'.format(v) }}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="muted" style="margin-top:8px;">
+            No ACL row detected yet. Click
+            <em>Scan uploaded balance files</em> to auto-detect.
+          </p>
+        {% endif %}
+      </div>
+    {% endif %}
+    <label style="display:block; margin:4px 0;">
+      <input type="radio" name="acl_source" value="separate"
+             {% if acl_src == 'separate' %}checked{% endif %}>
+      Upload separately (configure on Save below, then return).
+    </label>
+    <label style="display:block; margin:4px 0;">
+      <input type="radio" name="acl_source" value="manual"
+             {% if acl_src == 'manual' %}checked{% endif %}>
+      Enter manually:
+    </label>
+    <table style="border-collapse:collapse; font-size:13px; margin-left:24px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:4px 10px;">Month-end</th>
+          <th style="text-align:left; padding:4px 10px;">ACL Balance</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for k in ['month1','month2','month3'] %}
+          <tr>
+            <td style="padding:4px 10px;">
+              <input type="text" name="acl_manual_{{ k }}_date"
+                     value="{{ acl_man[k+'_date'] or '' }}"
+                     placeholder="YYYY-MM-DD" style="width:140px;">
+            </td>
+            <td style="padding:4px 10px;">
+              <input type="text" name="acl_manual_{{ k }}_value"
+                     value="{{ '%.2f' % acl_man[k+'_value'] if acl_man[k+'_value'] is not none else '' }}"
+                     placeholder="0.00" style="width:140px; text-align:right;">
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="btn-row" style="margin-top:18px;">
+      <button class="btn btn-secondary" type="submit"
+              name="action" value="back">&larr; Back</button>
+      <button class="btn btn-secondary" type="submit"
+              name="action" value="save_per_year_layout">Save</button>
+      <button class="btn btn-primary" type="submit"
+              name="action"
+              value="save_per_year_layout_and_next">Save &amp; Next &rarr;</button>
+    </div>
+  </form>
+</div>
+{% endif %}{# source == 'per_year' #}
+
 {% if source == 'manual' %}
 {% set months = mb.manual_months or [] %}
 {% set entries = mb.manual_entries or {} %}
@@ -746,7 +1121,9 @@
     months if needed.
   </p>
   <form method="post">
-    <input type="hidden" name="action" value="save_manual">
+    {# Buttons below carry their own name="action" value="..."; see the
+       note on the per_month form above for why a hidden action input
+       here would silently break Save & Next. #}
 
     <table id="manual-months-table" style="border-collapse:collapse; font-size:13px;">
       <thead>

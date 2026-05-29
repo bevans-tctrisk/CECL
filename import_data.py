@@ -109,7 +109,10 @@ def extract_snapshot_date(source_text, config):
             if len(yr_token) == 2:
                 yr_token = "20" + yr_token
             return _from_month_name(yr_token, ddmonyy.group(2))
-        return None
+        # Final fallback: try common numeric layouts (YYYYMMDD, MMDDYYYY,
+        # YYYY-MM, MM-YYYY...) so we still find a date when the configured
+        # date_pattern doesn't fit this particular filename.
+        return _try_common_date_layouts(text)
 
     # If either captured group is a month name, route through the name parser
     # rather than treating it as a number.
@@ -120,19 +123,84 @@ def extract_snapshot_date(source_text, config):
     if g2 and g2[:3].lower() in _MONTH_MAP:
         return _from_month_name(g1, g2)
 
-    if date_fmt == 'MMDDYY':
-        month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
-        year += 2000 if year < 100 else 0
-        return date(year, month, day).isoformat()
-    elif date_fmt == 'MMYY':
-        month, year = int(match.group(1)), int(match.group(2))
-        year += 2000 if year < 100 else 0
-        last_day = calendar.monthrange(year, month)[1]
-        return date(year, month, last_day).isoformat()
-    else:
-        year, month = int(match.group(1)), int(match.group(2))
-        last_day = calendar.monthrange(year, month)[1]
-        return date(year, month, last_day).isoformat()
+    try:
+        if date_fmt == 'MMDDYY':
+            month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            year += 2000 if year < 100 else 0
+            return date(year, month, day).isoformat()
+        elif date_fmt == 'MMYY':
+            month, year = int(match.group(1)), int(match.group(2))
+            year += 2000 if year < 100 else 0
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+        elif date_fmt == 'MMYYYY':
+            month, year = int(match.group(1)), int(match.group(2))
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+        elif date_fmt == 'YYYYMMDD':
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return date(year, month, day).isoformat()
+        else:
+            year, month = int(match.group(1)), int(match.group(2))
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+    except (ValueError, calendar.IllegalMonthError) as exc:
+        # The captured groups don't form a real calendar date (most often the
+        # date_pattern is wrong for this filename — e.g. ``(\d{4})(\d{2})``
+        # against ``03312026`` gives month=20). Try a small set of common
+        # filename date layouts on the same text before giving up, so a
+        # mis-configured client config still produces a date when one is
+        # plainly present in the filename.
+        fallback = _try_common_date_layouts(text)
+        if fallback is not None:
+            print(f"  WARN: configured date_pattern={date_pattern!r} "
+                  f"format={date_fmt} failed on '{source_text}' ({exc}); "
+                  f"recovered via fallback -> {fallback}")
+            return fallback
+        print(f"  WARN: could not parse date from '{source_text}' "
+              f"(format={date_fmt}): {exc}")
+        return None
+
+
+# Common filename date layouts, tried in order, used both as a regex *and*
+# to interpret the captured groups. Year groups are anchored to ``20\d{2}``
+# so the heuristic doesn't grab e.g. "0331" out of "03312026" as a year.
+_FALLBACK_DATE_LAYOUTS: list[tuple[str, str]] = [
+    # (regex, kind) — kind tells the loop how to read the groups.
+    (r"(20\d{2})[-_./ ](\d{2})[-_./ ](\d{2})", "YMD"),
+    (r"(20\d{2})(\d{2})(\d{2})",               "YMD"),
+    (r"(\d{2})[-_./ ](\d{2})[-_./ ](20\d{2})", "MDY"),
+    (r"(\d{2})(\d{2})(20\d{2})",               "MDY"),
+    (r"(20\d{2})[-_./ ](\d{2})(?!\d)",         "YM"),
+    (r"(20\d{2})(\d{2})(?!\d)",                "YM"),
+    (r"(\d{2})[-_./ ](20\d{2})",               "MY"),
+]
+
+
+def _try_common_date_layouts(text: str) -> str | None:
+    """Best-effort filename date recovery; returns ISO date or ``None``."""
+    for rx, kind in _FALLBACK_DATE_LAYOUTS:
+        m = re.search(rx, text)
+        if not m:
+            continue
+        try:
+            if kind == "YMD":
+                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                return date(y, mo, d).isoformat()
+            if kind == "MDY":
+                mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                return date(y, mo, d).isoformat()
+            if kind == "YM":
+                y, mo = int(m.group(1)), int(m.group(2))
+                last = calendar.monthrange(y, mo)[1]
+                return date(y, mo, last).isoformat()
+            if kind == "MY":
+                mo, y = int(m.group(1)), int(m.group(2))
+                last = calendar.monthrange(y, mo)[1]
+                return date(y, mo, last).isoformat()
+        except (ValueError, calendar.IllegalMonthError):
+            continue
+    return None
 
 
 def clean_balance(series, balance_format):

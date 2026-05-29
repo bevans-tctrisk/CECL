@@ -66,6 +66,14 @@ SYSTEM_DEFAULTS: dict[str, Any] = {
     #   - the pool's ACL base loss rate is 0, AND
     #   - the user has NOT entered a manual overlay for the pool.
     "default_mgmt_adj": 0.0011,
+    # Global Credit-Score bounds applied to every CU's credit-grade
+    # ladder on Step 8. The top grade's max is auto-set to
+    # ``credit_score_max``; the bottom grade's min is auto-set to
+    # ``credit_score_min``. Users only enter the Min for each
+    # interior grade; Max for every grade except the top is
+    # derived as ``next_higher_grade.min - 1``.
+    "credit_score_min": 350,
+    "credit_score_max": 900,
     # Environmental Factor Ranges written into every SCALE report at
     # run time. See env_factor_writer.py for the cell layout. Edits
     # take effect on future runs only; existing reports keep the
