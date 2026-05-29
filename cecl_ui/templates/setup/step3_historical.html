@@ -329,6 +329,17 @@
           historical database.</span>
         </span>
       </label>
+      <label class="radio-option" style="display:flex; gap:8px; align-items:flex-start;">
+        <input type="radio" name="hist_balance_source" value="annual_balance_sheets"
+               onchange="this.form.submit()"
+               {% if hist_source == 'annual_balance_sheets' %}checked{% endif %}>
+        <span>
+          <strong>Annual balance sheet workbooks (one file per year)</strong><br>
+          <span class="muted">One workbook per year, with all 12 months as
+          columns (e.g. <code>2024 Balance Sheets.xlsx</code>). The wizard
+          will read pool balances out of each year's workbook.</span>
+        </span>
+      </label>
     </div>
     <noscript>
       <button class="btn btn-secondary" type="submit" style="margin-top:8px;">
@@ -1323,6 +1334,14 @@
       <strong>Monthly balance-sheet uploader &mdash; coming soon.</strong><br>
       You'll be able to drop in one balance sheet per month and the wizard
       will pull pool balances out of each one to build the historical database.
+    </div>
+  {% elif hist_source == 'annual_balance_sheets' %}
+    <div class="flash info" style="margin-top:16px;">
+      <strong>Annual balance workbooks are uploaded on Step 5 &mdash;
+      Monthly Balance File.</strong><br>
+      We've already pre-selected the matching <em>One file per year</em>
+      mode there. Continue through this step (fill in any other historical
+      data you have) and you'll upload the yearly workbooks on Step 5.
     </div>
   {% endif %}
 </div>

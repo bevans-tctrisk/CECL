@@ -3299,11 +3299,18 @@ def step3_historical():
                 "single_workbook",
                 "monthly_loan_extracts",
                 "monthly_balance_sheets",
+                "annual_balance_sheets",
             ):
                 state["hist_balance_source"] = choice
+                # Annual balance sheets feed the SAME pipeline as Step 5's
+                # per_year monthly-balance mode. Auto-flip the Step 5 source
+                # so the user only configures it in one place.
+                if choice == "annual_balance_sheets":
+                    mb = state.setdefault("monthly_bal", {})
+                    mb["source"] = "per_year"
                 _save_state(state)
                 return redirect(url_for("setup.step3_historical"))
-            flash("Please choose one of the three balance-source options.", "error")
+            flash("Please choose one of the balance-source options.", "error")
 
         elif action == "set_hist_extract_target":
             he = _ensure_hist_extracts(state)
