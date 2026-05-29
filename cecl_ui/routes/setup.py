@@ -73,23 +73,25 @@ WIZARD_STEPS_WARM = [
 WIZARD_STEPS_NO_WARM = [
     ("identity",    "1. CU Identity"),
     ("loan_pools",  "2. Loan Pools"),
-    ("historical",  "3. Historical Data"),
-    ("dq_hist",      "4. Historical DQ"),
-    ("monthly_bal", "5. Monthly Balance File"),
-    ("grades",       "6. Credit Grades and Business Risk Ratings"),
-    ("credit_pull",  "7. Credit Pull"),
-    ("orig_score",  "8. Original Score Baseline"),
-    ("sample",      "9. Loan Data Extract(s)"),
-    ("columns",     "10. Column Mappings"),
-    ("pools",        "11. Loan Code Mapping"),
-    ("balance_check","12. Balance Adjustment"),
-    ("co_recov",     "13. Charge-Offs & Recoveries"),
-    ("impaired",     "14. Impaired Loans"),
-    ("files",        "15. File Format"),
-    ("economic",     "16. Economic Data"),
-    ("mgmt_adj",     "17. Mgmt Adjustments"),
-    ("reports",      "18. Reports"),
-    ("review",       "19. Review & Save"),
+    ("historical",  "3. Historical Balances"),
+    ("co_history",   "4. Historical Charge-Offs"),
+    ("recov_history","5. Historical Recoveries"),
+    ("dq_hist",      "6. Historical DQ"),
+    ("monthly_bal", "7. Monthly Balance File"),
+    ("grades",       "8. Credit Grades and Business Risk Ratings"),
+    ("credit_pull",  "9. Credit Pull"),
+    ("orig_score",  "10. Original Score Baseline"),
+    ("sample",      "11. Loan Data Extract(s)"),
+    ("columns",     "12. Column Mappings"),
+    ("pools",        "13. Loan Code Mapping"),
+    ("balance_check","14. Balance Adjustment"),
+    ("co_recov",     "15. Charge-Offs & Recoveries"),
+    ("impaired",     "16. Impaired Loans"),
+    ("files",        "17. File Format"),
+    ("economic",     "18. Economic Data"),
+    ("mgmt_adj",     "19. Mgmt Adjustments"),
+    ("reports",      "20. Reports"),
+    ("review",       "21. Review & Save"),
 ]
 
 # Steps shown when the user is in the CECL Simple (SCALE) model.
@@ -451,6 +453,8 @@ STEP_ENDPOINTS: dict[str, str] = {
     "balances":      "setup.step3_balances",
     "baseline":      "setup.step3_baseline",
     "historical":    "setup.step3_historical",
+    "co_history":    "setup.step3a_co_history",
+    "recov_history": "setup.step3b_recov_history",
     "monthly_bal":   "setup.step5_monthly_bal",
     "grades":        "setup.step5_grades",
     "sample":        "setup.step2_sample",
@@ -3288,15 +3292,38 @@ def _remove_hist_extract_anchor(state: dict[str, Any], name: str) -> bool:
 
 
 @setup_bp.route("/step/historical", methods=["GET", "POST"])
+@setup_bp.route("/step/co-history", methods=["GET", "POST"],
+                endpoint="step3a_co_history")
+@setup_bp.route("/step/recov-history", methods=["GET", "POST"],
+                endpoint="step3b_recov_history")
 def step3_historical():
     """Historical Data step — only shown for CUs without a WARM file.
 
-    Collects three file types:
-      - Historical loan balances by pool/type (required)
-      - Historical charge-offs (required)
-      - Historical recoveries (optional — checkbox to skip)
+    Split across three wizard steps (one URL each) so the page stays
+    navigable; the same view function handles all three by branching on
+    ``request.endpoint``:
+
+      - ``/step/historical``       — Historical loan balances by pool/type
+      - ``/step/co-history``       — Historical charge-offs
+      - ``/step/recov-history``    — Historical recoveries (optional)
     """
     state = _state()
+
+    # Which slice of the legacy combined page is this URL rendering?
+    _ep = request.endpoint or "setup.step3_historical"
+    if _ep.endswith("step3a_co_history"):
+        section = "co"
+        active_key = "co_history"
+        next_endpoint = "setup.step3b_recov_history"
+    elif _ep.endswith("step3b_recov_history"):
+        section = "recov"
+        active_key = "recov_history"
+        next_endpoint = "setup.step_dq_hist"
+    else:
+        section = "balances"
+        active_key = "historical"
+        next_endpoint = "setup.step3a_co_history"
+    back_endpoint = _ep if _ep.startswith("setup.") else f"setup.{_ep}"
 
     if request.method == "POST":
         action = request.form.get("action", "next")
@@ -3322,7 +3349,7 @@ def step3_historical():
                     mb = state.setdefault("monthly_bal", {})
                     mb["source"] = "per_year"
                 _save_state(state)
-                return redirect(url_for("setup.step3_historical"))
+                return redirect(url_for(back_endpoint))
             flash("Please choose one of the balance-source options.", "error")
 
         elif action == "upload_annual_year":
@@ -3341,7 +3368,7 @@ def step3_historical():
                 except Exception as exc:  # noqa: BLE001
                     flash(f"Upload failed: {exc}", "error")
             _save_state(state)
-            return redirect(url_for("setup.step3_historical"))
+            return redirect(url_for(back_endpoint))
 
         elif action == "scan_annual_folder":
             mb = state.setdefault("monthly_bal", {})
@@ -3405,7 +3432,7 @@ def step3_historical():
                 except Exception as exc:  # noqa: BLE001
                     flash(f"Folder scan failed: {exc}", "error")
             _save_state(state)
-            return redirect(url_for("setup.step3_historical"))
+            return redirect(url_for(back_endpoint))
 
         elif action == "remove_annual_year":
             mb = state.setdefault("monthly_bal", {})
@@ -3431,7 +3458,7 @@ def step3_historical():
                 flash(f"File '{target_name}' not found.", "error")
             mb["year_files"] = files
             _save_state(state)
-            return redirect(url_for("setup.step3_historical"))
+            return redirect(url_for(back_endpoint))
 
         elif action == "save_annual_pool_map":
             mb = state.setdefault("monthly_bal", {})
@@ -3453,7 +3480,7 @@ def step3_historical():
             _save_state(state)
             flash("Saved pool mapping for annual balance workbooks.",
                   "success")
-            return redirect(url_for("setup.step3_historical"))
+            return redirect(url_for(back_endpoint))
 
         elif action == "set_hist_extract_target":
             he = _ensure_hist_extracts(state)
@@ -4429,7 +4456,7 @@ def step3_historical():
 
         elif action in ("next", "skip"):
             _save_state(state)
-            return redirect(url_for("setup.step_dq_hist"))
+            return redirect(url_for(next_endpoint))
 
         _save_state(state)
 
@@ -4573,7 +4600,8 @@ def step3_historical():
         solr_canonical_map=solr_5300_backfill.load_canonical_map(),
         co_canonical_map=solr_5300_co_backfill.load_canonical_map(),
         recov_canonical_map=solr_5300_recov_backfill.load_canonical_map(),
-        **_wizard_ctx("historical"),
+        section=section,
+        **_wizard_ctx(active_key),
     )
 
 

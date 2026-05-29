@@ -2,6 +2,14 @@
 {% block title %}Historical Data{% endblock %}
 {% block content %}
 {% include "setup/_stepper.html" %}
+{# `section` is passed in by the view ('balances' | 'co' | 'recov'); legacy
+   callers may render with no value -> treat as 'all'. #}
+{% set section = section or 'all' %}
+{# Shared variables referenced by both the CO and Recov sections so they
+   stay defined even when one section is rendered in isolation. #}
+{% set he = state.hist_extracts or {} %}
+{% set tgt_period = he.get('target_period') or '' %}
+{% set tgt_months = he.get('history_months') or '' %}
 
 {# Renders a "what's loaded" month-by-loan-code matrix card identical in
    style to the Balances history-matrix card. ``hv`` is the dict returned
@@ -275,14 +283,22 @@
     historical period used by the CECL model for trending, loss-rate
     calibration, and comparison reporting.
   </p>
+  {% if section == 'all' %}
   <p class="muted">
     <strong>Balances</strong> and <strong>Charge-offs</strong> are required.
     <strong>Recoveries</strong> are optional &mdash; check the box below if
     this CU has no recovery history.
   </p>
+  {% elif section == 'balances' %}
+  <p class="muted">This step collects the monthly <strong>loan balances by pool / type</strong>. Charge-offs and recoveries are now collected in their own steps.</p>
+  {% elif section == 'co' %}
+  <p class="muted">This step collects the <strong>historical charge-offs</strong>. Balances are configured in the previous step; recoveries in the next.</p>
+  {% elif section == 'recov' %}
+  <p class="muted">This step collects the <strong>historical recoveries</strong> (optional &mdash; check the box below if this CU has no recovery history).</p>
+  {% endif %}
 </div>
 
-{# â”€â”€ 1. Historical Balances â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ #}
+{% if section in ('all', 'balances') %}
 {% set hist_source = state.hist_balance_source or 'single_workbook' %}
 <div class="card">
   <h3>1. Historical Loan Balances by Pool / Type
@@ -1795,7 +1811,9 @@
   {% endif %}
 </div>
 {% endif %}
+{% endif %}{# section in ('all','balances') #}
 
+{% if section in ('all', 'co') %}
 {# -- 2. Historical Charge-Offs -------------------------------------------- #}
 {% set co_src = state.get('hist_co_source') or 'single_workbook' %}
 {% set co_files = (state.hist_scan or {}).get('co_files', []) %}
@@ -2369,7 +2387,9 @@
         'Nothing in the charge-off history database yet for this CU. '
         'Click Aggregate above to load the first month(s).') }}
 </div>
+{% endif %}{# section in ('all','co') #}
 
+{% if section in ('all', 'recov') %}
 {# -- 3. Historical Recoveries ------------------------------------------- #}
 {% set recov_src = state.get('hist_recov_source') or 'single_workbook' %}
 {% set recov_files = (state.hist_scan or {}).get('recov_files', []) %}
@@ -2949,41 +2969,56 @@
         'Nothing in the recovery history database yet for this CU. '
         'Click Aggregate above to load the first month(s).') }}
 </div>
+{% endif %}{# section in ('all','recov') #}
 
-{# â”€â”€ Navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ #}
+{# Navigation: per-section Back / Next destinations + completeness check. #}
+{% set hist_scan = state.hist_scan or {} %}
+{% set has_balances = hist_scan.get('monthly_files')
+      or (history_view and history_view.row_count) %}
+{% set has_co = hist_scan.get('co_files')
+      or hist_scan.get('monthly_co_files')
+      or (co_history_view and co_history_view.row_count) %}
+{% set has_recov = hist_scan.get('recov_files')
+      or hist_scan.get('monthly_recov_files')
+      or state.no_hist_recoveries
+      or (recov_history_view and recov_history_view.row_count) %}
+{% set hpm2 = state.hist_pool_map or {} %}
+{% set mapping_required = hist_scan.get('monthly_files')
+      and (hpm2.get('labels') | length) > 0 %}
+{% set ns = namespace(complete=True) %}
+{% if mapping_required %}
+  {% for lbl in hpm2.get('labels', []) %}
+    {% if not (hpm2.get('mapping') or {}).get(lbl) %}
+      {% set ns.complete = False %}
+    {% endif %}
+  {% endfor %}
+{% endif %}
+
+{% if section == 'balances' %}
+  {% set _back_url = url_for('setup.step_loan_pools') %}
+  {% set _next_label = 'Save & Next: Historical Charge-Offs &rarr;' %}
+  {% set _section_complete = has_balances and ns.complete %}
+{% elif section == 'co' %}
+  {% set _back_url = url_for('setup.step3_historical') %}
+  {% set _next_label = 'Save & Next: Historical Recoveries &rarr;' %}
+  {% set _section_complete = has_co %}
+{% elif section == 'recov' %}
+  {% set _back_url = url_for('setup.step3a_co_history') %}
+  {% set _next_label = 'Save & Next: Historical DQ &rarr;' %}
+  {% set _section_complete = has_recov %}
+{% else %}
+  {% set _back_url = url_for('setup.step_loan_pools') %}
+  {% set _next_label = 'Save & Next: Monthly Balance File &rarr;' %}
+  {% set _section_complete = has_balances and has_co and has_recov and ns.complete %}
+{% endif %}
+
 <div class="card">
   <form method="post">
     <div class="btn-row">
-      <a class="btn btn-secondary" href="{{ url_for('setup.step_loan_pools') }}">&larr; Back</a>
-
-      {% set hist_scan = state.hist_scan or {} %}
-      {# Consider the step satisfied if EITHER file uploads completed OR
-         rows already exist in the history DB (e.g. populated via the
-         5300 backfill). #}
-      {% set has_balances = hist_scan.get('monthly_files')
-            or (history_view and history_view.row_count) %}
-      {% set has_co = hist_scan.get('co_files')
-            or (co_history_view and co_history_view.row_count) %}
-      {% set has_recov = hist_scan.get('recov_files')
-            or state.no_hist_recoveries
-            or (recov_history_view and recov_history_view.row_count) %}
-
-      {# Mapping is required once a balance file has been uploaded. #}
-      {% set hpm2 = state.hist_pool_map or {} %}
-      {% set mapping_required = hist_scan.get('monthly_files')
-            and (hpm2.get('labels') | length) > 0 %}
-      {% set ns = namespace(complete=True) %}
-      {% if mapping_required %}
-        {% for lbl in hpm2.get('labels', []) %}
-          {% if not (hpm2.get('mapping') or {}).get(lbl) %}
-            {% set ns.complete = False %}
-          {% endif %}
-        {% endfor %}
-      {% endif %}
-
-      {% if has_balances and has_co and has_recov and ns.complete %}
+      <a class="btn btn-secondary" href="{{ _back_url }}">&larr; Back</a>
+      {% if _section_complete %}
         <button class="btn btn-primary" type="submit" name="action" value="next">
-          Save &amp; Next: Monthly Balance File &rarr;
+          {{ _next_label | safe }}
         </button>
       {% else %}
         <button class="btn btn-secondary" type="submit" name="action" value="skip">
