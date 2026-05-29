@@ -813,7 +813,33 @@ def _load_extract_enrichment(config, workspace_root):
     data_dir = config.get('data_directory', '')
     if data_dir and not os.path.isabs(data_dir):
         data_dir = os.path.join(workspace_root, data_dir)
-    search_dirs = [data_dir] if data_dir and os.path.isdir(data_dir) else []
+    search_dirs: list[str] = []
+    if data_dir and os.path.isdir(data_dir):
+        search_dirs.append(data_dir)
+
+    # Also search the import archive — ``import_data`` moves loan-extract
+    # files there after a successful import (when ``archive_imported_files``
+    # is on, which is the default), so by the time the report runs the
+    # original file is no longer in ``data_directory``.
+    archive_cfg = config.get('archive_directory')
+    if archive_cfg:
+        archive_dir = archive_cfg if os.path.isabs(archive_cfg) \
+            else os.path.join(workspace_root, archive_cfg)
+    else:
+        # Mirror import_data's default: <workspace>/Archive/<client_short>.
+        client_short = os.path.basename(os.path.normpath(data_dir)) if data_dir else ''
+        archive_dir = os.path.join(workspace_root, 'Archive', client_short) \
+            if client_short else ''
+    if archive_dir and os.path.isdir(archive_dir) and archive_dir not in search_dirs:
+        search_dirs.append(archive_dir)
+
+    # Custom loan-file folder, if configured.
+    loan_folder = config.get('loan_file_folder')
+    if loan_folder:
+        loan_dir = loan_folder if os.path.isabs(loan_folder) \
+            else os.path.join(workspace_root, loan_folder)
+        if os.path.isdir(loan_dir) and loan_dir not in search_dirs:
+            search_dirs.append(loan_dir)
 
     extracts = list(config.get('loan_data_extracts') or [])
     if not extracts:
@@ -834,7 +860,8 @@ def _load_extract_enrichment(config, workspace_root):
             continue
         path = _resolve_extract_path(ex.get('file_pattern'), search_dirs)
         if not path:
-            print(f"    Extract '{ex.get('label')}' not found in {data_dir}; skipping enrichment.")
+            tried = ", ".join(search_dirs) if search_dirs else "(no directories)"
+            print(f"    Extract '{ex.get('label')}' not found in: {tried}; skipping enrichment.")
             continue
         has_header = ex.get('has_header', True)
         try:
