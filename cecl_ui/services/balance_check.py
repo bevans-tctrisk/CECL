@@ -313,6 +313,48 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
     mb = state.get("monthly_bal") or {}
     source = (mb.get("source") or "single").strip().lower()
 
+    # ── per_year: one annual workbook per year w/ 12 month-end columns
+    if source == "per_year":
+        files = [
+            e for e in (mb.get("year_files") or [])
+            if e.get("saved_path")
+        ]
+        if not files:
+            return {"ok": False, "error":
+                    "No annual balance-sheet files have been added on "
+                    "the Monthly Balance File step.",
+                    "period": "", "by_pool": {}, "raw_rows": []}
+        layout = mb.get("per_year_layout") or {}
+        result = monthly_bal_parser.pool_balances_for_per_year_files(
+            year_files=files,
+            layout=layout,
+            label_to_pool=mb.get("pool_map") or {},
+        )
+        by_period = result.get("by_period") or {}
+        if not by_period:
+            return {"ok": False,
+                    "error": (result.get("error")
+                              or "Could not extract any pool balances "
+                              "from the annual workbook(s)."),
+                    "period": "", "by_pool": {}, "raw_rows": []}
+        # Skip future-period columns that exist in the layout but have
+        # no data yet (e.g. running in May with a Jan-Dec sheet -
+        # June-Dec columns are blank).
+        populated = [
+            p for p, b in by_period.items() if (b or {}).get("by_pool")
+        ]
+        if not populated:
+            return {"ok": False,
+                    "error": "Annual workbook(s) had period columns but "
+                    "no balances mapped to pools. Check the pool map.",
+                    "period": "", "by_pool": {}, "raw_rows": []}
+        latest = max(populated)
+        bucket = by_period[latest] or {}
+        return {"ok": True, "error": result.get("error"),
+                "period": latest,
+                "by_pool": bucket.get("by_pool") or {},
+                "raw_rows": bucket.get("raw_rows") or []}
+
     # ── per_month: one balance-sheet file per month-end ───────────────
     if source == "per_month":
         files = [
