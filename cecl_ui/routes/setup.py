@@ -1180,6 +1180,98 @@ def _save_monthly_bal_upload(file_storage) -> Path:
     return target
 
 
+def _ingest_annual_workbook(
+    state: dict,
+    mb: dict,
+    target: Path,
+    year_raw: str | int | None,
+) -> tuple[str, str]:
+    """Analyse a per-year balance workbook and register it on ``mb``.
+
+    Shared by Step 3 (Historical) and Step 5 (Monthly Balance File) so
+    the same workbook ingest behaviour applies on both pages. Returns
+    ``(category, message)`` where category is one of
+    ``success`` / ``warning`` / ``error`` suitable for ``flash``.
+    """
+    try:
+        analysis = monthly_bal_parser.analyse_per_year_file(target)
+    except Exception as exc:  # noqa: BLE001
+        return ("error", f"Could not analyse {target.name}: {exc}")
+
+    try:
+        year_int = int(year_raw) if year_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        year_int = None
+    if year_int is None:
+        year_int = analysis.get("detected_year")
+    if year_int is None:
+        return (
+            "error",
+            f"Saved {target.name}, but no calendar year was supplied "
+            "and none could be detected from the filename.",
+        )
+
+    entry = {
+        "filename": target.name,
+        "saved_path": str(target),
+        "year": int(year_int),
+        "period_count": len(analysis.get("period_columns") or []),
+    }
+    files = mb.setdefault("year_files", [])
+    files[:] = [e for e in files if e.get("filename") != entry["filename"]]
+    files.append(entry)
+    files.sort(key=lambda e: e.get("year") or 0)
+
+    if not analysis.get("ok"):
+        return (
+            "warning",
+            f"Uploaded {target.name} for {year_int}, but auto-detect "
+            f"failed: {analysis.get('error', 'unknown error')}. "
+            "Fill in the layout fields by hand and click Save.",
+        )
+
+    layout = mb.setdefault("per_year_layout", {})
+    layout["sheet"] = analysis.get("sheet", "")
+    layout["label_col"] = analysis.get("label_col", "B")
+    layout["header_row"] = analysis.get("header_row", 1)
+    layout["period_columns"] = analysis.get("period_columns", [])
+
+    existing_labels = list(mb.get("parsed_pool_labels") or [])
+    seen = {s.lower() for s in existing_labels}
+    for lab in analysis.get("pool_labels", []):
+        if lab.lower() not in seen:
+            existing_labels.append(lab)
+            seen.add(lab.lower())
+    mb["parsed_pool_labels"] = existing_labels
+
+    combined_map: dict[str, str] = {}
+    for _k, _v in (state.get("balance_title_map") or {}).items():
+        if _k:
+            combined_map[_k] = (_v or "")
+    _hpm = state.get("hist_pool_map") or {}
+    for _k, _v in (_hpm.get("mapping") or {}).items():
+        if _k and _k not in combined_map:
+            combined_map[_k] = (_v or "")
+    seeded, status = monthly_bal_parser.seed_pool_map(
+        existing_labels, combined_map)
+    existing_pm = mb.get("pool_map") or {}
+    for label, pool in seeded.items():
+        if label not in existing_pm or not existing_pm.get(label):
+            existing_pm[label] = pool
+    mb["pool_map"] = existing_pm
+    mb["label_status"] = status
+
+    return (
+        "success",
+        f"Uploaded {target.name} for {year_int}: detected sheet "
+        f"{analysis.get('sheet')!r}, header row "
+        f"{analysis.get('header_row')}, label column "
+        f"{analysis.get('label_col')}, "
+        f"{entry['period_count']} month-end column(s), "
+        f"{len(analysis.get('pool_labels', []))} pool label(s).",
+    )
+
+
 def _save_acl_file_upload(file_storage) -> Path:
     _ACL_FILE_DIR.mkdir(parents=True, exist_ok=True)
     fn = secure_filename(file_storage.filename or "acl.xlsx")
@@ -2015,90 +2107,9 @@ def step5_monthly_bal():
                 return redirect(url_for("setup.step5_monthly_bal"))
             try:
                 target = _save_monthly_bal_upload(f)
-                analysis = monthly_bal_parser.analyse_per_year_file(target)
-                try:
-                    year_int = int(year_raw) if year_raw else None
-                except ValueError:
-                    year_int = None
-                if year_int is None:
-                    year_int = analysis.get("detected_year")
-                if year_int is None:
-                    flash(
-                        f"Saved {target.name}, but no calendar year was "
-                        "supplied and none could be detected from the "
-                        "filename. Enter the year and re-upload.",
-                        "error",
-                    )
-                    _save_state(state)
-                    return redirect(url_for("setup.step5_monthly_bal"))
-
-                entry = {
-                    "filename": target.name,
-                    "saved_path": str(target),
-                    "year": int(year_int),
-                    "period_count": len(analysis.get("period_columns") or []),
-                }
-                files = mb.setdefault("year_files", [])
-                files[:] = [e for e in files
-                            if e.get("filename") != entry["filename"]]
-                files.append(entry)
-                files.sort(key=lambda e: e.get("year") or 0)
-
-                if analysis.get("ok"):
-                    layout = mb.setdefault("per_year_layout", {})
-                    layout["sheet"] = analysis.get("sheet", "")
-                    layout["label_col"] = analysis.get("label_col", "B")
-                    layout["header_row"] = analysis.get("header_row", 1)
-                    # Persist this year's detected period columns as a
-                    # fallback for the importer (per-file headers usually
-                    # re-detect, this is only used if a future file is
-                    # missing its header row).
-                    layout["period_columns"] = analysis.get(
-                        "period_columns", [])
-
-                    existing_labels = list(mb.get("parsed_pool_labels") or [])
-                    seen = {s.lower() for s in existing_labels}
-                    for lab in analysis.get("pool_labels", []):
-                        if lab.lower() not in seen:
-                            existing_labels.append(lab)
-                            seen.add(lab.lower())
-                    mb["parsed_pool_labels"] = existing_labels
-
-                    combined_map: dict[str, str] = {}
-                    for _k, _v in (state.get("balance_title_map")
-                                    or {}).items():
-                        if _k:
-                            combined_map[_k] = (_v or "")
-                    _hpm = state.get("hist_pool_map") or {}
-                    for _k, _v in (_hpm.get("mapping") or {}).items():
-                        if _k and _k not in combined_map:
-                            combined_map[_k] = (_v or "")
-                    seeded, status = monthly_bal_parser.seed_pool_map(
-                        existing_labels, combined_map)
-                    existing_pm = mb.get("pool_map") or {}
-                    for label, pool in seeded.items():
-                        if label not in existing_pm or not existing_pm.get(label):
-                            existing_pm[label] = pool
-                    mb["pool_map"] = existing_pm
-                    mb["label_status"] = status
-
-                    flash(
-                        f"Uploaded {target.name} for {year_int}: detected "
-                        f"sheet {analysis.get('sheet')!r}, header row "
-                        f"{analysis.get('header_row')}, label column "
-                        f"{analysis.get('label_col')}, "
-                        f"{entry['period_count']} month-end column(s), "
-                        f"{len(analysis.get('pool_labels', []))} pool label(s).",
-                        "success",
-                    )
-                else:
-                    flash(
-                        f"Uploaded {target.name} for {year_int}, but "
-                        f"auto-detect failed: "
-                        f"{analysis.get('error', 'unknown error')}. "
-                        "Fill in the layout fields by hand and click Save.",
-                        "warning",
-                    )
+                category, message = _ingest_annual_workbook(
+                    state, mb, target, year_raw)
+                flash(message, category)
             except Exception as exc:  # noqa: BLE001
                 flash(f"Upload failed: {exc}", "error")
             _save_state(state)
@@ -3311,6 +3322,132 @@ def step3_historical():
                 _save_state(state)
                 return redirect(url_for("setup.step3_historical"))
             flash("Please choose one of the balance-source options.", "error")
+
+        elif action == "upload_annual_year":
+            mb = state.setdefault("monthly_bal", {})
+            mb["source"] = "per_year"
+            f = request.files.get("annual_year_file")
+            year_raw = (request.form.get("annual_year") or "").strip()
+            if not f or not f.filename:
+                flash("Choose an annual balance workbook to upload.", "error")
+            else:
+                try:
+                    target = _save_monthly_bal_upload(f)
+                    category, message = _ingest_annual_workbook(
+                        state, mb, target, year_raw)
+                    flash(message, category)
+                except Exception as exc:  # noqa: BLE001
+                    flash(f"Upload failed: {exc}", "error")
+            _save_state(state)
+            return redirect(url_for("setup.step3_historical"))
+
+        elif action == "scan_annual_folder":
+            mb = state.setdefault("monthly_bal", {})
+            mb["source"] = "per_year"
+            folder_raw = (request.form.get("annual_folder") or "").strip()
+            folder = _normalize_folder_path(folder_raw)
+            mb["annual_folder"] = folder
+            if not folder:
+                flash("Enter a folder path to scan.", "error")
+            else:
+                try:
+                    p = Path(folder)
+                    if not p.is_dir():
+                        flash(
+                            f"Folder not found or not accessible: {folder}",
+                            "error",
+                        )
+                    else:
+                        candidates = [
+                            f for f in sorted(p.iterdir())
+                            if f.is_file()
+                            and f.suffix.lower() in (".xlsx", ".xlsm", ".xls")
+                            and not f.name.startswith(("~$", "."))
+                        ]
+                        if not candidates:
+                            flash(
+                                f"No .xlsx/.xls workbooks found in {folder}.",
+                                "warning",
+                            )
+                        else:
+                            import shutil
+                            ok_n, warn_n, err_n = 0, 0, 0
+                            for src in candidates:
+                                _MONTHLY_BAL_DIR.mkdir(
+                                    parents=True, exist_ok=True)
+                                fn = secure_filename(src.name)
+                                dest = _MONTHLY_BAL_DIR / fn
+                                try:
+                                    if dest.resolve() != src.resolve():
+                                        shutil.copy2(src, dest)
+                                except Exception:  # noqa: BLE001
+                                    dest = src
+                                category, _msg = _ingest_annual_workbook(
+                                    state, mb, dest, year_raw="")
+                                if category == "success":
+                                    ok_n += 1
+                                elif category == "warning":
+                                    warn_n += 1
+                                else:
+                                    err_n += 1
+                            parts = [f"Scanned {folder}:",
+                                     f"{ok_n} ingested"]
+                            if warn_n:
+                                parts.append(f"{warn_n} layout warning(s)")
+                            if err_n:
+                                parts.append(f"{err_n} skipped")
+                            flash(
+                                ", ".join(parts) + ".",
+                                "success" if ok_n else "warning",
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    flash(f"Folder scan failed: {exc}", "error")
+            _save_state(state)
+            return redirect(url_for("setup.step3_historical"))
+
+        elif action == "remove_annual_year":
+            mb = state.setdefault("monthly_bal", {})
+            target_name = (request.form.get("filename") or "").strip()
+            files = mb.get("year_files") or []
+            removed = None
+            for e in files:
+                if e.get("filename") == target_name:
+                    removed = e
+                    break
+            if removed:
+                files.remove(removed)
+                sp = removed.get("saved_path") or ""
+                if sp and not removed.get("external"):
+                    try:
+                        p = Path(sp)
+                        if p.is_file():
+                            p.unlink()
+                    except Exception:  # noqa: BLE001
+                        pass
+                flash(f"Removed {target_name}.", "success")
+            else:
+                flash(f"File '{target_name}' not found.", "error")
+            mb["year_files"] = files
+            _save_state(state)
+            return redirect(url_for("setup.step3_historical"))
+
+        elif action == "save_annual_pool_map":
+            mb = state.setdefault("monthly_bal", {})
+            pool_map = mb.setdefault("pool_map", {})
+            for key in list(request.form.keys()):
+                if key.startswith("pm_label_"):
+                    idx = key[len("pm_label_"):]
+                    label = (request.form.get(key) or "").strip()
+                    if not label:
+                        continue
+                    pool = (
+                        request.form.get(f"pm_pool_{idx}") or "").strip()
+                    pool_map[label] = pool
+            mb["pool_map"] = pool_map
+            _save_state(state)
+            flash("Saved pool mapping for annual balance workbooks.",
+                  "success")
+            return redirect(url_for("setup.step3_historical"))
 
         elif action == "set_hist_extract_target":
             he = _ensure_hist_extracts(state)

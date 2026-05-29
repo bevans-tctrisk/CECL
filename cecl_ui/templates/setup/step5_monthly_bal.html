@@ -803,6 +803,14 @@
 {% set py = mb.per_year_layout or {} %}
 {% set py_files = mb.year_files or [] %}
 <div class="card">
+  {% if state.hist_balance_source == 'annual_balance_sheets' %}
+  <div class="flash info" style="margin-bottom:12px;">
+    <strong>Annual workbooks are configured on Step 3 &mdash; Historical
+    Data.</strong> Anything you upload or edit below also shows up there.
+    For most CUs the historical scan on Step 3 covers every period
+    including the current quarter, so this step is informational.
+  </div>
+  {% endif %}
   <h3>1. Upload one workbook per year</h3>
   <p class="muted">
     Upload each annual balance-sheet workbook (e.g.

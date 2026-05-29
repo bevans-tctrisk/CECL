@@ -1336,13 +1336,142 @@
       will pull pool balances out of each one to build the historical database.
     </div>
   {% elif hist_source == 'annual_balance_sheets' %}
+    {% set mb_ann = state.monthly_bal or {} %}
+    {% set yfiles = mb_ann.year_files or [] %}
+    {% set ann_layout = mb_ann.per_year_layout or {} %}
+    {% set ann_pool_map = mb_ann.pool_map or {} %}
+    {% set ann_labels = mb_ann.parsed_pool_labels or [] %}
+    {% set ann_folder = mb_ann.annual_folder or '' %}
+
     <div class="flash info" style="margin-top:16px;">
-      <strong>Annual balance workbooks are uploaded on Step 5 &mdash;
-      Monthly Balance File.</strong><br>
-      We've already pre-selected the matching <em>One file per year</em>
-      mode there. Continue through this step (fill in any other historical
-      data you have) and you'll upload the yearly workbooks on Step 5.
+      <strong>Annual balance sheet workbooks.</strong>
+      Upload a sample workbook to auto-detect the layout, then point us at
+      the folder containing every year's workbook so we can pull the full
+      historical balance history in one pass. The same data feeds Step 5
+      (current quarter) automatically.
     </div>
+
+    {# -- Upload a single sample year (for layout detection or one-offs) -- #}
+    <form method="post" enctype="multipart/form-data" style="margin-top:16px;">
+      <input type="hidden" name="action" value="upload_annual_year">
+      <h4 style="margin-bottom:6px;">Upload one annual workbook</h4>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <label style="flex:1 1 280px;">Annual balance workbook
+          <input type="file" name="annual_year_file"
+                 accept=".xlsx,.xlsm,.xls">
+          <span class="help">e.g. <code>2024 Balance Sheets.xlsx</code></span>
+        </label>
+        <label style="flex:0 0 140px;">Year (optional)
+          <input type="number" name="annual_year" min="2000" max="2099"
+                 placeholder="auto-detect">
+          <span class="help">Leave blank to auto-detect from filename.</span>
+        </label>
+        <button class="btn btn-secondary" type="submit">Upload Sample</button>
+      </div>
+    </form>
+
+    {# -- Bulk folder scan -- #}
+    <form method="post" style="margin-top:16px;">
+      <input type="hidden" name="action" value="scan_annual_folder">
+      <h4 style="margin-bottom:6px;">Or scan a folder for all yearly workbooks</h4>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <label style="flex:1 1 480px;">Folder path
+          <input type="text" name="annual_folder"
+                 value="{{ ann_folder }}"
+                 placeholder="Z:\Shared\Clients\... \Historical Files\Balance Sheets"
+                 style="font-family: Consolas, monospace;">
+          <span class="help">Every <code>.xlsx</code> / <code>.xls</code> file
+          in this folder will be parsed as one calendar year.</span>
+        </label>
+        <button class="btn btn-secondary" type="submit">Scan Folder</button>
+      </div>
+    </form>
+
+    {# -- Files table -- #}
+    {% if yfiles %}
+      <h4 style="margin-top:20px; margin-bottom:6px;">
+        Ingested annual workbooks ({{ yfiles|length }})
+      </h4>
+      <table class="data-table" style="width:100%; margin-top:4px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;">File</th>
+            <th style="text-align:left;">Year</th>
+            <th style="text-align:left;">Month-end columns</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for yf in yfiles %}
+            <tr>
+              <td><code>{{ yf.filename }}</code></td>
+              <td>{{ yf.year }}</td>
+              <td>{{ yf.period_count or 0 }}</td>
+              <td style="text-align:right;">
+                <form method="post" style="display:inline;">
+                  <input type="hidden" name="action" value="remove_annual_year">
+                  <input type="hidden" name="filename" value="{{ yf.filename }}">
+                  <button type="submit" class="btn btn-link" style="color:#a33;">
+                    Remove
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    {# -- Detected layout summary -- #}
+    {% if ann_layout.sheet %}
+      <div class="muted" style="margin-top:12px;">
+        Detected layout: sheet <code>{{ ann_layout.sheet }}</code>,
+        header row {{ ann_layout.header_row }}, label column
+        <code>{{ ann_layout.label_col }}</code>.
+      </div>
+    {% endif %}
+
+    {# -- Pool mapping table -- #}
+    {% set all_labels = [] %}
+    {% for lbl in ann_labels %}{% if lbl and lbl not in all_labels %}{% set _ = all_labels.append(lbl) %}{% endif %}{% endfor %}
+    {% for lbl in ann_pool_map.keys() %}{% if lbl and lbl not in all_labels %}{% set _ = all_labels.append(lbl) %}{% endif %}{% endfor %}
+    {% if all_labels %}
+      <form method="post" style="margin-top:16px;">
+        <input type="hidden" name="action" value="save_annual_pool_map">
+        <h4 style="margin-bottom:6px;">Pool mapping</h4>
+        <p class="muted" style="margin-top:0;">
+          Map each label found in the workbook's label column to one of the
+          pools defined on Step 2 — Loan Pools. Leave blank to exclude.
+        </p>
+        <table class="data-table" style="width:100%; max-width:780px;">
+          <thead>
+            <tr>
+              <th style="text-align:left;">Workbook label</th>
+              <th style="text-align:left;">Maps to pool</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for lbl in all_labels %}
+              <tr>
+                <td>
+                  <input type="hidden" name="pm_label_{{ loop.index0 }}" value="{{ lbl }}">
+                  <code>{{ lbl }}</code>
+                </td>
+                <td>
+                  <input type="text" name="pm_pool_{{ loop.index0 }}"
+                         value="{{ ann_pool_map.get(lbl, '') }}"
+                         placeholder="Pool name (blank = exclude)"
+                         style="width:100%;">
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <button class="btn btn-secondary" type="submit" style="margin-top:8px;">
+          Save Pool Mapping
+        </button>
+      </form>
+    {% endif %}
   {% endif %}
 </div>
 
