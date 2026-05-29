@@ -681,10 +681,12 @@
         row.style.display = (modes.indexOf(mode) >= 0) ? '' : 'none';
       });
     }
+    </script>
+    {% endif %}
 
-    // Show/hide the suffix-length / delimiter / Account-column inputs for
-    // the per-file CO/Recov Column Mapping cards.  ``which`` is "co" or
-    // "recov".
+    {# CO/Recov column-mapping JS — defined unconditionally so it works
+       even when no historical-extract profiles exist. #}
+    <script>
     function updateCoRecovMode(which) {
       var picked = document.querySelector(
         'input[name="' + which + '_member_account_mode"]:checked'
@@ -704,7 +706,6 @@
         accountFld.style.display = (mode === 'split') ? '' : 'none';
     }
     </script>
-    {% endif %}
 
     {# Historical folder path (scan handler comes in the next slice) #}
     <div style="margin-top:24px;">
