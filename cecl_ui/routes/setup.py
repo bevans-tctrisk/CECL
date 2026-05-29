@@ -3776,6 +3776,35 @@ def step3_historical():
                     existing = set((hv or {}).get("months") or [])
                 except Exception:  # noqa: BLE001
                     existing = set()
+                # Also skip months already provided by uploaded balance
+                # sheet workbooks (annual or per-month). Without this,
+                # the 5300 backfill would happily re-fill quarter-ends
+                # that the user already covered via Excel uploads —
+                # 87 months would be filled even when the annual files
+                # already supply most of them.
+                try:
+                    mb_state = state.get("monthly_bal") or {}
+                    source = state.get("hist_balance_source") or ""
+                    label_to_pool = mb_state.get("pool_map") or {}
+                    if source == "annual_balance_sheets":
+                        ann = monthly_bal_parser.pool_balances_for_per_year_files(
+                            mb_state.get("year_files") or [],
+                            mb_state.get("per_year_layout") or {},
+                            label_to_pool,
+                        )
+                        for period_iso in (ann.get("by_period") or {}).keys():
+                            existing.add(period_iso)
+                    elif source == "monthly_balance_sheets":
+                        pm = monthly_bal_parser.pool_balances_for_per_month_files(
+                            mb_state.get("monthly_files") or [],
+                            mb_state.get("per_month_layout") or {},
+                            label_to_pool,
+                        )
+                        for period_iso in (pm.get("by_period") or {}).keys():
+                            existing.add(period_iso)
+                except Exception:  # noqa: BLE001
+                    # Non-fatal — fall back to history_matrix only.
+                    pass
                 sb["last_run"] = solr_5300_backfill.backfill_missing_quarters(
                     cu, charter_int, sb["solr_url"], sb["core"],
                     period, months,
