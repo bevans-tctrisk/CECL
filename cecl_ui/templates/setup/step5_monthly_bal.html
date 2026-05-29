@@ -319,17 +319,26 @@
       </label>
 
       {% if acl_src == 'monthly_file' %}
+      {% set _has_balance_uploads = mb.filename or (mb.year_files and mb.year_files|length > 0) or (mb.monthly_files and mb.monthly_files|length > 0) %}
       <div style="margin:6px 0 14px 28px;">
-        {% if mb.filename %}
+        {% if _has_balance_uploads %}
           <table style="border-collapse:collapse; font-size:13px;">
             <tr>
               <th style="text-align:left; padding:4px 10px;">ACL row (1-based)</th>
               <td style="padding:4px 10px;">
                 <input type="number" name="acl_row" min="1"
                        value="{{ acl.row or '' }}" style="width:80px;">
+                {% if mb.filename %}
+                  <button class="btn btn-secondary" type="submit"
+                          name="action" value="acl_refresh_row"
+                          style="margin-left:6px;">Refresh history</button>
+                {% endif %}
                 <button class="btn btn-secondary" type="submit"
-                        name="action" value="acl_refresh_row"
-                        style="margin-left:6px;">Refresh history</button>
+                        name="action" value="acl_scan_balance_files"
+                        style="margin-left:6px;"
+                        title="Auto-detect the ACL row in every uploaded balance file and refresh the history table below.">
+                  Scan uploaded balance files
+                </button>
                 {% if acl.label %}
                   <span class="muted" style="margin-left:8px;">
                     Detected label: <strong>{{ acl.label }}</strong>
@@ -363,12 +372,13 @@
             </table>
           {% else %}
             <p class="muted" style="margin-top:8px;">
-              No ACL row detected yet. If the file has one, set the row
-              number above and click <em>Refresh history</em>.
+              No ACL row detected yet. Click
+              <em>Scan uploaded balance files</em> to auto-detect, or set
+              the row number above and refresh.
             </p>
           {% endif %}
         {% else %}
-          <p class="muted">Upload a monthly balance file (Section 1)
+          <p class="muted">Upload a balance file (Section 1)
             to enable auto-detection.</p>
         {% endif %}
       </div>

@@ -1265,6 +1265,26 @@ def _ingest_annual_workbook(
     mb["pool_map"] = existing_pm
     mb["label_status"] = status
 
+    # Merge auto-detected ACL history from this year file (if any) into
+    # mb["acl"]["history"]. Only seeds row/label when the user has not
+    # already set them so manual overrides are preserved.
+    acl_hist = analysis.get("acl_history") or {}
+    acl_row = analysis.get("acl_row")
+    if acl_hist or acl_row:
+        acl_state = mb.setdefault("acl", {})
+        if acl_row and not acl_state.get("row"):
+            acl_state["row"] = int(acl_row)
+            acl_state["label"] = analysis.get("acl_label", "")
+        if acl_hist:
+            existing_hist = acl_state.get("history") or {}
+            existing_hist.update(acl_hist)
+            acl_state["history"] = existing_hist
+    acl_msg = ""
+    if acl_hist:
+        acl_msg = (f" ACL history captured for {len(acl_hist)} "
+                   f"month-end(s) from row {acl_row} "
+                   f"({analysis.get('acl_label','')}).")
+
     return (
         "success",
         f"Uploaded {target.name} for {year_int}: detected sheet "
@@ -1272,7 +1292,8 @@ def _ingest_annual_workbook(
         f"{analysis.get('header_row')}, label column "
         f"{analysis.get('label_col')}, "
         f"{entry['period_count']} month-end column(s), "
-        f"{len(analysis.get('pool_labels', []))} pool label(s).",
+        f"{len(analysis.get('pool_labels', []))} pool label(s)."
+        + acl_msg,
     )
 
 
@@ -1734,6 +1755,68 @@ def step5_monthly_bal():
             flash("Saved monthly balance file settings.", "success")
             return redirect(url_for("setup.step5_monthly_bal"))
 
+        if action == "acl_scan_balance_files":
+            # Re-scan all already-uploaded balance files (per-month or
+            # per-year) for the ACL/ALLL line and merge into
+            # mb["acl"]["history"]. Preserves any existing row override.
+            _save_acl_form(mb, request.form)
+            acl_state = mb.setdefault("acl", {})
+            hist = acl_state.get("history") or {}
+            scanned = 0
+            populated = 0
+            for yf in (mb.get("year_files") or []):
+                sp = yf.get("saved_path")
+                if not sp or not Path(sp).is_file():
+                    continue
+                scanned += 1
+                try:
+                    res = monthly_bal_parser.analyse_per_year_file(sp)
+                except Exception:  # noqa: BLE001
+                    continue
+                ah = res.get("acl_history") or {}
+                if ah:
+                    if not acl_state.get("row") and res.get("acl_row"):
+                        acl_state["row"] = int(res["acl_row"])
+                        acl_state["label"] = res.get("acl_label", "")
+                    for k, v in ah.items():
+                        hist[k] = float(v)
+                        populated += 1
+            for mf in (mb.get("monthly_files") or []):
+                sp = mf.get("saved_path")
+                period = mf.get("period")
+                if not sp or not Path(sp).is_file() or not period:
+                    continue
+                scanned += 1
+                try:
+                    res = monthly_bal_parser.analyse_per_month_file(sp)
+                except Exception:  # noqa: BLE001
+                    continue
+                if res.get("acl_value") is not None:
+                    if not acl_state.get("row") and res.get("acl_row"):
+                        acl_state["row"] = int(res["acl_row"])
+                        acl_state["label"] = res.get("acl_label", "")
+                    hist[period] = float(res["acl_value"])
+                    populated += 1
+            acl_state["history"] = hist
+            mb["acl"] = acl_state
+            state["monthly_bal"] = mb
+            _save_state(state)
+            if scanned == 0:
+                flash("No uploaded balance files to scan.", "warning")
+            elif populated == 0:
+                flash(
+                    f"Scanned {scanned} balance file(s), but no ACL/ALLL "
+                    "row was found. Use a Separate file or Manual entry.",
+                    "warning",
+                )
+            else:
+                flash(
+                    f"Scanned {scanned} balance file(s); captured "
+                    f"{populated} ACL value(s).",
+                    "success",
+                )
+            return redirect(url_for("setup.step5_monthly_bal"))
+
         if action == "acl_refresh_row":
             # User changed the ACL row number; re-extract that row's history.
             _save_acl_form(mb, request.form)
@@ -1918,13 +2001,32 @@ def step5_monthly_bal():
                         mb["pool_map"] = existing_pm
                         mb["label_status"] = status
 
+                        # Auto-capture ACL balance for this period.
+                        acl_row = analysis.get("acl_row")
+                        acl_value = analysis.get("acl_value")
+                        acl_msg = ""
+                        if acl_row and acl_value is not None:
+                            acl_state = mb.setdefault("acl", {})
+                            if not acl_state.get("row"):
+                                acl_state["row"] = int(acl_row)
+                                acl_state["label"] = analysis.get(
+                                    "acl_label", "")
+                            hist = acl_state.get("history") or {}
+                            hist[period] = float(acl_value)
+                            acl_state["history"] = hist
+                            acl_msg = (
+                                f" ACL ${acl_value:,.0f} captured "
+                                f"from row {acl_row} "
+                                f"({analysis.get('acl_label','')}).")
+
                         flash(
                             f"Uploaded {target.name} for {period}: parsed "
                             f"{len(analysis.get('parsed_pool_labels', []))} "
                             f"pool label(s) from sheet "
                             f"{analysis.get('sheet')!r} "
                             f"(labels in column {analysis.get('pool_name_col')}, "
-                            f"balances in column {analysis.get('balance_col')}).",
+                            f"balances in column {analysis.get('balance_col')})."
+                            + acl_msg,
                             "success",
                         )
                     else:
@@ -2038,6 +2140,17 @@ def step5_monthly_bal():
                     # add the entry so the importer can try with the
                     # saved layout, but warn.
                     skipped_parse.append(entry_path.name)
+                # Auto-capture ACL value into mb["acl"]["history"].
+                _acl_row = analysis.get("acl_row")
+                _acl_val = analysis.get("acl_value")
+                if _acl_row and _acl_val is not None:
+                    _acl_state = mb.setdefault("acl", {})
+                    if not _acl_state.get("row"):
+                        _acl_state["row"] = int(_acl_row)
+                        _acl_state["label"] = analysis.get("acl_label", "")
+                    _hist = _acl_state.get("history") or {}
+                    _hist[period] = float(_acl_val)
+                    _acl_state["history"] = _hist
                 entry = {
                     "filename": entry_path.name,
                     "saved_path": str(entry_path),

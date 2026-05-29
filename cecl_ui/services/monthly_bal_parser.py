@@ -155,6 +155,39 @@ def _is_acl_label(value: Any) -> bool:
     return any(p in s for p in _ACL_LABEL_PATTERNS)
 
 
+def _find_acl_row_in_grid(
+    rows: list[list[Any]],
+    preferred_col: int | None = None,
+) -> tuple[int | None, str, int | None]:
+    """Scan a 2D grid for the row holding the ACL/ALLL line item.
+
+    Returns ``(row_idx_0based, label, col_idx_0based)`` or
+    ``(None, "", None)``. The ACL label often sits OUTSIDE the LOANS
+    section (e.g. in 'Other Liabilities' or as a contra-asset), so we
+    search the entire grid. ``preferred_col`` is checked first when
+    given, then we fall back to any column.
+    """
+    cols_to_try: list[int | None]
+    if preferred_col is not None:
+        cols_to_try = [preferred_col, None]
+    else:
+        cols_to_try = [None]
+    for col_pref in cols_to_try:
+        for r, row in enumerate(rows):
+            if col_pref is not None:
+                if col_pref < len(row) and _is_acl_label(row[col_pref]):
+                    return r, str(row[col_pref]).strip(), col_pref
+            else:
+                for c, v in enumerate(row):
+                    if _is_acl_label(v):
+                        return r, str(v).strip(), c
+        if col_pref is not None:
+            # If we found a hit in preferred column we'd have returned;
+            # otherwise loop continues with col_pref=None.
+            continue
+    return None, "", None
+
+
 def _is_label_row(value: Any) -> bool:
     if not isinstance(value, str):
         return False
@@ -849,6 +882,17 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
                 "parsed_pool_labels": [], "rows": [],
                 "detected_period": period_iso}
 
+    # Detect ACL/ALLL line. The row may sit far below the LOANS section
+    # (typically under 'Other Liabilities' or as a contra-asset). Scan
+    # the whole grid; prefer hits in the same label column we picked.
+    acl_row_idx, acl_label, _acl_col = _find_acl_row_in_grid(
+        rows, preferred_col=detail_col)
+    acl_value: float | None = None
+    if acl_row_idx is not None and balance_col < len(rows[acl_row_idx]):
+        acl_value = _coerce_number(rows[acl_row_idx][balance_col])
+        if acl_value is not None:
+            acl_value = abs(acl_value)
+
     return {
         "ok": True,
         "error": None,
@@ -859,6 +903,9 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
         "parsed_pool_labels": parsed_labels,
         "rows": extracted,
         "detected_period": period_iso,
+        "acl_row": (acl_row_idx + 1) if acl_row_idx is not None else None,
+        "acl_label": acl_label,
+        "acl_value": acl_value,
     }
 
 
@@ -1157,6 +1204,20 @@ def analyse_per_year_file(path: str | Path) -> dict[str, Any]:
         for c, d in sorted(best_hdr_cols, key=lambda t: t[1])
     ]
 
+    # Detect ACL/ALLL line. Scan the whole grid (it usually lives below
+    # the LOANS section in 'Other Liabilities' or as a contra-asset);
+    # prefer the same label column we chose for pools.
+    acl_row_idx, acl_label, _acl_col = _find_acl_row_in_grid(
+        rows, preferred_col=label_col)
+    acl_history: dict[str, float] = {}
+    if acl_row_idx is not None:
+        acl_row_data = rows[acl_row_idx]
+        for c, d in best_hdr_cols:
+            if c < len(acl_row_data):
+                v = _coerce_number(acl_row_data[c])
+                if v is not None:
+                    acl_history[d.isoformat()] = abs(v)
+
     return {
         "ok": True, "error": None,
         "sheet": sheet_name, "header_row": best_hdr_idx + 1,
@@ -1164,6 +1225,9 @@ def analyse_per_year_file(path: str | Path) -> dict[str, Any]:
         "period_columns": period_columns,
         "pool_labels": pool_labels,
         "detected_year": yr_hint,
+        "acl_row": (acl_row_idx + 1) if acl_row_idx is not None else None,
+        "acl_label": acl_label,
+        "acl_history": acl_history,
     }
 
 
