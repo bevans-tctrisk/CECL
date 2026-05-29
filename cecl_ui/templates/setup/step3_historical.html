@@ -1498,6 +1498,9 @@
 {% set sb_test = sb.get('last_test') %}
 {% set sb_run = sb.get('last_run') %}
 {% set cmap = solr_canonical_map or [] %}
+{% set _he_1a = state.hist_extracts or {} %}
+{% set _tp_1a = _he_1a.get('target_period') or '' %}
+{% set _hm_1a = _he_1a.get('history_months') or '' %}
 <div class="card" style="border:1px solid #c9d6e8; background:#f4f8ff;">
   <h3 style="margin-top:0;">
     1a. Fill missing months from NCUA 5300
@@ -1519,6 +1522,46 @@
     available from 5300 data &mdash; those columns will be empty for
     backfilled months.
   </p>
+
+  {# Target period + history depth — required for the backfill action.
+     Only shown directly here when the user isn't on the monthly_loan_extracts
+     source (which has its own copy of this form above). For annual /
+     single-workbook / monthly-balance-sheet sources, this is the only
+     place to set them. #}
+  {% if hist_source != 'monthly_loan_extracts' %}
+  <form method="post" style="margin:8px 0 14px 0;
+        padding:10px 14px; background:#fff; border:1px solid #c9d6e8;
+        border-radius:6px;">
+    <input type="hidden" name="action" value="set_hist_extract_target">
+    <div style="display:flex; gap:16px; flex-wrap:wrap;
+          align-items:flex-end;">
+      <label style="flex:1; min-width:220px;">
+        <strong>Target reporting period</strong>
+        <input type="date" name="target_period"
+               value="{{ _tp_1a }}">
+        <span class="help">Pick the last day of the month you're
+        reporting on (e.g. 2026-03-31).</span>
+      </label>
+      <label style="flex:0 0 160px;">
+        <strong>History depth (months)</strong>
+        <input type="number" name="history_months" min="1" max="240"
+               value="{{ _hm_1a or 84 }}">
+        <span class="help">Default 84 (7 years).</span>
+      </label>
+      <button class="btn btn-secondary" type="submit"
+              style="margin-bottom:18px;">
+        Save target &amp; depth
+      </button>
+    </div>
+    {% if not _tp_1a %}
+      <div class="flash warning" style="margin-top:8px;">
+        Set the target reporting period and click <em>Save</em> before
+        running the backfill below.
+      </div>
+    {% endif %}
+  </form>
+  {% endif %}
+
   {% set _ch = state.charter_number or '' %}
   {% if not _ch %}
     <div class="flash warning" style="margin:8px 0;">
