@@ -2912,6 +2912,10 @@ def _sheet_loss_factor(wb, cu, snap, df, grades, config, hist):
             if years[yi] < pool_earliest:
                 continue
             yr_total = sum(pool_annual.get(years[yi], {}).values())
+            if not yr_total:
+                # Fallback to pool-level avg_balances (e.g. years backfilled
+                # from the 5300 DB overlay where per-grade detail is absent).
+                yr_total = avg_bals.get(years[yi], {}).get(pool, 0)
             if yr_total:
                 ws.cell(row=r, column=year_start_col + yi, value=yr_total).number_format = ACCT
                 ws.cell(row=r, column=year_start_col + yi).font = V12B
