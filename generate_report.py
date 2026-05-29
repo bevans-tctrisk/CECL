@@ -2891,6 +2891,27 @@ def load_historical_data(config):
     """Load all historical data for a client. Returns a dict with all historical DataFrames."""
     print("  Loading historical data...")
     co_rec = load_chargeoff_recovery_history(config)
+    # Overlay charge-off / recovery rows from the wizard's DB tables
+    # (loan_code_chargeoff_history, loan_code_recovery_history). DB rows
+    # take precedence over file-derived rows for any (year, pool) cell
+    # present in the DB; file-only cells are preserved.
+    db_corc = _load_co_rc_history_from_db(config)
+    if db_corc.get('years'):
+        for yr, by_pool in db_corc['chargeoffs'].items():
+            co_rec['chargeoffs'].setdefault(yr, {}).update(by_pool)
+        for yr, by_pool in db_corc['recoveries'].items():
+            co_rec['recoveries'].setdefault(yr, {}).update(by_pool)
+        co_m = co_rec.setdefault('co_monthly', {})
+        for ym, by_pool in db_corc['co_monthly'].items():
+            co_m.setdefault(ym, {}).update(by_pool)
+        rc_m = co_rec.setdefault('rc_monthly', {})
+        for ym, by_pool in db_corc['rc_monthly'].items():
+            rc_m.setdefault(ym, {}).update(by_pool)
+        co_rec['years'] = sorted(
+            set(co_rec.get('years', []))
+            | set(co_rec['chargeoffs'])
+            | set(co_rec['recoveries'])
+        )
     balances, alll_by_date = load_monthly_balances(config)
     dq = load_delinquency_history(config)
 
@@ -4305,8 +4326,133 @@ def load_wizard_impaired(config):
     return result
 
 
+def _resolve_pool_ci(code, pool_map_ci, default_pool):
+    """Case-insensitive pool_map lookup. ``pool_map_ci`` is the pool_map
+    with keys lower-cased and stripped. Returns the mapped pool name or
+    ``default_pool`` (or '' when default is also empty/ignore). Returns
+    None when the result should be skipped (empty / 'ignore' / 'exclude').
+    """
+    if code is None:
+        return None
+    key = str(code).strip().lower()
+    if not key:
+        return None
+    pool = pool_map_ci.get(key)
+    if not pool:
+        # Try with collapsed whitespace.
+        key2 = ' '.join(key.split())
+        pool = pool_map_ci.get(key2)
+    if not pool:
+        pool = (default_pool or '').strip()
+    if not pool or pool.lower() in ('ignore', 'exclude'):
+        return None
+    return pool
+
+
+def _load_co_rc_history_from_db(config):
+    """Aggregate ``loan_code_chargeoff_history`` and
+    ``loan_code_recovery_history`` rows into annual + monthly per-pool
+    totals, mirroring the shape returned by
+    :func:`load_chargeoff_recovery_history`.
+
+    Returns ``{'chargeoffs', 'recoveries', 'co_monthly', 'rc_monthly',
+    'years'}`` — empty dicts when nothing is available (missing tables,
+    no rows, DB unavailable).
+
+    Codes are mapped to pools via ``cfg['pool_map']`` (case-insensitive)
+    with fallback to ``cfg['default_pool']``. Rows whose mapped pool is
+    empty / 'ignore' / 'exclude' are dropped.
+    """
+    empty = {'chargeoffs': {}, 'recoveries': {},
+             'co_monthly': {}, 'rc_monthly': {}, 'years': []}
+    cu = (config.get('credit_union') or '').strip()
+    if not cu:
+        return empty
+    raw_map = config.get('pool_map') or {}
+    pool_map_ci = {str(k).strip().lower(): str(v).strip()
+                   for k, v in raw_map.items()
+                   if str(k).strip() and str(v).strip()}
+    default_pool = config.get('default_pool') or ''
+    try:
+        from cecl_credentials import get_database_url
+        from sqlalchemy import create_engine, text as _sql_text
+    except Exception:  # noqa: BLE001
+        return empty
+    try:
+        eng = create_engine(get_database_url())
+    except Exception as exc:  # noqa: BLE001
+        print(f"    CO/Recovery DB skipped: {type(exc).__name__}: {exc}")
+        return empty
+
+    def _read(table, amt_col):
+        try:
+            with eng.begin() as conn:
+                rows = conn.execute(
+                    _sql_text(
+                        f"SELECT as_of_date, loan_code, {amt_col} "
+                        f"FROM {table} WHERE cu = :cu"
+                    ),
+                    {"cu": cu},
+                ).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            print(f"    {table} read skipped: {type(exc).__name__}: {exc}")
+            return []
+        return rows
+
+    co_rows = _read('loan_code_chargeoff_history', 'chargeoff_amount')
+    rc_rows = _read('loan_code_recovery_history', 'recovery_amount')
+    if not co_rows and not rc_rows:
+        return empty
+
+    def _aggregate(rows):
+        annual: dict[int, dict[str, float]] = {}
+        monthly: dict[tuple[int, int], dict[str, float]] = {}
+        for r in rows:
+            d = r[0]
+            try:
+                yr = int(d.year)
+                mo = int(d.month)
+            except Exception:
+                continue
+            if not (2000 <= yr <= 2099):
+                continue
+            pool = _resolve_pool_ci(r[1], pool_map_ci, default_pool)
+            if not pool:
+                continue
+            try:
+                amt = float(r[2] or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if not amt:
+                continue
+            annual.setdefault(yr, {})
+            annual[yr][pool] = annual[yr].get(pool, 0.0) + amt
+            ym = (yr, mo)
+            monthly.setdefault(ym, {})
+            monthly[ym][pool] = monthly[ym].get(pool, 0.0) + amt
+        return annual, monthly
+
+    co_annual, co_monthly = _aggregate(co_rows)
+    rc_annual, rc_monthly = _aggregate(rc_rows)
+    years = sorted(set(co_annual) | set(rc_annual))
+    n_co_cells = sum(len(v) for v in co_annual.values())
+    n_rc_cells = sum(len(v) for v in rc_annual.values())
+    if n_co_cells or n_rc_cells:
+        print(f"    Loaded CO/Recovery history from DB: "
+              f"{len(co_rows)} CO row(s) -> {n_co_cells} pool-year cell(s); "
+              f"{len(rc_rows)} recovery row(s) -> {n_rc_cells} pool-year cell(s).")
+    return {
+        'chargeoffs': co_annual,
+        'recoveries': rc_annual,
+        'co_monthly': co_monthly,
+        'rc_monthly': rc_monthly,
+        'years': years,
+    }
+
+
 def _load_dq_history_from_db(config):
     """Aggregate ``loan_code_delinquency_history`` into per-year/per-pool DQ%.
+
 
     Returns ``{year: {pool: dq_pct}}`` suitable for overlaying onto
     ``hist['impaired']['warm_dq_pct']``. Rows are bucketed to the most
