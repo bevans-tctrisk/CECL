@@ -453,7 +453,8 @@ def _scan_unmapped_codes_from_db(cfg: dict, pool_map: dict,
         return {}
 
     counts: dict[str, int] = {}
-    for table in ("loan_code_chargeoff_history",
+    for table in ("loan_code_history",
+                  "loan_code_chargeoff_history",
                   "loan_code_recovery_history",
                   "loan_code_delinquency_history"):
         try:
