@@ -2973,8 +2973,16 @@
 
 {# Navigation: per-section Back / Next destinations + completeness check. #}
 {% set hist_scan = state.hist_scan or {} %}
+{% set _mb_nav = state.monthly_bal or {} %}
+{# Balances may arrive via several sources depending on hist_balance_source:
+     - monthly_loan_extracts -> history_view.row_count > 0
+     - annual_balance_sheets -> monthly_bal.year_files
+     - monthly_balance_sheets -> monthly_bal.monthly_files (per-month)
+     - single_workbook / legacy folder scan -> hist_scan.monthly_files     Treat the section as complete if ANY of these supplied data. #}
 {% set has_balances = hist_scan.get('monthly_files')
-      or (history_view and history_view.row_count) %}
+      or (history_view and history_view.row_count)
+      or _mb_nav.get('year_files')
+      or _mb_nav.get('monthly_files') %}
 {% set has_co = hist_scan.get('co_files')
       or hist_scan.get('monthly_co_files')
       or (co_history_view and co_history_view.row_count) %}
