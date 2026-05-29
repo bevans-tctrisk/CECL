@@ -38,6 +38,18 @@ _LOAN_CODE_HEADERS = (
     "loan type code", "loan_type_code", "loan code", "loan_code",
     "type code", "type_code", "pool code", "pool_code",
     "security code", "security_code",
+    "loan type", "loan_type", "loan class", "loan_class",
+    "product code", "product_code", "product type", "product_type",
+)
+_MEMBER_HEADERS = (
+    "member number", "member_number", "member#", "member #", "member id",
+    "member", "acct member", "member no",
+)
+_ACCOUNT_HEADERS = (
+    "account number", "account_number", "account#", "account #",
+    "loan number", "loan_number", "loan#", "loan #",
+    "suffix", "account suffix", "loan suffix", "share suffix",
+    "id",  # last-resort fallback
 )
 _CO_AMOUNT_HEADERS = (
     "charge off amount", "charge-off amount", "chargeoff amount",
@@ -268,6 +280,8 @@ def inspect_file(path: Path) -> dict[str, Any]:
             _pick_column(headers, _RECOV_AMOUNT_HEADERS)
         ),
         "date": _name_at(_pick_column(headers, _DATE_HEADERS)),
+        "member": _name_at(_pick_column(headers, _MEMBER_HEADERS)),
+        "account": _name_at(_pick_column(headers, _ACCOUNT_HEADERS)),
     }
     out["ok"] = True
     return out

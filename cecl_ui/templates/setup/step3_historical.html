@@ -687,24 +687,52 @@
     {# CO/Recov column-mapping JS — defined unconditionally so it works
        even when no historical-extract profiles exist. #}
     <script>
-    function updateCoRecovMode(which) {
-      var picked = document.querySelector(
-        'input[name="' + which + '_member_account_mode"]:checked'
-      );
-      if (!picked) return;
-      var mode = picked.value;
-      var suffixLabel = document.getElementById(which + '-ma-suffix-len');
-      var delimLabel  = document.getElementById(which + '-ma-delim');
-      var accountFld  = document.getElementById(which + '-fld-account');
-      if (suffixLabel)
-        suffixLabel.style.display =
-          (mode === 'fixed_suffix') ? 'inline-block' : 'none';
-      if (delimLabel)
-        delimLabel.style.display =
-          (mode === 'delimiter') ? 'inline-block' : 'none';
-      if (accountFld)
-        accountFld.style.display = (mode === 'split') ? '' : 'none';
-    }
+    (function () {
+      function updateCoRecovMode(which) {
+        var picked = document.querySelector(
+          'input[name="' + which + '_member_account_mode"]:checked'
+        );
+        if (!picked) return;
+        var mode = picked.value;
+        var suffixLabel = document.getElementById(which + '-ma-suffix-len');
+        var delimLabel  = document.getElementById(which + '-ma-delim');
+        var accountFld  = document.getElementById(which + '-fld-account');
+        if (suffixLabel)
+          suffixLabel.style.display =
+            (mode === 'fixed_suffix') ? 'inline-block' : 'none';
+        if (delimLabel)
+          delimLabel.style.display =
+            (mode === 'delimiter') ? 'inline-block' : 'none';
+        if (accountFld)
+          accountFld.style.display = (mode === 'split') ? '' : 'none';
+      }
+      // Expose globally so inline onchange="updateCoRecovMode(...)" still works.
+      window.updateCoRecovMode = updateCoRecovMode;
+
+      // Belt-and-suspenders: also bind via JS so the toggle works even if
+      // an earlier inline-script error blocked global function definition.
+      function bindRadios(which) {
+        var radios = document.querySelectorAll(
+          'input[name="' + which + '_member_account_mode"]'
+        );
+        radios.forEach(function (r) {
+          r.addEventListener('change', function () {
+            updateCoRecovMode(which);
+          });
+        });
+        // Sync initial visibility against whatever is currently checked.
+        updateCoRecovMode(which);
+      }
+      function init() {
+        bindRadios('co');
+        bindRadios('recov');
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+      } else {
+        init();
+      }
+    })();
     </script>
 
     {# Historical folder path (scan handler comes in the next slice) #}

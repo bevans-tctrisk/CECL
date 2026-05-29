@@ -2860,8 +2860,10 @@ def _refresh_co_recov_inspect(
             "loan_code":     suggested.get("code") or "",
             "amount":        suggested.get(suggested_field) or "",
             "date":          suggested.get("date") or existing.get("date") or "",
-            "member_number": existing.get("member_number") or "",
-            "loan_suffix":   existing.get("loan_suffix") or "",
+            "member_number": (existing.get("member_number")
+                              or suggested.get("member") or ""),
+            "loan_suffix":   (existing.get("loan_suffix")
+                              or suggested.get("account") or ""),
             "member_account": ma,
         }
     _save_state(state)
