@@ -401,6 +401,22 @@ def _default_state() -> dict[str, Any]:
 def _save_state(state: dict[str, Any]) -> None:
     session[STATE_KEY] = state
     session.modified = True
+    # Auto-save to disk on every step so wizard work survives a session
+    # reset (e.g. clicking "+ New CU" or session expiry). Requires a
+    # short_name/credit_union to have been entered — Step 1 sets these,
+    # so anything past Step 1 auto-persists. Never raise: an auto-save
+    # failure must not block the request.
+    if not (state.get("short_name") or state.get("credit_union")):
+        return
+    try:
+        wizard_drafts.save_draft(
+            current_app.config["WORKSPACE_ROOT"],
+            state,
+            active_step=state.get("_active_step", "") or "",
+            model=state.get("model") or "migration",
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _wizard_ctx(active: str) -> dict[str, Any]:
