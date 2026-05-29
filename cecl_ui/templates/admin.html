@@ -38,6 +38,38 @@
 </div>
 
 <div class="card" style="margin-top:24px;">
+  <h2>Credit Score Bounds</h2>
+  <p class="muted">
+    Sets the global ceiling and floor for the credit-grade ladder on
+    <strong>Step 8</strong> of every CU's wizard. The top grade's
+    <em>Max</em> is auto-set to <strong>{{ credit_score_max }}</strong>;
+    the bottom grade's <em>Min</em> is auto-set to
+    <strong>{{ credit_score_min }}</strong>. All other grade Maxes are
+    derived as <code>(next-higher-grade.Min &minus; 1)</code>, so
+    bands can never overlap or leave gaps.
+  </p>
+  <form method="post" style="margin-top:12px;">
+    <input type="hidden" name="action" value="save_credit_score_bounds">
+    <div class="form-row" style="gap:24px; align-items:flex-end;">
+      <label style="max-width:200px;">
+        Min Credit Score
+        <input type="number" name="credit_score_min"
+               value="{{ credit_score_min }}" min="0" max="1500"
+               style="width:120px;">
+      </label>
+      <label style="max-width:200px;">
+        Max Credit Score
+        <input type="number" name="credit_score_max"
+               value="{{ credit_score_max }}" min="0" max="1500"
+               style="width:120px;">
+      </label>
+      <button class="btn btn-primary" type="submit"
+              style="margin-bottom:2px;">Save</button>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="margin-top:24px;">
   <h2>Environmental Factor Ranges</h2>
   <p class="muted">
     Written into every new SCALE report at run time (TCT tab

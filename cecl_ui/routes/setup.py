@@ -39,6 +39,7 @@ from flask import (
 from werkzeug.utils import secure_filename
 
 from cecl_ui.services import balance_check as balance_check_service, chargeoff_hist_processor, co_recov_parser, column_mapping_suggestions, config_service, delinquency_hist_processor, dq_extract_parser, extract_hist_processor, extract_hist_service, geo_service, hist_parser, impaired_parser, monthly_bal_parser, monthly_co_recov_aggregator, pipeline_service, recovery_hist_processor, sample_parser, solr_5300_backfill, solr_5300_co_backfill, solr_5300_delq_backfill, solr_5300_recov_backfill, warm_parser, wizard_drafts
+from cecl_ui.services import admin_defaults
 
 
 setup_bp = Blueprint("setup", __name__)
@@ -7292,6 +7293,21 @@ def step_balance_check():
 @setup_bp.route("/step/grades", methods=["GET", "POST"])
 def step5_grades():
     state = _state()
+    # Global bounds (admin-configurable). Top grade's max auto-fills to
+    # ``score_ceiling``; bottom grade's min auto-fills to
+    # ``score_floor``. All other maxes derive as
+    # ``next_higher_grade.min - 1``.
+    _admin_cfg = admin_defaults.load() or {}
+    try:
+        score_floor = int(_admin_cfg.get("credit_score_min", 350))
+    except (TypeError, ValueError):
+        score_floor = 350
+    try:
+        score_ceiling = int(_admin_cfg.get("credit_score_max", 900))
+    except (TypeError, ValueError):
+        score_ceiling = 900
+    if score_floor >= score_ceiling:
+        score_floor, score_ceiling = 350, 900
     if request.method == "POST":
         action = request.form.get("action", "save")
 
@@ -7320,42 +7336,89 @@ def step5_grades():
         # Default action = save: parse rows, validate, store.
         labels = request.form.getlist("grade_label")
         mins = request.form.getlist("grade_min")
-        maxs = request.form.getlist("grade_max")
+        # Max is derived from admin bounds + adjacent mins; the form no
+        # longer collects it. Any legacy hidden ``grade_max`` values are
+        # ignored on purpose.
         # Preserve any existing reserve_rate values keyed by label so we
         # don't lose data the user set in a previous (now-removed) field.
         existing_rates = {
             (g.get("label") or "").strip(): float(g.get("reserve_rate") or 0.0)
             for g in (state.get("credit_grades") or [])
         }
-        grades: list[dict[str, Any]] = []
+        # Collect (label, min) pairs, dropping wholly-empty rows.
+        raw_rows: list[tuple[str, int | None]] = []
         errors: list[str] = []
-        for idx, (lbl, mn, mx) in enumerate(
-            zip(labels, mins, maxs), start=1
-        ):
+        for idx, (lbl, mn) in enumerate(zip(labels, mins), start=1):
             lbl = (lbl or "").strip()
-            if not lbl and not (mn or mx):
+            mn_raw = (mn or "").strip()
+            if not lbl and not mn_raw:
                 continue  # skip totally-empty row
             if not lbl:
                 errors.append(f"Row {idx}: label is required.")
                 continue
-            try:
-                mn_i = int(mn or 0)
-                mx_i = int(mx or 0)
-            except ValueError:
-                errors.append(f"Row {idx} ({lbl}): min/max must be integers.")
-                continue
-            if mn_i > mx_i:
+            mn_val: int | None
+            if mn_raw == "":
+                mn_val = None
+            else:
+                try:
+                    mn_val = int(mn_raw)
+                except ValueError:
+                    errors.append(
+                        f"Row {idx} ({lbl}): min Credit Score must be an integer."
+                    )
+                    continue
+            raw_rows.append((lbl, mn_val))
+
+        # The bottom grade's min is auto-set to the admin floor; if the
+        # user left the bottom row's min blank that's expected.
+        if raw_rows:
+            last_lbl, last_mn = raw_rows[-1]
+            if last_mn is None:
+                raw_rows[-1] = (last_lbl, score_floor)
+
+        # Every other row needs a min within bounds.
+        for idx, (lbl, mn_val) in enumerate(raw_rows, start=1):
+            if mn_val is None:
                 errors.append(
-                    f"Row {idx} ({lbl}): min Credit Score ({mn_i}) > "
-                    f"max Credit Score ({mx_i})."
+                    f"Row {idx} ({lbl}): enter a Min Credit Score "
+                    "(only the bottom grade may leave it blank)."
                 )
                 continue
-            grades.append({
-                "label": lbl,
-                "min_score": mn_i,
-                "max_score": mx_i,
-                "reserve_rate": existing_rates.get(lbl, 0.0),
-            })
+            if mn_val < score_floor or mn_val > score_ceiling:
+                errors.append(
+                    f"Row {idx} ({lbl}): Min Credit Score {mn_val} is "
+                    f"outside the admin bounds [{score_floor}, "
+                    f"{score_ceiling}]."
+                )
+
+        # Sort highest-min first (the table is rendered top-down by
+        # range), then derive each row's max.
+        if not errors and raw_rows:
+            raw_rows.sort(key=lambda t: (t[1] if t[1] is not None else -1),
+                          reverse=True)
+            grades: list[dict[str, Any]] = []
+            for i, (lbl, mn_val) in enumerate(raw_rows):
+                if i == 0:
+                    mx_val = score_ceiling
+                else:
+                    prev_min = raw_rows[i - 1][1]
+                    mx_val = (prev_min - 1) if prev_min is not None else score_ceiling
+                if i == len(raw_rows) - 1:
+                    mn_val = score_floor  # enforce floor on bottom
+                if mn_val is not None and mn_val > mx_val:
+                    errors.append(
+                        f"Row {i + 1} ({lbl}): Min {mn_val} must be at "
+                        f"most {mx_val} (one less than the next-higher "
+                        "grade's Min)."
+                    )
+                grades.append({
+                    "label": lbl,
+                    "min_score": mn_val if mn_val is not None else score_floor,
+                    "max_score": mx_val,
+                    "reserve_rate": existing_rates.get(lbl, 0.0),
+                })
+        else:
+            grades = []
 
         if errors:
             for e in errors:
@@ -7363,36 +7426,25 @@ def step5_grades():
             return render_template(
                 "setup/step5_grades.html",
                 draft_grades=[
-                    {"label": (l or "").strip(), "min_score": m, "max_score": x,
+                    {"label": (l or "").strip(),
+                     "min_score": (int(m) if (m or "").strip().lstrip("-").isdigit() else None),
+                     "max_score": None,
                      "reserve_rate": existing_rates.get((l or "").strip(), 0.0)}
-                    for l, m, x in zip(labels, mins, maxs)
+                    for l, m in zip(labels, mins)
                 ],
+                admin_min=score_floor,
+                admin_max=score_ceiling,
                 **_wizard_ctx("grades"),
             )
 
         if not grades:
             flash("Define at least one credit-grade band.", "error")
             return render_template(
-                "setup/step5_grades.html", **_wizard_ctx("grades")
+                "setup/step5_grades.html",
+                admin_min=score_floor,
+                admin_max=score_ceiling,
+                **_wizard_ctx("grades"),
             )
-
-        # Soft warnings: overlapping ranges and gap detection.
-        sorted_g = sorted(grades, key=lambda g: g["min_score"])
-        for a, b in zip(sorted_g, sorted_g[1:]):
-            if b["min_score"] <= a["max_score"]:
-                flash(
-                    f"Bands '{a['label']}' (max {a['max_score']}) and "
-                    f"'{b['label']}' (min {b['min_score']}) overlap — loans in "
-                    f"the overlap will use whichever band sorts first.",
-                    "info",
-                )
-            elif b["min_score"] > a["max_score"] + 1:
-                flash(
-                    f"Gap between '{a['label']}' (max {a['max_score']}) and "
-                    f"'{b['label']}' (min {b['min_score']}) — scores in "
-                    f"between will fall through to no_score_label.",
-                    "info",
-                )
 
         state["credit_grades"] = grades
         state["no_score_label"] = request.form.get(
@@ -7416,7 +7468,12 @@ def step5_grades():
         _save_state(state)
         # Both flows: grades → credit_pull → sample.
         return redirect(url_for("setup.step6_credit_pull"))
-    return render_template("setup/step5_grades.html", **_wizard_ctx("grades"))
+    return render_template(
+        "setup/step5_grades.html",
+        admin_min=score_floor,
+        admin_max=score_ceiling,
+        **_wizard_ctx("grades"),
+    )
 
 
 # =================================================================

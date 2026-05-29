@@ -29,6 +29,33 @@ def _parse_decimal(raw: str) -> float | None:
     return v
 
 
+def _save_credit_score_bounds(values: dict) -> None:
+    """Persist global Credit Score min/max bounds."""
+    raw_min = (request.form.get("credit_score_min") or "").strip()
+    raw_max = (request.form.get("credit_score_max") or "").strip()
+    try:
+        mn = int(raw_min)
+        mx = int(raw_max)
+    except ValueError:
+        flash("Credit Score bounds must be whole numbers.", "error")
+        return
+    if mn < 0 or mx > 1500 or mn >= mx:
+        flash(
+            "Credit Score bounds must satisfy 0 <= min < max <= 1500.",
+            "error",
+        )
+        return
+    values["credit_score_min"] = mn
+    values["credit_score_max"] = mx
+    admin_defaults.save(values)
+    flash(
+        f"Saved Credit Score bounds: min={mn}, max={mx}. New CU setups "
+        "will use these; existing ones pick them up on the next save of "
+        "Step 8.",
+        "success",
+    )
+
+
 def _save_mgmt_adj(values: dict) -> None:
     raw = (request.form.get("default_mgmt_adj_pct") or "").strip()
     try:
@@ -120,6 +147,8 @@ def index():
             _save_env_factor_ranges(values)
         elif action == "reset_env_factor_ranges":
             _reset_env_factor_ranges(values)
+        elif action == "save_credit_score_bounds":
+            _save_credit_score_bounds(values)
         else:
             _save_mgmt_adj(values)
         return redirect(url_for("admin.index"))
@@ -131,6 +160,8 @@ def index():
         "admin.html",
         default_mgmt_adj_pct=pct_str,
         default_mgmt_adj_decimal=values.get("default_mgmt_adj", 0.0),
+        credit_score_min=int(values.get("credit_score_min", 350)),
+        credit_score_max=int(values.get("credit_score_max", 900)),
         delinquency_rows=env_ranges.get("delinquency") or [],
         econ_stress_rows=env_ranges.get("econ_stress") or [],
         delinquency_row_count=admin_defaults.DELINQUENCY_ROW_COUNT,
