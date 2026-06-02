@@ -4485,8 +4485,10 @@ _NCUA_CANONICAL_TAG = {
 # Tag -> ordered list of keyword fragments to scan in configured pool
 # names. First pool whose lower-cased name contains any keyword wins.
 _NCUA_TAG_KEYWORDS = {
-    'real_estate':        ('real estate', 'mortgage', 'realestate'),
-    'consumer_secured':   ('consumer secured', 'secured', 'auto', 'vehicle'),
+    'real_estate':        ('real estate', 'mortgage', 'realestate',
+                           'home equity', 'heloc', 'real-estate'),
+    'consumer_secured':   ('auto', 'vehicle', 'consumer secured',
+                           'secured', 'lease'),
     'consumer_unsecured': ('consumer unsecured', 'unsecured', 'credit card',
                            'signature'),
     'commercial':         ('commercial', 'business', 'mbl'),
@@ -4518,16 +4520,39 @@ def _build_ncua_canonical_pool_lookup(config):
     pool_lc = [(n.lower(), n) for n in pool_names
                if n.lower() not in excluded]
 
-    def _pool_for_tag(tag):
+    def _pool_for_tag(tag, hint_keywords=()):
+        # Try canonical-specific hint keywords FIRST (e.g. 'new' / 'used'
+        # / 'first' / 'junior') so a CU with finer-grained pools like
+        # New Auto + Used Auto + New Indirect Auto + Used Indirect Auto
+        # gets per-canonical-name routing rather than collapsing every
+        # vehicle DQ row into whichever pool first matches 'auto'.
+        for hint in hint_keywords:
+            for kw in _NCUA_TAG_KEYWORDS.get(tag, ()):
+                for n_lc, n in pool_lc:
+                    if hint in n_lc and kw in n_lc:
+                        return n
         for kw in _NCUA_TAG_KEYWORDS.get(tag, ()):
             for n_lc, n in pool_lc:
                 if kw in n_lc:
                     return n
         return None
 
+    def _hints_for(canonical_lc):
+        # Strip noise words so 'new vehicles' yields ('new',) and
+        # 'used vehicles' yields ('used',). Multi-word hints listed
+        # before single-word so 'first liens' tries 'first lien' first.
+        out = []
+        for w in ('first lien', 'junior lien', 'new', 'used', 'first',
+                  'junior', 'farm', 'multifamily', 'agricultural',
+                  'construction', 'student', 'credit card', 'payday',
+                  'commercial', 'lease'):
+            if w in canonical_lc:
+                out.append(w)
+        return tuple(out)
+
     lookup: dict[str, str] = {}
     for canonical, tag in _NCUA_CANONICAL_TAG.items():
-        pool = _pool_for_tag(tag)
+        pool = _pool_for_tag(tag, _hints_for(canonical))
         if pool:
             lookup[canonical] = pool
     return lookup
@@ -4837,6 +4862,12 @@ def _load_dq_history_from_db(config):
         return {}
     pool_map = config.get('pool_map') or {}
     default_pool = config.get('default_pool') or ''
+    pool_map_ci = {
+        str(k).strip().lower(): v
+        for k, v in pool_map.items()
+        if str(k).strip()
+    }
+    ncua_lookup = _build_ncua_canonical_pool_lookup(config)
     try:
         from cecl_credentials import get_database_url
         from sqlalchemy import create_engine, text as _sql_text
@@ -4860,6 +4891,33 @@ def _load_dq_history_from_db(config):
     if not rows:
         return {}
 
+    # Pull total_balance per (as_of_date, loan_code) from
+    # loan_code_history as the denominator for DQ%. The 5300 DQ
+    # backfill writes dq_amount but leaves total_balance NULL on
+    # delinquency rows; without this lookup every cell collapses to
+    # None and the overlay returns empty.
+    bal_lookup: dict[tuple[str, str], float] = {}
+    try:
+        eng2 = create_engine(get_database_url())
+        with eng2.begin() as conn:
+            bal_rows = conn.execute(
+                _sql_text(
+                    "SELECT as_of_date, loan_code, total_balance "
+                    "FROM loan_code_history "
+                    "WHERE cu = :cu AND total_balance IS NOT NULL"
+                ),
+                {"cu": cu},
+            ).fetchall()
+        for br in bal_rows:
+            d = br[0].isoformat() if hasattr(br[0], 'isoformat') else str(br[0])
+            code = str(br[1]).strip()
+            try:
+                bal_lookup[(d, code)] = float(br[2])
+            except (TypeError, ValueError):
+                pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"    DQ balance lookup skipped: {type(exc).__name__}: {exc}")
+
     # year -> latest as_of_date in that year
     latest_in_year: dict[int, str] = {}
     for r in rows:
@@ -4882,13 +4940,18 @@ def _load_dq_history_from_db(config):
         if latest_in_year.get(yr) != d:
             continue  # only use the latest as_of_date per calendar year
         code = str(r[1]).strip()
-        pool = pool_map.get(code) or pool_map.get(code.upper()) or default_pool
-        pool = (pool or '').strip()
-        if not pool or pool.lower() in ('ignore', 'exclude'):
+        pool = _resolve_pool_with_ncua(
+            code, pool_map_ci, ncua_lookup, default_pool,
+        )
+        if not pool:
             continue
         amt = float(r[2] or 0.0)
         tot = float(r[3]) if r[3] is not None else None
         pct = float(r[4]) if r[4] is not None else None
+        # Backfill missing total_balance from loan_code_history when
+        # available (the 5300 DQ backfill leaves total_balance NULL).
+        if tot is None:
+            tot = bal_lookup.get((d, code))
         agg = by_yp.setdefault((yr, pool), {
             'amount': 0.0, 'total': 0.0, 'pct_sum': 0.0,
             'pct_weight': 0.0, 'pct_count': 0,
@@ -9320,6 +9383,60 @@ def generate_report(client_name, snapshot_date=None, reports=None):
 
     # Load historical data
     hist = load_historical_data(config)
+
+    # Clamp historical data to the report period. The 5300 backfill
+    # (and DB-overlay tables) commonly contain quarter-end snapshots
+    # for periods AFTER the report's snapshot_date when a CU's wizard
+    # has been run multiple times across quarters. Without this clamp
+    # a 12/31/2025 report ends up with a 2026 column on Display Hist
+    # Bal (last year is auto-labeled "YTD"), and 2026 charge-offs /
+    # recoveries / DQ bleed into life-of-loan rate denominators.
+    try:
+        snap_year = int(str(snapshot_date)[:4])
+        snap_month = int(str(snapshot_date)[5:7])
+    except (TypeError, ValueError):
+        snap_year = None
+        snap_month = None
+    if snap_year is not None:
+        def _drop_future(by_year):
+            if not isinstance(by_year, dict):
+                return by_year
+            for y in [k for k in by_year if isinstance(k, int) and k > snap_year]:
+                by_year.pop(y, None)
+            return by_year
+
+        for k in ('chargeoffs', 'recoveries', 'avg_balances', 'dq_pct'):
+            _drop_future(hist.get(k))
+
+        def _drop_future_month(by_ym):
+            if not isinstance(by_ym, dict):
+                return by_ym
+            drop = []
+            for k in by_ym:
+                try:
+                    yy, mm = int(k[0]), int(k[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if yy > snap_year or (yy == snap_year and mm > snap_month):
+                    drop.append(k)
+            for k in drop:
+                by_ym.pop(k, None)
+            return by_ym
+
+        for k in ('co_monthly', 'rc_monthly'):
+            _drop_future_month(hist.get(k))
+
+        if isinstance(hist.get('years'), list):
+            hist['years'] = [y for y in hist['years'] if y <= snap_year]
+
+        # Trim monthly_balances DataFrame to dates <= snapshot_date
+        mb = hist.get('monthly_balances')
+        try:
+            if mb is not None and not mb.empty and 'date' in mb.columns:
+                snap_ts = pd.Timestamp(snapshot_date)
+                hist['monthly_balances'] = mb[mb['date'] <= snap_ts].reset_index(drop=True)
+        except Exception:
+            pass
 
     # Load impaired data from WARM working file
     impaired = load_impaired_data(config, snapshot_date)
