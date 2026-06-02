@@ -1611,14 +1611,16 @@ def _compute_balance_adjustments(df, hist, config, snapshot_date):
     grand_loan = sum(loan_bals.values())
     total_in_portfolio = round(grand_loan + total_adj, 2)
 
-    if not balance_adjustments:
-        return
-
-    # Store in hist['impaired']
+    # Always build pool_bal_detail (even when balance_adjustments is empty)
+    # so the Vizo "Pool_Balance Adjust" sheet has loan-file balances to
+    # display. Without this, the sheet renders pool headers + zero rows
+    # for any CU whose monthly balance file matches the loan extract at
+    # the snapshot date (no adjustment needed).
     imp = hist.setdefault('impaired', {})
-    imp['balance_adjustments'] = balance_adjustments
-    imp['total_balance_adjustment'] = total_adj
-    imp['total_in_portfolio'] = total_in_portfolio
+    if balance_adjustments:
+        imp['balance_adjustments'] = balance_adjustments
+        imp['total_balance_adjustment'] = total_adj
+        imp['total_in_portfolio'] = total_in_portfolio
 
     # Build pool_bal_detail for the Vizo Balance Adjust sheet.
     # Per-grade detail uses loan-file balances; adjustment is pool-level.
@@ -1667,9 +1669,15 @@ def _compute_balance_adjustments(df, hist, config, snapshot_date):
                                      for pool, adj in balance_adjustments.items()}
 
     n_adj = len(balance_adjustments)
-    print(f"    Balance adjustments: {n_adj} pools, "
-          f"total adj: ${total_adj:,.2f}, "
-          f"total in portfolio: ${total_in_portfolio:,.2f}")
+    n_pools_detail = len(pool_bal_detail)
+    if n_adj:
+        print(f"    Balance adjustments: {n_adj} pools, "
+              f"total adj: ${total_adj:,.2f}, "
+              f"total in portfolio: ${total_in_portfolio:,.2f}")
+    else:
+        print(f"    Balance adjustments: none (loan-file matches monthly); "
+              f"built pool_bal_detail for {n_pools_detail} pool(s) so the "
+              f"Vizo Pool_Balance Adjust tab can render loan-file balances")
     if skipped_non_pool:
         print(f"    Skipped {len(skipped_non_pool)} balance-sheet line "
               f"item(s) not mapped to any loan pool: "
