@@ -87,7 +87,12 @@ def read_extract_headers(path: Path, sheet: str | None = None) -> dict[str, Any]
 def _clean_header(cell: Any) -> str:
     if cell is None:
         return ""
-    return str(cell).strip()
+    # Collapse all internal whitespace runs (including newlines / tabs from
+    # multi-line header cells like "Current \nLoan Bal") to a single space.
+    # Browsers normalise whitespace in <option value="..."> attributes when
+    # the form is submitted, so storing the literal-newline form would make
+    # the round-trip comparison fail at save time.
+    return re.sub(r"\s+", " ", str(cell)).strip()
 
 
 def compute_header_signature(headers: list[str]) -> str:
