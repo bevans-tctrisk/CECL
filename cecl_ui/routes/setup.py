@@ -4282,7 +4282,16 @@ def step3_historical():
                             cu, charter_int, sb["solr_url"], sb["core"],
                             period, months,
                             pool_distribution=dist_info["pool_distribution"],
-                            existing_dates=existing,
+                            # Distributed mode wipes prior 5300:% rows on
+                            # entry, so the only months we should treat
+                            # as already-covered are the ones supplied
+                            # by the user's uploaded balance file(s).
+                            # Passing the full `existing` set (which is
+                            # built from history_matrix BEFORE cleanup)
+                            # would cause every quarter to be skipped
+                            # as "already covered" after the cleanup
+                            # deletes those very rows.
+                            existing_dates=upload_months,
                             source_period_iso=dist_info.get("period") or "",
                         )
                     )
