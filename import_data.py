@@ -174,6 +174,11 @@ _FALLBACK_DATE_LAYOUTS: list[tuple[str, str]] = [
     (r"(20\d{2})[-_./ ](\d{2})(?!\d)",         "YM"),
     (r"(20\d{2})(\d{2})(?!\d)",                "YM"),
     (r"(\d{2})[-_./ ](20\d{2})",               "MY"),
+    # Two-digit-year fallback: anchored to 19-30 to keep ambiguity low.
+    # Used for AIRES-style filenames like "25-12 AIRES LOANS v2.xlsx"
+    # where the wizard's auto-derived date_pattern (which expects a
+    # 4-digit year) doesn't match. YY → 2000+YY.
+    (r"(?<!\d)(\d{2})[-_./ ](\d{2})(?!\d)",    "YYM"),
 ]
 
 
@@ -196,6 +201,16 @@ def _try_common_date_layouts(text: str) -> str | None:
                 return date(y, mo, last).isoformat()
             if kind == "MY":
                 mo, y = int(m.group(1)), int(m.group(2))
+                last = calendar.monthrange(y, mo)[1]
+                return date(y, mo, last).isoformat()
+            if kind == "YYM":
+                yy, mo = int(m.group(1)), int(m.group(2))
+                # Restrict YY to a plausible recent-CU window to limit
+                # false matches (would also reject e.g. "12-25" tail of a
+                # phone number). Months still validated below.
+                if yy < 19 or yy > 30 or mo < 1 or mo > 12:
+                    continue
+                y = 2000 + yy
                 last = calendar.monthrange(y, mo)[1]
                 return date(y, mo, last).isoformat()
         except (ValueError, calendar.IllegalMonthError):
@@ -314,11 +329,25 @@ def load_credit_pull_scores(config):
                                     m_str = str(m).strip()
                                     if m_str.endswith('.0'):
                                         m_str = m_str[:-2]
+                                    # Always store the raw value as an int
+                                    # key (covers credit-pull files that
+                                    # carry just the bare member number).
+                                    # Additionally, when the value looks
+                                    # like a full account (member + fixed
+                                    # suffix), also store the stripped
+                                    # member-only key so loans whose join
+                                    # key is the bare member still match.
+                                    try:
+                                        raw_key = int(float(m_str))
+                                        scores[raw_key] = score_val
+                                    except (ValueError, TypeError):
+                                        raw_key = None
                                     if suffix_length and len(m_str) > suffix_length:
-                                        m_key = int(m_str[:-suffix_length])
-                                    else:
-                                        m_key = int(float(m))
-                                    scores[m_key] = score_val
+                                        try:
+                                            stripped_key = int(m_str[:-suffix_length])
+                                            scores.setdefault(stripped_key, score_val)
+                                        except (ValueError, TypeError):
+                                            pass
                                 except (ValueError, TypeError):
                                     pass
                         print(f"    Credit pull file: {fname} ({len(scores)} scores loaded)")
