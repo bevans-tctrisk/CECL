@@ -2992,7 +2992,7 @@
       or (recov_history_view and recov_history_view.row_count) %}
 {% set hpm2 = state.hist_pool_map or {} %}
 {% set mapping_required = hist_scan.get('monthly_files')
-      and (hpm2.get('labels') | length) > 0 %}
+      and ((hpm2.get('labels') or []) | length) > 0 %}
 {% set ns = namespace(complete=True) %}
 {% if mapping_required %}
   {% for lbl in hpm2.get('labels', []) %}

@@ -1,6 +1,9 @@
 """Run quarterly reports for an already-configured CU."""
 from __future__ import annotations
 
+import calendar
+import shutil
+from datetime import date
 from pathlib import Path
 
 from flask import (
@@ -13,6 +16,27 @@ from cecl_ui.services import config_service, pipeline_service
 
 
 run_bp = Blueprint("run", __name__)
+
+
+def _normalize_folder_path(folder_str: str) -> str:
+    """Trim whitespace + surrounding quotes a user may have pasted in."""
+    s = (folder_str or "").strip()
+    if len(s) >= 2 and s[0] in ('"', "'") and s[-1] == s[0]:
+        s = s[1:-1].strip()
+    return s
+
+
+def _period_to_snapshot(period: str) -> str | None:
+    """Convert a 'YYYY-MM' period string to ISO month-end date."""
+    s = (period or "").strip()
+    if len(s) != 7 or s[4] != "-":
+        return None
+    try:
+        y, m = int(s[:4]), int(s[5:7])
+        last = calendar.monthrange(y, m)[1]
+        return date(y, m, last).isoformat()
+    except (ValueError, calendar.IllegalMonthError):
+        return None
 
 
 @run_bp.route("/", methods=["GET"])
@@ -205,6 +229,158 @@ def download():
     if not p.exists():
         return ("Not found", 404)
     return send_file(p, as_attachment=True, download_name=p.name)
+
+
+@run_bp.route("/<short_name>/new-quarter", methods=["GET", "POST"])
+def new_quarter(short_name: str):
+    """Streamlined per-quarter ingest + run.
+
+    GET: shows a single-page form (period picker + multi-file upload +
+    optional folder path + report checkboxes pre-checked from the CU's
+    saved ``cfg.reports``).
+
+    POST: copies the supplied files into ``Raw_Uploads/<short>/``,
+    invokes ``run_import``, then runs the selected reports for the
+    requested period and renders the existing results template.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    upload_dir = config_service.raw_uploads_dir(ws) / short_name
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    if request.method == "GET":
+        return render_template(
+            "run/new_quarter.html",
+            short_name=short_name,
+            cfg=cfg,
+        )
+
+    # POST
+    period = (request.form.get("period") or "").strip()
+    snapshot = _period_to_snapshot(period)
+    if not snapshot:
+        flash("Pick a valid reporting period (YYYY-MM).", "error")
+        return redirect(url_for("run.new_quarter", short_name=short_name))
+
+    folder_raw = _normalize_folder_path(request.form.get("folder_path") or "")
+
+    # 1) Save uploaded files
+    saved = 0
+    files = request.files.getlist("files")
+    for f in files:
+        if not f or not f.filename:
+            continue
+        fn = secure_filename(f.filename)
+        f.save(upload_dir / fn)
+        saved += 1
+
+    # 2) Copy from folder path (non-recursive, common spreadsheet formats)
+    copied = 0
+    folder_skipped: list[str] = []
+    if folder_raw:
+        src = Path(folder_raw)
+        if not src.is_dir():
+            flash(f"Folder not found: {folder_raw}", "error")
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+        allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+        for entry in src.iterdir():
+            if not entry.is_file():
+                continue
+            if entry.name.startswith("~$") or entry.name.startswith("."):
+                continue
+            if entry.suffix.lower() not in allowed:
+                folder_skipped.append(entry.name)
+                continue
+            try:
+                shutil.copy2(entry, upload_dir / entry.name)
+                copied += 1
+            except OSError as exc:
+                flash(f"Could not copy {entry.name}: {exc}", "error")
+
+    if saved == 0 and copied == 0:
+        flash(
+            "No files were uploaded or copied. Pick at least one file or "
+            "supply a folder path.",
+            "error",
+        )
+        return redirect(url_for("run.new_quarter", short_name=short_name))
+
+    flash(
+        f"Staged {saved} uploaded + {copied} folder file(s) into Raw_Uploads/{short_name}/.",
+        "success",
+    )
+    if folder_skipped:
+        flash(
+            f"Skipped non-spreadsheet file(s): {', '.join(folder_skipped[:6])}"
+            + ("…" if len(folder_skipped) > 6 else ""),
+            "info",
+        )
+
+    # 3) Import
+    try:
+        n_imported = pipeline_service.run_import(short_name)
+        if n_imported:
+            flash(f"Imported {n_imported} loan file(s).", "success")
+        else:
+            flash(
+                "No loan files were imported. Confirm filenames match the "
+                "configured file_pattern and that a snapshot date can be "
+                "parsed.",
+                "warning",
+            )
+    except Exception as exc:  # noqa: BLE001
+        flash(f"Import failed: {exc}", "error")
+        return redirect(url_for("run.new_quarter", short_name=short_name))
+
+    # 4) Run reports — selection comes from form (defaults seeded from cfg)
+    selected: list[str] = []
+    for r in ("tct", "vizo", "vizo_supp"):
+        if request.form.get(r) == "on":
+            selected.append(r)
+    impdet = request.form.get("impdet") == "on"
+
+    outputs: list[str] = []
+    errors: list[str] = []
+    if selected:
+        try:
+            paths, log = pipeline_service.run_reports(short_name, snapshot, selected)
+            outputs.extend(paths)
+            if not paths:
+                lines = [ln for ln in (log or "").splitlines() if ln.strip()]
+                err_lines = [
+                    ln for ln in lines
+                    if "ERROR" in ln or "Error" in ln or "Warning" in ln
+                    or "No data" in ln or "no data" in ln
+                    or "not found" in ln or "Not found" in ln
+                ]
+                if err_lines:
+                    msg = "; ".join(err_lines)
+                elif lines:
+                    msg = "No reports were generated. Last log lines: " + " | ".join(lines[-8:])
+                else:
+                    msg = "No reports were generated (no log output captured)."
+                errors.append(f"Standard reports: {msg}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Standard reports: {exc}")
+
+    if impdet:
+        try:
+            p = pipeline_service.run_impdet_report(short_name, snapshot)
+            if p:
+                outputs.append(p)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Impaired/Deteriorated: {exc}")
+
+    if not selected and not impdet:
+        flash("Pick at least one report to generate.", "warning")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+    return render_template(
+        "run/results.html",
+        short_name=short_name,
+        outputs=outputs,
+        errors=errors,
+    )
 
 
 @run_bp.route("/<short_name>/settings", methods=["GET", "POST"])

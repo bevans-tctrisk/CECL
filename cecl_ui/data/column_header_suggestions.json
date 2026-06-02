@@ -1,78 +1,79 @@
 {
   "field_to_header_counts": {
     "current_balance": {
-      "bal": 1,
+      "bal": 2,
       "cc last stmt bal": 10,
-      "current balance": 1,
-      "current balance amount": 7,
+      "current balance": 2,
+      "current balance amount": 8,
       "current loan balance": 6,
-      "currupb": 7,
-      "loan balance": 20
+      "currupb": 8,
+      "loan balance": 29
     },
     "days_delinquent": {
       "days delinquent": 6,
-      "days past due": 1,
-      "delinquent days count": 7,
-      "dlq_days": 1,
-      "inv": 7,
+      "days past due": 2,
+      "delinquent days count": 8,
+      "dlq_days": 2,
+      "inv": 8,
       "member close date": 10,
-      "past due": 20
+      "past due": 29
     },
     "interest_rate": {
-      "annual rate 1": 20,
-      "cash annual interest rate": 7,
-      "int_rate": 1,
-      "interest rate": 1,
+      "annual rate 1": 29,
+      "cash annual interest rate": 8,
+      "int_rate": 2,
+      "interest rate": 2,
       "interest rate (apr)": 6,
-      "rate": 7
+      "rate": 8
     },
     "loan_pool_code": {
-      "col_cd": 1,
+      "col_cd": 2,
       "loan collateral code": 5,
-      "loan purpose": 7,
-      "loan type": 20,
+      "loan purpose": 8,
+      "loan type": 29,
       "loan type code": 1,
       "mbr state code": 6,
-      "type": 7
+      "type": 8,
+      "type of mortgage": 1
     },
     "loan_suffix": {
-      "card account number": 7,
+      "card account number": 8,
       "cc note last 4": 10,
-      "ln_sfx": 1,
-      "pool": 7
+      "ln_sfx": 2,
+      "pool": 8
     },
     "member_number": {
-      "account number": 16,
+      "account number": 18,
       "acct nbr": 10,
-      "acn": 1,
-      "loan#": 7,
-      "member name": 8,
+      "acn": 2,
+      "loan#": 8,
+      "member name": 16,
       "member's name (last, first, middle initial)": 3,
-      "om sys - prin number": 7
+      "om sys - prin number": 8
     },
     "open_date": {
-      "card open date": 7,
+      "card open date": 8,
       "date of loan": 6,
-      "loan original date": 20,
-      "orig_ln_dt": 1,
-      "origination date": 1
+      "loan original date": 29,
+      "orig_ln_dt": 2,
+      "origination date": 2
     },
     "original_fico_score": {
-      "credit score": 33,
-      "inv": 7,
-      "user_defined_field_7": 1
+      "credit score": 43,
+      "inv": 8,
+      "user_defined_field_7": 2
     },
     "original_loan_amount": {
-      "loan original amnt": 7,
-      "loan#": 7,
+      "loan original amnt": 16,
+      "loan#": 8,
       "orig nbr pymts": 13,
-      "orig_ln_amt": 1,
-      "original loan amount": 14
+      "orig_ln_amt": 2,
+      "original loan amount": 16
     },
     "total_available_credit": {
-      "credit limit": 36,
-      "credit line amount": 7,
-      "ln_limit": 1
+      "credit limit": 45,
+      "credit line amount": 8,
+      "ln_limit": 2
     }
   },
   "header_display_forms": {
@@ -127,8 +128,9 @@
     "pool": "POOL",
     "rate": "RATE",
     "type": "TYPE",
+    "type of mortgage": "Type of Mortgage",
     "user_defined_field_7": "User_Defined_Field_7"
   },
-  "updated_at": "2026-05-29T21:51:56",
+  "updated_at": "2026-06-01T20:03:27",
   "version": 1
 }

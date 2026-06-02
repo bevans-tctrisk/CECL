@@ -310,6 +310,7 @@
     <div style="margin:8px 0;">
       <label style="display:block; margin:6px 0;">
         <input type="radio" name="acl_source" value="monthly_file"
+               onchange="window._aclSetSource && window._aclSetSource(this)"
                {% if acl_src == 'monthly_file' %}checked{% endif %}>
         <strong>1. Pull from this Monthly Balance file.</strong>
         <span class="muted">
@@ -386,6 +387,7 @@
 
       <label style="display:block; margin:6px 0;">
         <input type="radio" name="acl_source" value="separate"
+               onchange="window._aclSetSource && window._aclSetSource(this)"
                {% if acl_src == 'separate' %}checked{% endif %}>
         <strong>2. Upload a separate file.</strong>
         <span class="muted">
@@ -441,6 +443,7 @@
 
       <label style="display:block; margin:6px 0;">
         <input type="radio" name="acl_source" value="manual"
+               onchange="window._aclSetSource && window._aclSetSource(this)"
                {% if acl_src == 'manual' %}checked{% endif %}>
         <strong>3. Manually enter the ACL balance.</strong>
         <span class="muted">
@@ -463,7 +466,7 @@
               <tr>
                 <td style="padding:4px 10px;">{{ loop.index }}</td>
                 <td style="padding:4px 10px;">
-                  <input type="text" name="acl_manual_{{ k }}_date"
+                  <input type="date" name="acl_manual_{{ k }}_date"
                          value="{{ acl_man[k+'_date'] or '' }}"
                          placeholder="YYYY-MM-DD" style="width:140px;">
                 </td>
@@ -782,7 +785,7 @@
         {% for k in ['month1','month2','month3'] %}
           <tr>
             <td style="padding:4px 10px;">
-              <input type="text" name="acl_manual_{{ k }}_date"
+              <input type="date" name="acl_manual_{{ k }}_date"
                      value="{{ acl_man[k+'_date'] or '' }}"
                      placeholder="YYYY-MM-DD" style="width:140px;">
             </td>
@@ -1077,7 +1080,7 @@
         {% for k in ['month1','month2','month3'] %}
           <tr>
             <td style="padding:4px 10px;">
-              <input type="text" name="acl_manual_{{ k }}_date"
+              <input type="date" name="acl_manual_{{ k }}_date"
                      value="{{ acl_man[k+'_date'] or '' }}"
                      placeholder="YYYY-MM-DD" style="width:140px;">
             </td>
@@ -1202,7 +1205,7 @@
         {% for k in ['month1','month2','month3'] %}
           <tr>
             <td style="padding:4px 10px;">
-              <input type="text" name="acl_manual_{{ k }}_date"
+              <input type="date" name="acl_manual_{{ k }}_date"
                      value="{{ acl_man[k+'_date'] or '' }}"
                      placeholder="YYYY-MM-DD" style="width:140px;">
             </td>
@@ -1228,4 +1231,22 @@
   </form>
 </div>
 {% endif %}{# source == 'manual' #}
+
+<script>
+// When the user picks one of the ACL-source radios, auto-submit the
+// enclosing form with action=acl_set_source so the server re-renders
+// with the matching sub-panel (row override / separate-file uploader /
+// manual three-month entry). Without this, the panels stay hidden
+// until the user clicks "Save ACL settings".
+window._aclSetSource = function (radio) {
+  var form = radio.form;
+  if (!form) return;
+  var hidden = document.createElement('input');
+  hidden.type = 'hidden';
+  hidden.name = 'action';
+  hidden.value = 'acl_set_source';
+  form.appendChild(hidden);
+  form.submit();
+};
+</script>
 {% endblock %}
