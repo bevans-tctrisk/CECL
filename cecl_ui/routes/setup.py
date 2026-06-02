@@ -4512,7 +4512,17 @@ def step3_historical():
             if not profile:
                 flash("Unknown column profile.", "error")
             else:
-                headers = profile.get("headers") or []
+                import re as _re_hdr
+                def _norm_hdr(s: str) -> str:
+                    return _re_hdr.sub(r"\s+", " ", str(s or "")).strip()
+                # Normalise stored headers in-place so older drafts captured
+                # before _clean_header was hardened (e.g. AIRES exports with
+                # multi-line header cells like "Current \nLoan Bal") still
+                # match the values browsers send back from the form.
+                raw_headers = profile.get("headers") or []
+                headers = [_norm_hdr(h) for h in raw_headers]
+                if headers != raw_headers:
+                    profile["headers"] = headers
                 hdr_set = set(headers)
 
                 # Member / Account number format (same options as the
