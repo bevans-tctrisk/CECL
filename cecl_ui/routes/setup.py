@@ -3382,8 +3382,9 @@ def _earliest_month_pool_distribution(state: dict) -> dict:
     Picks the loader matching ``state.hist_balance_source``:
       * ``annual_balance_sheets`` -> per_year_files aggregator
       * ``monthly_balance_sheets`` -> per_month_files aggregator
-      * other (single_workbook / monthly_loan_extracts) -> not supported
-        (returns ``error`` describing why).
+      * ``single_workbook`` -> reads the wide-format workbook directly,
+        picking the earliest date column on the header row.
+      * ``monthly_loan_extracts`` -> not supported (returns ``error``).
 
     Returns a dict::
 
@@ -3438,10 +3439,65 @@ def _earliest_month_pool_distribution(state: dict) -> dict:
             )
             return out
         by_period = pm.get("by_period") or {}
+    elif source == "single_workbook":
+        # Single wide-format workbook with one column per month-end.
+        # Find the earliest date column on the header row, then ask the
+        # per-period extractor for that period.
+        out["source"] = "single"
+        saved_path = mb_state.get("saved_path") or ""
+        sheet = mb_state.get("sheet") or ""
+        header_row = mb_state.get("header_row") or 0
+        pool_name_col = mb_state.get("pool_name_col") or ""
+        if not (saved_path and sheet and header_row and pool_name_col):
+            out["error"] = (
+                "Single-workbook layout is incomplete (sheet / header row / "
+                "pool name column). Re-save Step 3 layout."
+            )
+            return out
+        try:
+            from openpyxl import load_workbook  # local import
+            wb = load_workbook(saved_path, read_only=True, data_only=True)
+            try:
+                if sheet not in wb.sheetnames:
+                    out["error"] = f"Sheet '{sheet}' not found in workbook."
+                    return out
+                ws = wb[sheet]
+                date_isos: list[str] = []
+                for cell in ws[int(header_row)]:
+                    d = monthly_bal_parser.normalize_to_month_end(cell.value)
+                    if d is not None:
+                        date_isos.append(d.isoformat())
+            finally:
+                wb.close()
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = f"Could not open balance workbook: {exc}"
+            return out
+        if not date_isos:
+            out["error"] = (
+                f"No date columns detected on row {header_row} of the "
+                f"single workbook."
+            )
+            return out
+        earliest_iso = min(date_isos)
+        sw = monthly_bal_parser.pool_balances_for_latest_period(
+            saved_path, sheet, int(header_row), pool_name_col,
+            label_to_pool=label_to_pool, period=earliest_iso,
+        )
+        if not sw.get("ok"):
+            out["error"] = (
+                f"Could not read single workbook: "
+                f"{sw.get('error') or 'unknown error'}"
+            )
+            return out
+        by_period = {sw.get("period") or earliest_iso: {
+            "by_pool": sw.get("by_pool") or {},
+            "raw_rows": sw.get("raw_rows") or [],
+        }}
     else:
         out["error"] = (
             "Distributed mode requires the historical balance source to be "
-            "Annual balance sheets or Monthly balance sheets (Step 3)."
+            "Single workbook, Annual balance sheets, or Monthly balance "
+            "sheets (Step 3)."
         )
         return out
 
