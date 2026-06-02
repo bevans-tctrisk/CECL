@@ -1227,7 +1227,20 @@ def _load_monthly_balances_from_wizard(config):
     # label appears in the map are included (translated to the pool
     # name). When absent, fall through to the legacy "use label as-is
     # with a few hard-coded skips" behavior.
-    title_map = (config or {}).get('balance_title_map') or {}
+    #
+    # The wizard writes its mapping at ``monthly_balance.pool_map``;
+    # legacy/manual configs put it at top-level ``balance_title_map``.
+    # Honor both — wizard's nested map wins when present so that
+    # downstream consumers (build_hist_bal_from_monthly,
+    # _compute_balance_adjustments, etc.) see the user's pool names
+    # instead of raw workbook labels.
+    title_map = dict((config or {}).get('balance_title_map') or {})
+    nested_map = mb_cfg.get('pool_map') or {}
+    if nested_map:
+        # Drop empty/None mappings (the wizard stores 'ignore' as '').
+        for k, v in nested_map.items():
+            if v:
+                title_map[k] = v
     use_title_map = bool(title_map)
 
     # ACL row resolution: cfg['acl']['row'] is a 1-based row number on
@@ -3021,6 +3034,35 @@ def load_historical_data(config):
             print(f"    Collapsed {before - after} duplicate "
                   f"(pool, date) row(s) into {after} aggregated row(s) "
                   f"(multi-label pools summed)")
+
+    # Extend monthly balances with rows from ``loan_code_history`` (5300
+    # backfill, both per-loan-code and distributed modes). Adds (pool,
+    # month-end) cells that aren't already present in the workbook —
+    # the workbook remains authoritative for any month it covers. This
+    # lets the supplemental Detail_HIst Balances tab show historical
+    # columns back into the 5300-backfill years for pools whose
+    # Life-of-Loan window exceeds the workbook's coverage.
+    db_monthly = _load_balance_history_monthly_from_db(config)
+    if not db_monthly.empty:
+        if balances.empty:
+            balances = db_monthly.sort_values(['pool', 'date']).reset_index(drop=True)
+            print(f"    Seeded monthly balances from 5300 history: "
+                  f"{len(balances)} row(s)")
+        else:
+            existing_keys = set(zip(balances['pool'].astype(str),
+                                    balances['date']))
+            mask = [(p, d) not in existing_keys
+                    for p, d in zip(db_monthly['pool'].astype(str),
+                                    db_monthly['date'])]
+            new_rows = db_monthly.loc[mask].copy()
+            if not new_rows.empty:
+                balances = (
+                    pd.concat([balances, new_rows], ignore_index=True)
+                    .sort_values(['pool', 'date'])
+                    .reset_index(drop=True)
+                )
+                print(f"    Extended monthly balances with {len(new_rows)} "
+                      f"5300-history row(s) (pools/months not in workbook)")
 
     # Compute annual average balances per pool from monthly data
     avg_balances = {}  # {year: {pool: avg_balance}}
@@ -4855,6 +4897,121 @@ def _load_balance_history_from_db(config):
             msg += f"; skipped {n_skipped} duplicate parent/child 5300 row(s)"
         print(msg)
     return annual
+
+
+def _load_balance_history_monthly_from_db(config):
+    """Return per-(pool, month-end) balances from ``loan_code_history``.
+
+    Returns a DataFrame ``[pool, date, balance]`` (date = pd.Timestamp at
+    month-end) suitable for unioning into the per-month ``monthly_balances``
+    frame so the supplemental Detail_HIst Balances tab can extend its
+    historical columns back into the 5300-backfill years.
+
+    Honors the same NCUA parent/child suppression and configured-pool
+    passthrough as ``_load_balance_history_from_db``.
+    """
+    cu = (config.get('credit_union') or '').strip()
+    if not cu:
+        return pd.DataFrame(columns=['pool', 'date', 'balance'])
+    raw_map = config.get('pool_map') or {}
+    pool_map_ci = {str(k).strip().lower(): str(v).strip()
+                   for k, v in raw_map.items()
+                   if str(k).strip() and str(v).strip()}
+    default_pool = config.get('default_pool') or ''
+    try:
+        from cecl_credentials import get_database_url
+        from sqlalchemy import create_engine, text as _sql_text
+    except Exception:
+        return pd.DataFrame(columns=['pool', 'date', 'balance'])
+    try:
+        eng = create_engine(get_database_url())
+        with eng.begin() as conn:
+            rows = conn.execute(
+                _sql_text(
+                    "SELECT as_of_date, loan_code, total_balance "
+                    "FROM loan_code_history WHERE cu = :cu"
+                ),
+                {"cu": cu},
+            ).fetchall()
+    except Exception:
+        return pd.DataFrame(columns=['pool', 'date', 'balance'])
+    if not rows:
+        return pd.DataFrame(columns=['pool', 'date', 'balance'])
+
+    _PARENT_CHILDREN = {
+        '1st mortgage real estate': {'first liens'},
+        'other real estate': {'junior liens', 'other real estate (other)'},
+    }
+    by_date_codes: dict[str, set[str]] = {}
+    for r in rows:
+        d = r[0]
+        if not d:
+            continue
+        try:
+            bal = float(r[2] or 0.0)
+        except (TypeError, ValueError):
+            bal = 0.0
+        if bal <= 0:
+            continue
+        by_date_codes.setdefault(d.isoformat(), set()).add(
+            str(r[1] or '').strip().lower()
+        )
+    suppressed_children: dict[str, set[str]] = {}
+    for iso, codes in by_date_codes.items():
+        skip: set[str] = set()
+        for parent, children in _PARENT_CHILDREN.items():
+            if parent in codes:
+                skip.update(children & codes)
+        if skip:
+            suppressed_children[iso] = skip
+
+    ncua_lookup = _build_ncua_canonical_pool_lookup(config)
+    configured_pool_names: dict[str, str] = {}
+    for p in (config.get('pools') or []):
+        if isinstance(p, dict):
+            name = str(p.get('name') or '').strip()
+            if name:
+                configured_pool_names[name.lower()] = name
+    for name in (config.get('pool_order') or []):
+        if isinstance(name, str) and name.strip():
+            configured_pool_names.setdefault(name.strip().lower(),
+                                             name.strip())
+
+    by_pool_date: dict[tuple[str, str], float] = {}
+    for r in rows:
+        d = r[0]
+        if not d:
+            continue
+        mo_key = d.isoformat()
+        code_lc = str(r[1] or '').strip().lower()
+        if code_lc in suppressed_children.get(mo_key, ()):
+            continue
+        if code_lc in configured_pool_names:
+            pool = configured_pool_names[code_lc]
+        else:
+            pool = _resolve_pool_with_ncua(
+                r[1], pool_map_ci, ncua_lookup, default_pool,
+            )
+        if not pool:
+            continue
+        try:
+            bal = float(r[2] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if bal <= 0:
+            continue
+        key = (pool, mo_key)
+        by_pool_date[key] = by_pool_date.get(key, 0.0) + bal
+
+    if not by_pool_date:
+        return pd.DataFrame(columns=['pool', 'date', 'balance'])
+    records = [
+        {'pool': pool,
+         'date': pd.Timestamp(iso) + pd.offsets.MonthEnd(0),
+         'balance': bal}
+        for (pool, iso), bal in by_pool_date.items()
+    ]
+    return pd.DataFrame(records)
 
 
 def _load_dq_history_from_db(config):
