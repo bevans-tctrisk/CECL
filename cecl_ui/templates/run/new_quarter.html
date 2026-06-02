@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Run New Quarter — {{ short_name }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Run New Quarter</h2>
+  <p class="muted">
+    {{ cfg.credit_union or short_name }} &mdash; stage this quarter's files,
+    import them, and generate reports in one pass.
+  </p>
+
+  <form method="post"
+        enctype="multipart/form-data"
+        action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+
+    <h3>1. Reporting period</h3>
+    <label for="period">Period (month-end)</label>
+    <input id="period" type="month" name="period" required style="max-width:220px;">
+    <p class="muted" style="margin-top:4px;">
+      The selected month is converted to its last day for the snapshot date.
+    </p>
+
+    <h3 style="margin-top:24px;">2. Provide quarterly files</h3>
+    <p class="muted">
+      Drop the loan extract, credit pull, charge-offs, recoveries, balance
+      sheet, etc. for this quarter. You can use either or both methods.
+    </p>
+
+    <label for="files"><strong>Upload files</strong></label>
+    <input id="files" type="file" name="files" multiple
+           accept=".xlsx,.xlsm,.xls,.csv">
+
+    <label for="folder_path" style="margin-top:14px;"><strong>or paste a folder path</strong></label>
+    <input id="folder_path" type="text" name="folder_path"
+           placeholder="e.g. Z:\Shared\Clients\…\2026-03"
+           style="max-width:600px;">
+    <p class="muted" style="margin-top:4px;">
+      All <code>.xlsx / .xlsm / .xls / .csv</code> files in that folder
+      (non-recursive) will be copied into
+      <code>Raw_Uploads/{{ short_name }}/</code>.
+    </p>
+
+    <h3 style="margin-top:24px;">3. Reports to generate</h3>
+    <label><input type="checkbox" name="tct"
+           {% if cfg.reports and cfg.reports.tct %}checked{% endif %}>
+      TCT CECL-Migration Report</label><br>
+    <label><input type="checkbox" name="vizo"
+           {% if cfg.reports and cfg.reports.vizo %}checked{% endif %}>
+      Vizo CECL-Migration Report</label><br>
+    <label><input type="checkbox" name="vizo_supp"
+           {% if cfg.reports and cfg.reports.vizo_supp %}checked{% endif %}>
+      Vizo Supplemental Report</label><br>
+    <label><input type="checkbox" name="impdet"
+           {% if cfg.reports and cfg.reports.impdet %}checked{% endif %}>
+      Improved / Deteriorated Loans Report</label>
+
+    <div style="margin-top:24px; display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit">Stage, Import &amp; Run</button>
+      <a class="btn" href="{{ url_for('run.client_dashboard', short_name=short_name) }}">Open full dashboard</a>
+      <a class="btn" href="{{ url_for('run.select_cu') }}">&larr; Back</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

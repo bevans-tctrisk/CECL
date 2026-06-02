@@ -487,6 +487,7 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
         header_row=header_row,
         pool_name_col=pool_name_col,
         label_to_pool=mb.get("pool_map") or {},
+        period=_report_period_cutoff(state) or None,
     )
 
 

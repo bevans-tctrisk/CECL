@@ -1775,10 +1775,59 @@ def step5_monthly_bal():
             )
             mb["file_pattern"] = (request.form.get("file_pattern", "") or "").strip()
             mb["notes"] = (request.form.get("notes", "") or "").strip()
+            # Re-extract pool/type labels from the (possibly user-adjusted)
+            # layout. The auto-detection on upload only ever looks at
+            # column A; if the user moved pool_name_col elsewhere (or
+            # corrected the sheet / header_row), the parsed_pool_labels
+            # list won't reflect the actual labels until we re-scan
+            # against the new layout.
+            if mb.get("saved_path") and mb.get("sheet") and mb.get("header_row") \
+                    and mb.get("pool_name_col"):
+                try:
+                    _re = monthly_bal_parser.extract_pool_labels(
+                        mb["saved_path"],
+                        mb["sheet"],
+                        int(mb["header_row"]),
+                        mb["pool_name_col"],
+                    )
+                    if _re.get("ok") and _re.get("labels"):
+                        mb["parsed_pool_labels"] = _re["labels"]
+                        # Seed the pool_map from any prior label->pool
+                        # context (WARM balance_title_map + historical
+                        # hist_pool_map) for the newly-found labels.
+                        _combined_map: dict[str, str] = {}
+                        for _k, _v in (state.get("balance_title_map") or {}).items():
+                            if _k:
+                                _combined_map[_k] = (_v or "")
+                        _hpm = state.get("hist_pool_map") or {}
+                        for _k, _v in (_hpm.get("mapping") or {}).items():
+                            if _k and _k not in _combined_map:
+                                _combined_map[_k] = (_v or "")
+                        _seeded, _status = monthly_bal_parser.seed_pool_map(
+                            _re["labels"], _combined_map,
+                        )
+                        mb["label_status"] = _status
+                        # The form-submitted pool_map is parsed below;
+                        # we'll merge seed values for any labels the
+                        # user hasn't already mapped.
+                        mb["_seeded_pool_map"] = _seeded
+                except Exception as exc:  # noqa: BLE001
+                    current_app.logger.warning(
+                        "monthly_bal save: re-extract pool labels failed: %s",
+                        exc,
+                    )
             # Persist any pool-label -> wizard-pool mapping rows.
-            mb["pool_map"] = _parse_kv_rows(
+            _form_map = _parse_kv_rows(
                 request.form, "map_label", "map_pool"
             )
+            # Merge any newly-seeded labels (from a column change) so
+            # they appear in the pool-label mapping table on the next
+            # render — but never overwrite a user-supplied selection.
+            _seeded = mb.pop("_seeded_pool_map", {}) or {}
+            for _lbl, _pool in _seeded.items():
+                if _lbl not in _form_map:
+                    _form_map[_lbl] = _pool
+            mb["pool_map"] = _form_map
             # Persist the ACL source selection + per-source values.
             _save_acl_form(mb, request.form)
             state["monthly_bal"] = mb
@@ -1787,6 +1836,20 @@ def step5_monthly_bal():
                 # Both flows: monthly_bal → grades → credit_pull → sample.
                 return redirect(url_for("setup.step5_grades"))
             flash("Saved monthly balance file settings.", "success")
+            return redirect(url_for("setup.step5_monthly_bal"))
+
+        if action == "acl_set_source":
+            # Lightweight handler invoked by the ACL-source radios'
+            # onchange auto-submit. Persists ONLY the selected source
+            # so the page re-renders with the matching sub-panel
+            # (monthly_file row override, separate-file uploader, or
+            # manual three-month entry table) without running the full
+            # single-mode save path against potentially-empty fields.
+            src = (request.form.get("acl_source") or "").strip()
+            if src in ("monthly_file", "separate", "manual"):
+                mb.setdefault("acl", {})["source"] = src
+                state["monthly_bal"] = mb
+                _save_state(state)
             return redirect(url_for("setup.step5_monthly_bal"))
 
         if action == "acl_scan_balance_files":

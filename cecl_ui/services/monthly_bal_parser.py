@@ -371,6 +371,69 @@ def extract_row_history(
         wb.close()
 
 
+def extract_pool_labels(
+    saved_path: str | Path,
+    sheet: str,
+    header_row: int,
+    pool_name_col: str,
+) -> dict[str, Any]:
+    """Re-read pool/type labels from a specific column on a specific sheet.
+
+    Used after the user manually adjusts the layout fields (sheet,
+    header_row, pool_name_col) — auto-detection in :func:`_scan_sheet`
+    only ever looks at column A, so when labels live elsewhere we need
+    to re-scan against the user-supplied column.
+
+    Returns ``{"ok": bool, "error": str|None, "labels": [...]}``.
+    Labels are de-duplicated case-insensitively, preserving first-seen
+    order, and rows that look like dates / numbers / total / subtotal
+    rollups are skipped.
+    """
+    p = Path(saved_path)
+    if not p.exists():
+        return {"ok": False, "error": f"File not found: {saved_path}", "labels": []}
+    if not sheet or not header_row or not pool_name_col:
+        return {"ok": False,
+                "error": "Missing sheet / header_row / pool_name_col",
+                "labels": []}
+    col_idx = _col_letter_to_idx(pool_name_col)
+    if not col_idx:
+        return {"ok": False,
+                "error": f"Invalid column letter: {pool_name_col!r}",
+                "labels": []}
+    try:
+        wb = load_workbook(p, read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Could not open workbook: {exc}",
+                "labels": []}
+    try:
+        if sheet not in wb.sheetnames:
+            return {"ok": False, "error": f"Sheet '{sheet}' not found",
+                    "labels": []}
+        ws = wb[sheet]
+        labels: list[str] = []
+        seen: set[str] = set()
+        # Scan a generous window below the header; stop only on hard EOF.
+        max_scan = max(header_row + 200, ws.max_row or (header_row + 200))
+        for row_idx in range(header_row + 1, max_scan + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if cell.value is None:
+                continue
+            if not _is_label_row(cell.value):
+                continue
+            s = str(cell.value).strip()
+            if not s:
+                continue
+            key = s.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            labels.append(s)
+        return {"ok": True, "error": None, "labels": labels}
+    finally:
+        wb.close()
+
+
 # ---------------------------------------------------------------------------
 # Pool-map auto-seeding
 # ---------------------------------------------------------------------------
@@ -505,6 +568,13 @@ def pool_balances_for_latest_period(
                     "period": "", "by_pool": {}, "raw_rows": []}
 
         # Pick the target period: explicit, else latest.
+        # When ``period`` is provided we prefer an exact match; if no
+        # column hits that month-end we fall back to the latest column
+        # whose date is on or BEFORE the anchor (so a March anchor on a
+        # Jan-Dec workbook picks the March column, not April or
+        # December). Only when every column is AFTER the anchor do we
+        # fall through to "latest" so a freshly-uploaded file with no
+        # historical columns still produces something.
         target: tuple[int, date] | None = None
         if period:
             try:
@@ -513,6 +583,10 @@ def pool_balances_for_latest_period(
                     if d == want:
                         target = (c, d)
                         break
+                if target is None:
+                    on_or_before = [(c, d) for c, d in date_cols if d <= want]
+                    if on_or_before:
+                        target = max(on_or_before, key=lambda t: t[1])
             except ValueError:
                 target = None
         if target is None:
