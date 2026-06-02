@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils.cell import coordinate_from_string
 
 
 # ---------------------------------------------------------------------------
@@ -660,11 +661,37 @@ def pool_balances_for_latest_period(
 # (``balance_col`` and ``detected_period``).
 
 _LOAN_SECTION_PATTERNS = ("loans", "loan portfolio", "loan balances")
+# Exact-match section-end phrases (lower-cased, stripped).
 _LOAN_SECTION_END = (
     "total loans", "net loans", "total loan", "accounts receivable",
     "total accounts receivable", "cash", "investments", "fixed assets",
     "other assets", "total assets", "liabilities", "equity",
 )
+# Substring patterns; if any of these appears anywhere in a row's text
+# we treat the row as the end of the LOANS section. "total net loans"
+# is the canonical hard-stop marker per CU convention; we also catch
+# variations like "TOTAL GROSS LOANS" / "NET LOANS".
+_LOAN_SECTION_END_SUBSTRINGS = (
+    "total net loans", "total gross loans", "total loans", "net loans",
+    "total receivables", "total cash", "total investments",
+    "total fixed assets", "total other assets", "total assets",
+    "total liabilities", "total equity",
+)
+
+
+def _is_loan_section_end(value: Any) -> bool:
+    """Return True when ``value`` looks like a totals/section-end label.
+    Substring match (case-insensitive) so "TOTAL NET LOANS" trips even
+    though the exact-match list only has "total loans".
+    """
+    if not isinstance(value, str):
+        return False
+    s = value.strip().lower()
+    if not s:
+        return False
+    if s in _LOAN_SECTION_END:
+        return True
+    return any(p in s for p in _LOAN_SECTION_END_SUBSTRINGS)
 # Cells/labels we should never treat as a pool/account row.
 _PER_MONTH_SKIP_PHRASES = (
     "loans", "loan portfolio", "balance", "as of", "produced",
@@ -785,27 +812,115 @@ def _detect_period_from_rows(rows: list[list[Any]]) -> date | None:
 
 
 def _detect_period_from_name(name: str) -> date | None:
-    """Pull a YYYYMMDD or YYYY-MM-DD style date from a filename."""
-    m = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})", name)
-    if m:
+    """Pull a date from a filename in any common layout.
+
+    Supports (in priority order):
+    - YYYYMMDD / YYYY-MM-DD / YYYY_MM_DD
+    - MMDDYYYY / MM-DD-YYYY
+    - MMDDYY    (e.g. ``123125`` -> 2025-12-31)
+    - YYYYMM / YYYY-MM
+    - MMYYYY
+    Two-digit years are window-mapped to 2000-2069 / 1970-1999.
+    Each pattern is tried against EVERY match in the stem so a leading
+    member-number like ``878339`` doesn't shadow a trailing date.
+    """
+    stem = Path(name).stem
+
+    def _yy_to_yyyy(yy: int) -> int:
+        return 2000 + yy if yy < 70 else 1900 + yy
+
+    # YYYYMMDD
+    for m in re.finditer(
+            r"(?<!\d)(20\d{2})[-_]?(\d{2})[-_]?(\d{2})(?!\d)", stem):
         try:
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            return _last_day(y, mo)
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return _last_day(y, mo)
         except ValueError:
-            return None
-    m = re.search(r"(20\d{2})[-_]?(\d{2})", name)
-    if m:
+            continue
+    # MMDDYYYY
+    for m in re.finditer(
+            r"(?<!\d)(\d{2})[-_]?(\d{2})[-_]?(20\d{2})(?!\d)", stem):
+        try:
+            mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return _last_day(y, mo)
+        except ValueError:
+            continue
+    # MMDDYY (no separators) — e.g. "123125" -> 12/31/2025
+    for m in re.finditer(r"(?<!\d)(\d{2})(\d{2})(\d{2})(?!\d)", stem):
+        try:
+            mo, d, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return _last_day(_yy_to_yyyy(yy), mo)
+        except ValueError:
+            continue
+    # YYYYMM / YYYY-MM
+    for m in re.finditer(r"(?<!\d)(20\d{2})[-_]?(\d{2})(?!\d)", stem):
         try:
             y, mo = int(m.group(1)), int(m.group(2))
             if 1 <= mo <= 12:
                 return _last_day(y, mo)
         except ValueError:
-            return None
+            continue
+    # MMYYYY
+    for m in re.finditer(r"(?<!\d)(\d{2})[-_]?(20\d{2})(?!\d)", stem):
+        try:
+            mo, y = int(m.group(1)), int(m.group(2))
+            if 1 <= mo <= 12:
+                return _last_day(y, mo)
+        except ValueError:
+            continue
     return None
 
 
-def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
+def _extract_period_from_cell(
+    rows: list[list[Any]], cell_ref: str,
+) -> date | None:
+    """Read an explicit Excel-style cell reference (e.g. ``B3``) from the
+    pre-loaded grid and snap it to a month-end. Strips a leading
+    ``"As of:"`` if present.
+    """
+    ref = (cell_ref or "").strip()
+    if not ref:
+        return None
+    try:
+        col_letter, row_num = coordinate_from_string(ref)
+        col_idx = column_index_from_string(col_letter) - 1
+        r = int(row_num) - 1
+    except Exception:
+        return None
+    if r < 0 or r >= len(rows):
+        return None
+    row = rows[r]
+    if col_idx < 0 or col_idx >= len(row):
+        return None
+    val = row[col_idx]
+    if val is None:
+        return None
+    # Normalise via the standard helper; strip any leading "As of:" label.
+    if isinstance(val, str):
+        cleaned = re.sub(r"^\s*as of[:\s]*", "", val,
+                         flags=re.IGNORECASE).strip()
+        return normalize_to_month_end(cleaned) if cleaned else None
+    return normalize_to_month_end(val)
+
+
+def analyse_per_month_file(
+    path: str | Path,
+    stop_row: int | None = None,
+    as_of_cell: str | None = None,
+) -> dict[str, Any]:
     """Detect layout + pool labels in a single-month balance-sheet file.
+
+    ``stop_row`` (1-based) is an optional hard cap: any row at or below
+    this row index is ignored. When omitted the parser auto-stops at
+    the first "TOTAL NET LOANS" / "TOTAL LOANS" / "NET LOANS" marker.
+
+    ``as_of_cell`` is an optional Excel-style cell reference (e.g.
+    ``"B3"``). When supplied, the period is read from that cell first
+    and only falls back to the auto-detection (in-file ``As of:`` row,
+    then filename) if the cell is empty / unparseable.
 
     Returns::
 
@@ -819,6 +934,8 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
           "parsed_pool_labels": [str], # labels found in the LOANS section
           "rows": [{"label": str, "balance": float|None}],
           "detected_period": str,      # ISO YYYY-MM-DD or ""
+          "stop_row": int | None,      # 1-based row that ended scanning
+          "auto_stop_row": int | None, # 1-based auto-detected end row
         }
     """
     p = Path(path)
@@ -842,8 +959,13 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
                 "balance_col": "", "parsed_pool_labels": [], "rows": [],
                 "detected_period": ""}
 
-    # Period: prefer in-file marker, fall back to filename, else "".
-    period = _detect_period_from_rows(rows) or _detect_period_from_name(p.name)
+    # Period: explicit cell wins, then in-file "As of:" marker, then
+    # the filename, else "".
+    period = (
+        _extract_period_from_cell(rows, as_of_cell or "")
+        or _detect_period_from_rows(rows)
+        or _detect_period_from_name(p.name)
+    )
     period_iso = period.isoformat() if period else ""
 
     # Find the LOANS section header.
@@ -879,18 +1001,19 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
     detail_col_counts: dict[int, int] = {}
     balance_col_counts: dict[int, int] = {}
     end_idx = len(rows)
+    auto_end_idx = len(rows)
     for r in range(loans_idx + 1, min(loans_idx + 80, len(rows))):
         row = rows[r]
-        # Stop at section end (TOTAL LOANS / NET LOANS / etc.) — but only
-        # for counting; the actual end is found again below.
+        # Stop at section end (TOTAL NET LOANS / TOTAL LOANS / etc.) —
+        # substring match, so "TOTAL NET LOANS" trips even though
+        # the exact-match list has only "total loans".
         is_end = False
         for v in row:
-            if isinstance(v, str):
-                s = v.strip().lower()
-                if s in _LOAN_SECTION_END:
-                    is_end = True
-                    end_idx = min(end_idx, r)
-                    break
+            if _is_loan_section_end(v):
+                is_end = True
+                auto_end_idx = min(auto_end_idx, r)
+                end_idx = min(end_idx, r)
+                break
         if is_end:
             break
         # Identify text + money columns in this row.
@@ -916,11 +1039,20 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
     detail_col = max(detail_col_counts.items(), key=lambda kv: kv[1])[0]
     balance_col = max(balance_col_counts.items(), key=lambda kv: kv[1])[0]
 
+    # Honour an explicit user-supplied stop_row (1-based). When the
+    # user sets stop_row=N we treat row N as the first EXCLUDED row
+    # (i.e. "stop scanning at row N"). Always wins over auto-detect
+    # if it sits above the auto stop.
+    effective_end_idx = end_idx
+    if isinstance(stop_row, int) and stop_row > 0:
+        manual_end = max(loans_idx + 1, stop_row - 1)
+        effective_end_idx = min(effective_end_idx, manual_end)
+
     # Now extract labels + balances from the loans section.
     parsed_labels: list[str] = []
     extracted: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for r in range(loans_idx + 1, end_idx):
+    for r in range(loans_idx + 1, effective_end_idx):
         row = rows[r]
         if detail_col >= len(row):
             continue
@@ -932,8 +1064,8 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
             continue
         if label.lower() in _PER_MONTH_SKIP_PHRASES:
             continue
-        if label.lower() in _LOAN_SECTION_END:
-            continue
+        if _is_loan_section_end(label):
+            break
         bal = _coerce_number(row[balance_col]) \
             if balance_col < len(row) else None
         if bal is None:
@@ -980,6 +1112,9 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
         "acl_row": (acl_row_idx + 1) if acl_row_idx is not None else None,
         "acl_label": acl_label,
         "acl_value": acl_value,
+        "auto_stop_row": (auto_end_idx + 1) if auto_end_idx < len(rows) else None,
+        "stop_row": (effective_end_idx + 1)
+            if effective_end_idx < len(rows) else None,
     }
 
 
@@ -1005,6 +1140,11 @@ def pool_balances_for_per_month_files(
         header_row = int((layout or {}).get("header_row") or 1)
     except (TypeError, ValueError):
         header_row = 1
+    try:
+        stop_row_raw = (layout or {}).get("stop_row")
+        stop_row = int(stop_row_raw) if stop_row_raw else 0
+    except (TypeError, ValueError):
+        stop_row = 0
     label_col_idx = _col_letter_to_idx(label_col) or 1
     balance_col_idx = _col_letter_to_idx(balance_col) or 2
 
@@ -1036,12 +1176,18 @@ def pool_balances_for_per_month_files(
         raw_rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         start = max(header_row, 1)
+        # When the user supplied a manual stop_row we cap the scan there;
+        # otherwise we scan the whole grid and rely on substring totals
+        # detection to bail out.
+        end_exclusive = len(rows)
+        if stop_row and stop_row > start:
+            end_exclusive = min(end_exclusive, stop_row - 1)
         hit_end = False
-        for r in range(start, len(rows)):
+        for r in range(start, end_exclusive):
             row = rows[r]
             # Stop at the first totals/end marker anywhere in the row.
             for v in row:
-                if isinstance(v, str) and v.strip().lower() in _LOAN_SECTION_END:
+                if _is_loan_section_end(v):
                     hit_end = True
                     break
             if hit_end:
@@ -1056,7 +1202,7 @@ def pool_balances_for_per_month_files(
                 continue
             if label.lower() in _PER_MONTH_SKIP_PHRASES:
                 continue
-            if label.lower() in _LOAN_SECTION_END:
+            if _is_loan_section_end(label):
                 # Stop at the first totals/end marker.
                 break
             key = label.lower()

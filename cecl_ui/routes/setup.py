@@ -1339,12 +1339,269 @@ def _ingest_annual_workbook(
     )
 
 
+def _ingest_per_month_workbook(
+    state: dict,
+    mb: dict,
+    target: Path,
+    period_raw: str,
+    stop_row: int | None = None,
+    as_of_cell: str | None = None,
+) -> tuple[str, str]:
+    """Analyse one monthly balance-sheet file and register it on ``mb``.
+
+    Mirrors :func:`_ingest_annual_workbook` for the per_month source.
+    Returns ``(category, message)`` where category is one of
+    ``success`` / ``warning`` / ``error`` suitable for ``flash``.
+    """
+    try:
+        analysis = monthly_bal_parser.analyse_per_month_file(
+            target, stop_row=stop_row, as_of_cell=as_of_cell)
+    except Exception as exc:  # noqa: BLE001
+        return ("error", f"Could not analyse {target.name}: {exc}")
+
+    period = (period_raw or "").strip()
+    if not period and analysis.get("detected_period"):
+        period = analysis["detected_period"]
+    if not period:
+        return (
+            "error",
+            f"Saved {target.name}, but no month-end date was supplied "
+            "and none could be detected in the file. Rename it to "
+            "include YYYYMMDD or add an 'As of:' cell and re-upload.",
+        )
+
+    entry = {
+        "filename": target.name,
+        "saved_path": str(target),
+        "period": period,
+    }
+    files = mb.setdefault("monthly_files", [])
+    files[:] = [e for e in files if e.get("filename") != entry["filename"]]
+    files.append(entry)
+    files.sort(key=lambda e: e.get("period") or "")
+
+    if not analysis.get("ok"):
+        return (
+            "warning",
+            f"Uploaded {target.name} for {period}, but auto-detect "
+            f"failed: {analysis.get('error', 'unknown error')}. "
+            "Fill in the layout fields by hand and click Save.",
+        )
+
+    layout = mb.setdefault("per_month_layout", {})
+    layout["sheet"] = analysis.get("sheet", "")
+    layout["label_col"] = analysis.get("pool_name_col", "A")
+    layout["balance_col"] = analysis.get("balance_col", "B")
+    layout["header_row"] = analysis.get("header_row", 1)
+    if as_of_cell is not None:
+        layout["as_of_cell"] = (as_of_cell or "").strip().upper()
+    # Persist effective + auto-detected stop rows so the runtime
+    # aggregator can hard-cap on the same boundary the wizard used.
+    if isinstance(stop_row, int) and stop_row > 0:
+        layout["stop_row"] = int(stop_row)
+    elif analysis.get("stop_row"):
+        layout["stop_row"] = int(analysis["stop_row"])
+    if analysis.get("auto_stop_row"):
+        layout["auto_stop_row"] = int(analysis["auto_stop_row"])
+
+    existing_labels = list(mb.get("parsed_pool_labels") or [])
+    seen = {s.lower() for s in existing_labels}
+    for lab in analysis.get("parsed_pool_labels", []):
+        if lab.lower() not in seen:
+            existing_labels.append(lab)
+            seen.add(lab.lower())
+    mb["parsed_pool_labels"] = existing_labels
+
+    combined_map: dict[str, str] = {}
+    for _k, _v in (state.get("balance_title_map") or {}).items():
+        if _k:
+            combined_map[_k] = (_v or "")
+    _hpm = state.get("hist_pool_map") or {}
+    for _k, _v in (_hpm.get("mapping") or {}).items():
+        if _k and _k not in combined_map:
+            combined_map[_k] = (_v or "")
+    seeded, status = monthly_bal_parser.seed_pool_map(
+        existing_labels, combined_map)
+    existing_pm = mb.get("pool_map") or {}
+    for label, pool in seeded.items():
+        if label not in existing_pm or not existing_pm.get(label):
+            existing_pm[label] = pool
+    mb["pool_map"] = existing_pm
+    mb["label_status"] = status
+
+    acl_row = analysis.get("acl_row")
+    acl_value = analysis.get("acl_value")
+    acl_msg = ""
+    if acl_row and acl_value is not None:
+        acl_state = mb.setdefault("acl", {})
+        if not acl_state.get("row"):
+            acl_state["row"] = int(acl_row)
+            acl_state["label"] = analysis.get("acl_label", "")
+        hist = acl_state.get("history") or {}
+        hist[period] = float(acl_value)
+        acl_state["history"] = hist
+        acl_msg = (f" ACL ${acl_value:,.0f} captured from row "
+                   f"{acl_row} ({analysis.get('acl_label','')}).")
+
+    return (
+        "success",
+        f"Uploaded {target.name} for {period}: parsed "
+        f"{len(analysis.get('parsed_pool_labels', []))} pool label(s) "
+        f"from sheet {analysis.get('sheet')!r} "
+        f"(labels in column {analysis.get('pool_name_col')}, balances "
+        f"in column {analysis.get('balance_col')})." + acl_msg,
+    )
+
+
 def _save_acl_file_upload(file_storage) -> Path:
     _ACL_FILE_DIR.mkdir(parents=True, exist_ok=True)
     fn = secure_filename(file_storage.filename or "acl.xlsx")
     target = _ACL_FILE_DIR / fn
     file_storage.save(target)
     return target
+
+
+def _parse_pool_mapping_file(
+    path: Path,
+    label_col_idx: int = 0,
+    pool_col_idx: int = 1,
+    has_header: bool | None = None,
+) -> tuple[dict[str, str], str, list[str]]:
+    """Parse a workbook label -> pool name mapping file.
+
+    Accepts ``.xlsx`` / ``.xlsm`` / ``.xls`` / ``.csv``.
+
+    Args:
+        path: file to read.
+        label_col_idx: 0-based column index that holds the workbook label.
+        pool_col_idx: 0-based column index that holds the target pool name.
+        has_header: if None, auto-detect a header row by keyword; if True
+            always skip the first row; if False never skip.
+
+    Returns ``(mapping, error, header_preview)`` where ``mapping`` is
+    ``{label: pool}``, ``error`` is "" on success, and ``header_preview``
+    is the first non-blank row's cell values (used by the UI to render
+    column-picker dropdowns when the user reuploads with explicit
+    column choices). Empty pool values are preserved (= "ignore").
+    """
+    suffix = path.suffix.lower()
+    rows: list[list[Any]] = []
+    try:
+        if suffix == ".csv":
+            import csv
+            with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+                rows = [list(r) for r in csv.reader(fh)]
+        elif suffix in (".xlsx", ".xlsm"):
+            from openpyxl import load_workbook
+            wb = load_workbook(path, data_only=True, read_only=True)
+            ws = wb.active
+            for r in ws.iter_rows(values_only=True):
+                rows.append(list(r))
+            wb.close()
+        elif suffix == ".xls":
+            import xlrd  # type: ignore
+            book = xlrd.open_workbook(str(path))
+            sh = book.sheet_by_index(0)
+            for ri in range(sh.nrows):
+                rows.append([sh.cell_value(ri, ci)
+                             for ci in range(sh.ncols)])
+        else:
+            return ({}, f"Unsupported file type: {suffix}", [])
+    except Exception as exc:  # noqa: BLE001
+        return ({}, f"Could not read {path.name}: {exc}", [])
+
+    rows = [r for r in rows
+            if any((str(c).strip() if c is not None else "") for c in r)]
+    if not rows:
+        return ({}, "File is empty.", [])
+
+    header_preview = [
+        (str(c).strip() if c is not None else "") for c in rows[0]
+    ]
+
+    # Auto-detect header row when not explicitly told.
+    drop_first = bool(has_header)
+    if has_header is None:
+        first = rows[0]
+        first_label = (str(first[label_col_idx]).strip().lower()
+                       if len(first) > label_col_idx
+                       and first[label_col_idx] is not None else "")
+        first_pool = (str(first[pool_col_idx]).strip().lower()
+                      if len(first) > pool_col_idx
+                      and first[pool_col_idx] is not None else "")
+        header_keywords = {"label", "labels", "name", "title", "category",
+                           "description", "workbook label",
+                           "balance label", "account", "type"}
+        pool_keywords = {"pool", "pools", "maps to", "target", "loan pool",
+                         "mapped pool", "destination", "category"}
+        if first_label in header_keywords or first_pool in pool_keywords:
+            drop_first = True
+    if drop_first:
+        rows = rows[1:]
+
+    mapping: dict[str, str] = {}
+    for r in rows:
+        if not r:
+            continue
+        label = (str(r[label_col_idx]).strip()
+                 if len(r) > label_col_idx and r[label_col_idx] is not None
+                 else "")
+        if not label:
+            continue
+        pool = ""
+        if len(r) > pool_col_idx and r[pool_col_idx] is not None:
+            pool = str(r[pool_col_idx]).strip()
+        if pool.lower() in ("ignore", "-- ignore --", "— ignore —", "none",
+                            "n/a", "na", "skip", "exclude"):
+            pool = ""
+        mapping[label] = pool
+
+    if not mapping:
+        return ({}, "No mapping rows found.", header_preview)
+    return (mapping, "", header_preview)
+
+
+def _apply_pool_mapping(
+    mb: dict, mapping: dict[str, str], source_name: str
+) -> tuple[int, int, int]:
+    """Merge a parsed label->pool mapping into ``mb``.
+
+    Returns ``(applied, added_labels, matched_existing)``.
+    """
+    existing_pm = mb.get("pool_map") or {}
+    existing_labels = list(mb.get("parsed_pool_labels") or [])
+    lc_to_existing = {
+        s.strip().lower(): s for s in existing_labels if s
+    }
+    seen_lc = set(lc_to_existing.keys())
+    applied = 0
+    added_labels = 0
+    matched_existing = 0
+    for lab, pool in mapping.items():
+        key = (lab or "").strip().lower()
+        if not key:
+            continue
+        if key in seen_lc:
+            canonical = lc_to_existing[key]
+            existing_pm[canonical] = pool
+            matched_existing += 1
+        else:
+            existing_pm[lab] = pool
+            existing_labels.append(lab)
+            seen_lc.add(key)
+            lc_to_existing[key] = lab
+            added_labels += 1
+        applied += 1
+    mb["parsed_pool_labels"] = existing_labels
+    mb["pool_map"] = existing_pm
+    msg_parts = [f"Imported {applied} pool mapping(s) from {source_name}"]
+    if matched_existing:
+        msg_parts.append(
+            f"{matched_existing} matched existing parsed label(s)")
+    if added_labels:
+        msg_parts.append(f"{added_labels} new label(s) added")
+    flash("; ".join(msg_parts) + ".", "success")
+    return (applied, added_labels, matched_existing)
 
 
 def _save_acl_form(mb: dict, form) -> None:
@@ -1575,6 +1832,21 @@ def step5_monthly_bal():
             "month3_date": "", "month3_value": None,
         },
     })
+    # Backfill any sub-keys that may be missing on older drafts (the
+    # outer ``setdefault`` above only seeds when ``acl`` is absent).
+    _acl = mb["acl"]
+    _acl.setdefault("source", "monthly_file")
+    _acl.setdefault("row", 0)
+    _acl.setdefault("label", "")
+    _acl.setdefault("history", {})
+    _acl.setdefault("separate_file", {
+        "filename": "", "saved_path": "",
+        "sheet": "", "cell": "", "value": None,
+    })
+    _man = _acl.setdefault("manual", {})
+    for _mk in ("month1", "month2", "month3"):
+        _man.setdefault(f"{_mk}_date", "")
+        _man.setdefault(f"{_mk}_value", None)
 
     # Pre-fill manual ACL month-end dates from the WARM as-of date so the
     # user only has to type the three balances. We populate any blank date
@@ -2027,122 +2299,9 @@ def step5_monthly_bal():
             else:
                 try:
                     target = _save_monthly_bal_upload(f)
-                    # Auto-detect layout + pool labels from this file. We
-                    # do this BEFORE deciding what period to tag the entry
-                    # with so the in-file "As of:" date can fill in for a
-                    # missing per_month_period.
-                    analysis = monthly_bal_parser.analyse_per_month_file(target)
-                    if not period and analysis.get("detected_period"):
-                        period = analysis["detected_period"]
-                    if not period:
-                        flash(
-                            f"Saved {target.name}, but no month-end date "
-                            "was supplied and none could be detected in "
-                            "the file. Enter the date and re-upload.",
-                            "error",
-                        )
-                        _save_state(state)
-                        return redirect(url_for("setup.step5_monthly_bal"))
-
-                    entry = {
-                        "filename": target.name,
-                        "saved_path": str(target),
-                        "period": period,
-                    }
-                    files = mb.setdefault("monthly_files", [])
-                    # Replace any existing entry for the same filename.
-                    files[:] = [e for e in files
-                                if e.get("filename") != entry["filename"]]
-                    files.append(entry)
-                    files.sort(key=lambda e: e.get("period") or "")
-
-                    if analysis.get("ok"):
-                        # Overwrite layout from the latest successful
-                        # parse: per-month files from the same CU share
-                        # a layout, so the newest detection is the most
-                        # reliable. (If a user customized via the Save
-                        # button and then uploads another file, the new
-                        # detection may revert their tweaks — but
-                        # auto-detect on a clean balance-sheet file is
-                        # usually exactly what they had typed anyway.)
-                        layout = mb.setdefault("per_month_layout", {})
-                        layout["sheet"] = analysis.get("sheet", "")
-                        layout["label_col"] = analysis.get(
-                            "pool_name_col", "A")
-                        layout["balance_col"] = analysis.get(
-                            "balance_col", "B")
-                        layout["header_row"] = analysis.get("header_row", 1)
-
-                        # Merge parsed labels into mb["parsed_pool_labels"]
-                        # (used by templates that want to display
-                        # auto-detected labels).
-                        existing_labels = list(mb.get("parsed_pool_labels") or [])
-                        seen = {s.lower() for s in existing_labels}
-                        for lab in analysis.get("parsed_pool_labels", []):
-                            if lab.lower() not in seen:
-                                existing_labels.append(lab)
-                                seen.add(lab.lower())
-                        mb["parsed_pool_labels"] = existing_labels
-
-                        # Seed pool_map from WARM balance_title_map +
-                        # historical hist_pool_map (same logic single
-                        # mode uses), then keep any user edits.
-                        combined_map: dict[str, str] = {}
-                        for _k, _v in (state.get("balance_title_map") or {}).items():
-                            if _k:
-                                combined_map[_k] = (_v or "")
-                        _hpm = state.get("hist_pool_map") or {}
-                        for _k, _v in (_hpm.get("mapping") or {}).items():
-                            if _k and _k not in combined_map:
-                                combined_map[_k] = (_v or "")
-                        seeded, status = monthly_bal_parser.seed_pool_map(
-                            existing_labels,
-                            combined_map,
-                        )
-                        existing_pm = mb.get("pool_map") or {}
-                        for label, pool in seeded.items():
-                            if label not in existing_pm or not existing_pm.get(label):
-                                existing_pm[label] = pool
-                        mb["pool_map"] = existing_pm
-                        mb["label_status"] = status
-
-                        # Auto-capture ACL balance for this period.
-                        acl_row = analysis.get("acl_row")
-                        acl_value = analysis.get("acl_value")
-                        acl_msg = ""
-                        if acl_row and acl_value is not None:
-                            acl_state = mb.setdefault("acl", {})
-                            if not acl_state.get("row"):
-                                acl_state["row"] = int(acl_row)
-                                acl_state["label"] = analysis.get(
-                                    "acl_label", "")
-                            hist = acl_state.get("history") or {}
-                            hist[period] = float(acl_value)
-                            acl_state["history"] = hist
-                            acl_msg = (
-                                f" ACL ${acl_value:,.0f} captured "
-                                f"from row {acl_row} "
-                                f"({analysis.get('acl_label','')}).")
-
-                        flash(
-                            f"Uploaded {target.name} for {period}: parsed "
-                            f"{len(analysis.get('parsed_pool_labels', []))} "
-                            f"pool label(s) from sheet "
-                            f"{analysis.get('sheet')!r} "
-                            f"(labels in column {analysis.get('pool_name_col')}, "
-                            f"balances in column {analysis.get('balance_col')})."
-                            + acl_msg,
-                            "success",
-                        )
-                    else:
-                        flash(
-                            f"Uploaded {target.name} for {period}, but "
-                            f"auto-detect failed: "
-                            f"{analysis.get('error', 'unknown error')}. "
-                            "Fill in the layout fields by hand and click "
-                            "Save.",
-                            "warning",
-                        )
+                    category, message = _ingest_per_month_workbook(
+                        state, mb, target, period)
+                    flash(message, category)
                 except Exception as exc:  # noqa: BLE001
                     flash(f"Upload failed: {exc}", "error")
             _save_state(state)
@@ -3723,6 +3882,10 @@ def step3_historical():
                 if choice == "annual_balance_sheets":
                     mb = state.setdefault("monthly_bal", {})
                     mb["source"] = "per_year"
+                # Monthly balance sheets feed Step 5's per_month mode.
+                elif choice == "monthly_balance_sheets":
+                    mb = state.setdefault("monthly_bal", {})
+                    mb["source"] = "per_month"
                 _save_state(state)
                 return redirect(url_for(back_endpoint))
             flash("Please choose one of the balance-source options.", "error")
@@ -3855,6 +4018,323 @@ def step3_historical():
             _save_state(state)
             flash("Saved pool mapping for annual balance workbooks.",
                   "success")
+            return redirect(url_for(back_endpoint))
+
+        elif action == "upload_per_month_step3":
+            mb = state.setdefault("monthly_bal", {})
+            mb["source"] = "per_month"
+            f = request.files.get("per_month_file")
+            period_raw = (request.form.get("per_month_period") or "").strip()
+            stop_row_raw = (request.form.get("per_month_stop_row") or "").strip()
+            as_of_cell_raw = (request.form.get("per_month_as_of_cell") or "").strip().upper()
+            try:
+                stop_row_val: int | None = int(stop_row_raw) if stop_row_raw else None
+            except (TypeError, ValueError):
+                stop_row_val = None
+            if not f or not f.filename:
+                # Allow re-analysing the most recent uploaded sample with
+                # a new stop_row — don't force the user to re-pick the file.
+                files = mb.get("monthly_files") or []
+                last = files[-1] if files else None
+                last_path = (last or {}).get("saved_path") or ""
+                if last_path and Path(last_path).is_file():
+                    try:
+                        target = Path(last_path)
+                        category, message = _ingest_per_month_workbook(
+                            state, mb, target, last.get("period") or "",
+                            stop_row=stop_row_val,
+                            as_of_cell=as_of_cell_raw)
+                        flash(message, category)
+                    except Exception as exc:  # noqa: BLE001
+                        flash(f"Re-analyse failed: {exc}", "error")
+                else:
+                    flash(
+                        "Choose a monthly balance sheet to upload.",
+                        "error",
+                    )
+            else:
+                try:
+                    target = _save_monthly_bal_upload(f)
+                    category, message = _ingest_per_month_workbook(
+                        state, mb, target, period_raw,
+                        stop_row=stop_row_val,
+                        as_of_cell=as_of_cell_raw)
+                    flash(message, category)
+                except Exception as exc:  # noqa: BLE001
+                    flash(f"Upload failed: {exc}", "error")
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "reset_step3_balance_sheets":
+            mb = state.setdefault("monthly_bal", {})
+            # Delete temp-stashed sample workbooks + the pool-mapping
+            # upload (best-effort; never blocks the reset).
+            for entry in (mb.get("monthly_files") or []):
+                sp = entry.get("saved_path") or ""
+                if sp and not entry.get("external"):
+                    try:
+                        pp = Path(sp)
+                        if pp.is_file():
+                            pp.unlink()
+                    except Exception:  # noqa: BLE001
+                        pass
+            pm_up = mb.get("pool_mapping_upload") or {}
+            sp = pm_up.get("saved_path") or ""
+            if sp:
+                try:
+                    pp = Path(sp)
+                    if pp.is_file():
+                        pp.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+            # Wipe everything Step 3 touches under monthly_bal but keep
+            # the chosen source (per_month) so the radio stays sticky.
+            kept_source = mb.get("source") or ""
+            for k in (
+                "monthly_files", "per_month_layout", "per_month_source_folder",
+                "pool_map", "parsed_pool_labels", "label_status",
+                "acl", "pool_mapping_upload", "year_files",
+                "per_year_layout", "annual_folder",
+            ):
+                mb.pop(k, None)
+            if kept_source:
+                mb["source"] = kept_source
+            flash(
+                "Cleared all Step 3 monthly-balance uploads, mappings, "
+                "and detected layout. Start fresh by uploading a sample.",
+                "success",
+            )
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "scan_per_month_folder_step3":
+            mb = state.setdefault("monthly_bal", {})
+            mb["source"] = "per_month"
+            folder_raw = (request.form.get("per_month_folder") or "").strip()
+            folder = _normalize_folder_path(folder_raw)
+            mb["per_month_source_folder"] = folder
+            if not folder:
+                flash("Enter a folder path to scan.", "error")
+            else:
+                try:
+                    p = Path(folder)
+                    if not p.is_dir():
+                        flash(
+                            f"Folder not found or not accessible: {folder}",
+                            "error",
+                        )
+                    else:
+                        candidates = [
+                            f for f in sorted(p.iterdir())
+                            if f.is_file()
+                            and f.suffix.lower() in (
+                                ".xlsx", ".xlsm", ".xls", ".csv")
+                            and not f.name.startswith(("~$", "."))
+                        ]
+                        if not candidates:
+                            flash(
+                                f"No .xlsx/.xls/.csv workbooks found in "
+                                f"{folder}.",
+                                "warning",
+                            )
+                        else:
+                            import shutil
+                            ok_n, warn_n, err_n = 0, 0, 0
+                            for src in candidates:
+                                _MONTHLY_BAL_DIR.mkdir(
+                                    parents=True, exist_ok=True)
+                                fn = secure_filename(src.name)
+                                dest = _MONTHLY_BAL_DIR / fn
+                                try:
+                                    if dest.resolve() != src.resolve():
+                                        shutil.copy2(src, dest)
+                                except Exception:  # noqa: BLE001
+                                    dest = src
+                                category, _msg = _ingest_per_month_workbook(
+                                    state, mb, dest, period_raw="")
+                                if category == "success":
+                                    ok_n += 1
+                                elif category == "warning":
+                                    warn_n += 1
+                                else:
+                                    err_n += 1
+                            parts = [f"Scanned {folder}:",
+                                     f"{ok_n} ingested"]
+                            if warn_n:
+                                parts.append(f"{warn_n} layout warning(s)")
+                            if err_n:
+                                parts.append(
+                                    f"{err_n} skipped (no detectable "
+                                    "month-end date)")
+                            flash(
+                                ", ".join(parts) + ".",
+                                "success" if ok_n else "warning",
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    flash(f"Folder scan failed: {exc}", "error")
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "remove_per_month_step3":
+            mb = state.setdefault("monthly_bal", {})
+            target_name = (request.form.get("filename") or "").strip()
+            files = mb.get("monthly_files") or []
+            removed = None
+            for e in files:
+                if e.get("filename") == target_name:
+                    removed = e
+                    break
+            if removed:
+                files.remove(removed)
+                if not removed.get("external"):
+                    sp = removed.get("saved_path") or ""
+                    if sp:
+                        try:
+                            pp = Path(sp)
+                            if pp.is_file():
+                                pp.unlink()
+                        except Exception:  # noqa: BLE001
+                            pass
+                flash(f"Removed {target_name}.", "success")
+            else:
+                flash(f"File '{target_name}' not found.", "error")
+            mb["monthly_files"] = files
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "save_per_month_pool_map":
+            mb = state.setdefault("monthly_bal", {})
+            pool_map = mb.setdefault("pool_map", {})
+            for key in list(request.form.keys()):
+                if key.startswith("pm_label_"):
+                    idx = key[len("pm_label_"):]
+                    label = (request.form.get(key) or "").strip()
+                    if not label:
+                        continue
+                    pool = (
+                        request.form.get(f"pm_pool_{idx}") or "").strip()
+                    if pool == "__ignore__":
+                        pool = ""
+                    pool_map[label] = pool
+            mb["pool_map"] = pool_map
+            _save_state(state)
+            flash("Saved pool mapping for monthly balance sheets.",
+                  "success")
+            return redirect(url_for(back_endpoint))
+
+        elif action == "upload_pool_mapping":
+            mb = state.setdefault("monthly_bal", {})
+            f = request.files.get("pool_mapping_file")
+
+            def _col_to_zero_idx(value: str, default_letter: str) -> int:
+                """Accept a column letter (A,B,...,AA) OR a 1-based number."""
+                raw = (value or "").strip()
+                if not raw:
+                    raw = default_letter
+                if raw.isdigit():
+                    n = int(raw)
+                    return max(0, n - 1)
+                # Letter form.
+                idx = monthly_bal_parser._col_letter_to_idx(raw)
+                return max(0, idx - 1)
+
+            label_col_idx = _col_to_zero_idx(
+                request.form.get("pm_file_label_col") or "", "A")
+            pool_col_idx = _col_to_zero_idx(
+                request.form.get("pm_file_pool_col") or "", "B")
+            header_choice = (request.form.get("pm_file_header") or "auto"
+                             ).strip().lower()
+            has_header: bool | None
+            if header_choice == "yes":
+                has_header = True
+            elif header_choice == "no":
+                has_header = False
+            else:
+                has_header = None
+
+            def _idx_to_letter(idx: int) -> str:
+                """0-based index -> letter (0->'A')."""
+                n = idx + 1
+                s = ""
+                while n > 0:
+                    n, r = divmod(n - 1, 26)
+                    s = chr(ord("A") + r) + s
+                return s or "A"
+
+            label_letter = _idx_to_letter(label_col_idx)
+            pool_letter = _idx_to_letter(pool_col_idx)
+            if not f or not f.filename:
+                # Allow re-parsing the previously uploaded file with new
+                # column choices — don't force the user to re-pick it.
+                prior = mb.get("pool_mapping_upload") or {}
+                prior_path = prior.get("saved_path") or ""
+                if prior_path and Path(prior_path).is_file():
+                    try:
+                        target = Path(prior_path)
+                        fn = target.name
+                        mapping, err, header_preview = (
+                            _parse_pool_mapping_file(
+                                target,
+                                label_col_idx=label_col_idx,
+                                pool_col_idx=pool_col_idx,
+                                has_header=has_header,
+                            )
+                        )
+                        sample_pairs = list(
+                            (mapping or {}).items())[:8]
+                        mb["pool_mapping_upload"] = {
+                            "filename": fn,
+                            "saved_path": str(target),
+                            "header_preview": header_preview,
+                            "label_col": label_letter,
+                            "pool_col": pool_letter,
+                            "header_choice": header_choice,
+                            "sample_pairs": sample_pairs,
+                            "row_count": len(mapping or {}),
+                        }
+                        if err:
+                            flash(f"Could not parse {fn}: {err}", "error")
+                        else:
+                            _apply_pool_mapping(mb, mapping, fn)
+                    except Exception as exc:  # noqa: BLE001
+                        flash(f"Re-parse failed: {exc}", "error")
+                else:
+                    flash(
+                        "Choose a pool-mapping file (.csv/.xlsx) to upload.",
+                        "error",
+                    )
+            else:
+                try:
+                    _MONTHLY_BAL_DIR.mkdir(parents=True, exist_ok=True)
+                    fn = secure_filename(f.filename or "pool_mapping.csv")
+                    target = _MONTHLY_BAL_DIR / fn
+                    f.save(target)
+                    mapping, err, header_preview = _parse_pool_mapping_file(
+                        target,
+                        label_col_idx=label_col_idx,
+                        pool_col_idx=pool_col_idx,
+                        has_header=has_header,
+                    )
+                    sample_pairs = list((mapping or {}).items())[:8]
+                    # Stash the file path + preview so the UI can render
+                    # column-picker dropdowns for a re-parse.
+                    mb["pool_mapping_upload"] = {
+                        "filename": fn,
+                        "saved_path": str(target),
+                        "header_preview": header_preview,
+                        "label_col": label_letter,
+                        "pool_col": pool_letter,
+                        "header_choice": header_choice,
+                        "sample_pairs": sample_pairs,
+                        "row_count": len(mapping or {}),
+                    }
+                    if err:
+                        flash(f"Could not parse {fn}: {err}", "error")
+                    else:
+                        _apply_pool_mapping(mb, mapping, fn)
+                except Exception as exc:  # noqa: BLE001
+                    flash(f"Upload failed: {exc}", "error")
+            _save_state(state)
             return redirect(url_for(back_endpoint))
 
         elif action == "set_hist_extract_target":
