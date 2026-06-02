@@ -1491,31 +1491,117 @@
 {% set sb = (state.hist_extracts or {}).get('solr_backfill') or {} %}
 {% set sb_test = sb.get('last_test') %}
 {% set sb_run = sb.get('last_run') %}
+{% set sb_mode = sb.get('mode') or 'per_loan_code' %}
 {% set cmap = solr_canonical_map or [] %}
 {% set _he_1a = state.hist_extracts or {} %}
 {% set _tp_1a = _he_1a.get('target_period') or '' %}
 {% set _hm_1a = _he_1a.get('history_months') or '' %}
+{% set dist_preview = solr_dist_preview or {} %}
 <div class="card" style="border:1px solid #c9d6e8; background:#f4f8ff;">
   <h3 style="margin-top:0;">
     1a. Fill missing months from NCUA 5300
     <span class="muted" style="font-weight:normal;">(automatic, optional)</span>
   </h3>
+
+  {# Mode selector — auto-submits on change. #}
+  <form method="post" style="margin:6px 0 12px 0;
+        padding:10px 14px; background:#fff; border:1px solid #c9d6e8;
+        border-radius:6px;">
+    <input type="hidden" name="action" value="set_solr_backfill_mode">
+    <strong>Backfill mode:</strong>
+    <label style="display:block; margin-top:6px;">
+      <input type="radio" name="solr_backfill_mode" value="per_loan_code"
+             onchange="this.form.submit()"
+             {% if sb_mode == 'per_loan_code' %}checked{% endif %}>
+      <strong>Per loan code</strong> &mdash; map each canonical 5300
+      bucket (e.g. <em>New Vehicles</em>, <em>First Liens</em>) to one
+      of this CU's pools via the Loan Code Mapping step.
+    </label>
+    <label style="display:block; margin-top:4px;">
+      <input type="radio" name="solr_backfill_mode" value="distributed"
+             onchange="this.form.submit()"
+             {% if sb_mode == 'distributed' %}checked{% endif %}>
+      <strong>Distribute by earliest-month ratios</strong> &mdash; take
+      each quarter's <em>total</em> loan balance from the 5300 and
+      apportion it across this CU's pools using the SAME percentages
+      as the earliest month in the historical balance file(s) above.
+      Use this when the 5300 categories don't line up cleanly with
+      this CU's pools.
+    </label>
+  </form>
+
   <p class="muted" style="margin-top:0;">
-    For any quarter-end (Mar/Jun/Sep/Dec) inside the lookback window that
-    has <strong>no row</strong> in this CU's historical balance table,
-    pull the credit union's 5300 call report from the TCT NCUA Solr index
-    and write one row per canonical 5300 loan-type bucket. Because 5300
-    reports are quarterly, the quarter-end balances are
-    <strong>also copied to the two prior month-ends</strong>
-    (e.g. Q1's March balance fills January and February too), but only
-    for months that aren't already loaded. Existing rows are
-    <strong>never overwritten</strong> &mdash; this is purely a
-    gap-filler. The new loan codes are seeded into the
-    <strong>Loan Code Mapping</strong> step so you can assign each one
-    to a pool for this credit union. FICO histograms are <em>not</em>
-    available from 5300 data &mdash; those columns will be empty for
-    backfilled months.
+    {% if sb_mode == 'distributed' %}
+      For any quarter-end inside the lookback window with no row in
+      this CU's historical balance table, pull the 5300 call report,
+      compute the total loan balance, and distribute it across pools
+      using the earliest-month ratios shown below. Existing rows are
+      <strong>never overwritten</strong>. Choosing this mode also
+      removes any prior per-loan-code backfill rows for this CU to
+      avoid double-counting.
+    {% else %}
+      For any quarter-end (Mar/Jun/Sep/Dec) inside the lookback window
+      that has <strong>no row</strong> in this CU's historical balance
+      table, pull the credit union's 5300 call report from the TCT
+      NCUA Solr index and write one row per canonical 5300 loan-type
+      bucket. Because 5300 reports are quarterly, the quarter-end
+      balances are <strong>also copied to the two prior
+      month-ends</strong> (e.g. Q1's March balance fills January and
+      February too), but only for months that aren't already loaded.
+      Existing rows are <strong>never overwritten</strong> &mdash;
+      this is purely a gap-filler. The new loan codes are seeded into
+      the <strong>Loan Code Mapping</strong> step so you can assign
+      each one to a pool. FICO histograms are <em>not</em> available
+      from 5300 data.
+    {% endif %}
   </p>
+
+  {% if sb_mode == 'distributed' %}
+    {# Earliest-month preview panel — shows the ratios that will be
+       used for the backfill. Computed on render from the uploaded
+       balance file(s) (annual or per_month). #}
+    <div style="margin:6px 0 12px 0;
+          padding:10px 14px; background:#fff; border:1px solid #c9d6e8;
+          border-radius:6px;">
+      <strong>Earliest-month pool distribution preview</strong>
+      {% if dist_preview.get('ok') %}
+        <div class="muted" style="margin-top:4px;">
+          From earliest period
+          <code>{{ dist_preview.get('period') }}</code> &mdash;
+          total ${{ '{:,.0f}'.format(dist_preview.get('total') or 0) }}
+          across {{ dist_preview.get('pool_distribution') | length }}
+          pool(s). Each backfilled quarter's 5300 total will be split
+          using these percentages.
+        </div>
+        <table class="data-table" style="width:auto; min-width:480px;
+              margin-top:6px;">
+          <thead><tr>
+            <th style="text-align:left;">Pool</th>
+            <th style="text-align:right;">Earliest-month $</th>
+            <th style="text-align:right;">% of total</th>
+          </tr></thead>
+          <tbody>
+          {% for pool, ratio in (dist_preview.get('pool_distribution') or {}).items() | sort %}
+            <tr>
+              <td>{{ pool }}</td>
+              <td style="text-align:right;">
+                ${{ '{:,.0f}'.format(dist_preview.get('by_pool', {}).get(pool, 0)) }}
+              </td>
+              <td style="text-align:right;">
+                {{ '{:.2f}%'.format(ratio * 100) }}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="flash warning" style="margin-top:6px;">
+          {{ dist_preview.get('error')
+             or 'Upload at least one historical balance workbook above to enable distributed mode.' }}
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
 
   {# Target period + history depth — required for the backfill action.
      Only shown directly here when the user isn't on the monthly_loan_extracts
@@ -1592,6 +1678,10 @@
         (app-wide, read-only here &mdash; edit
         <code>cecl_ui/data/ncua_5300_loan_codes.csv</code> to
         change)
+        {% if sb_mode == 'distributed' %}
+          &mdash; <em>not used in distributed mode (only the total
+          loan balance is read)</em>
+        {% endif %}
       </span>
       {% if not cmap %}
         <div class="flash error" style="margin-top:6px;">
@@ -1636,8 +1726,12 @@
       <button class="btn btn-primary" type="submit"
         formaction="{{ url_for('setup.step3_historical') }}"
         name="action" value="run_solr_backfill"
-        {% if not _ch or not cmap %}disabled{% endif %}>
-        Backfill missing quarters
+        {% if not _ch or not cmap or (sb_mode == 'distributed' and not dist_preview.get('ok')) %}disabled{% endif %}>
+        {% if sb_mode == 'distributed' %}
+          Backfill missing quarters (distributed)
+        {% else %}
+          Backfill missing quarters
+        {% endif %}
       </button>
     </div>
   </form>

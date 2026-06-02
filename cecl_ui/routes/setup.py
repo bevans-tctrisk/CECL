@@ -327,6 +327,14 @@ def _default_state() -> dict[str, Any]:
                 "core": "ncua",
                 # {loan_code: comma-separated 5300 field codes}
                 "loan_code_fields": {},
+                # "per_loan_code" (default): one row per canonical 5300
+                # bucket, downstream loader maps NCUA code -> user pool
+                # via pool_map / NCUA classifier.
+                # "distributed": fetch the QUARTER's TOTAL loan balance
+                # and distribute it across user pools in the same %
+                # ratios as the EARLIEST month of the historical
+                # balance file(s) uploaded above.
+                "mode": "per_loan_code",
                 "last_test": None,
                 "last_run": None,
             },
@@ -3343,6 +3351,11 @@ def _ensure_hist_extracts(state: dict[str, Any]) -> dict[str, Any]:
     sb.setdefault("solr_url", "http://searchserver1.tctrisk.com:8983/solr")
     sb.setdefault("core", "ncua")
     sb.setdefault("loan_code_fields", {})
+    # "per_loan_code" (default) maps each canonical NCUA bucket through
+    # pool_map / NCUA inference. "distributed" fetches the quarter's
+    # TOTAL loan balance and apportions across user pools using the
+    # earliest historical-balance month's pool ratios.
+    sb.setdefault("mode", "per_loan_code")
     sb.setdefault("last_test", None)
     sb.setdefault("last_run", None)
     # Parallel slot for the charge-off backfill (Solr URL/core are
@@ -3360,6 +3373,102 @@ def _ensure_hist_extracts(state: dict[str, Any]) -> dict[str, Any]:
         he["recov_solr_backfill"] = rec_sb
     rec_sb.setdefault("last_run", None)
     return he
+
+
+def _earliest_month_pool_distribution(state: dict) -> dict:
+    """Compute the {pool_name: ratio} distribution from the EARLIEST
+    month of the user's uploaded historical balance file(s).
+
+    Picks the loader matching ``state.hist_balance_source``:
+      * ``annual_balance_sheets`` -> per_year_files aggregator
+      * ``monthly_balance_sheets`` -> per_month_files aggregator
+      * other (single_workbook / monthly_loan_extracts) -> not supported
+        (returns ``error`` describing why).
+
+    Returns a dict::
+
+        {
+            "ok": bool,
+            "error": str,
+            "period": "YYYY-MM-DD",   # earliest period found
+            "total": float,           # sum across all pools that month
+            "pool_distribution": {pool: ratio},  # ratios sum to 1.0
+            "by_pool": {pool: balance},          # raw $ per pool
+            "source": "annual" | "per_month",
+        }
+    """
+    out: dict = {
+        "ok": False,
+        "error": "",
+        "period": "",
+        "total": 0.0,
+        "pool_distribution": {},
+        "by_pool": {},
+        "source": "",
+    }
+    mb_state = state.get("monthly_bal") or {}
+    label_to_pool = mb_state.get("pool_map") or {}
+    source = state.get("hist_balance_source") or ""
+    by_period: dict = {}
+    if source == "annual_balance_sheets":
+        out["source"] = "annual"
+        ann = monthly_bal_parser.pool_balances_for_per_year_files(
+            mb_state.get("year_files") or [],
+            mb_state.get("per_year_layout") or {},
+            label_to_pool,
+        )
+        if not ann.get("ok") and not (ann.get("by_period") or {}):
+            out["error"] = (
+                f"Could not read annual balance workbook(s): "
+                f"{ann.get('error') or 'unknown error'}"
+            )
+            return out
+        by_period = ann.get("by_period") or {}
+    elif source == "monthly_balance_sheets":
+        out["source"] = "per_month"
+        pm = monthly_bal_parser.pool_balances_for_per_month_files(
+            mb_state.get("monthly_files") or [],
+            mb_state.get("per_month_layout") or {},
+            label_to_pool,
+        )
+        if not pm.get("ok") and not (pm.get("by_period") or {}):
+            out["error"] = (
+                f"Could not read monthly balance file(s): "
+                f"{pm.get('error') or 'unknown error'}"
+            )
+            return out
+        by_period = pm.get("by_period") or {}
+    else:
+        out["error"] = (
+            "Distributed mode requires the historical balance source to be "
+            "Annual balance sheets or Monthly balance sheets (Step 3)."
+        )
+        return out
+
+    if not by_period:
+        out["error"] = "No periods found in the uploaded balance file(s)."
+        return out
+    earliest = min(by_period.keys())
+    by_pool = (by_period.get(earliest) or {}).get("by_pool") or {}
+    # Drop zero/negative entries before normalizing.
+    pos = {p: float(b) for p, b in by_pool.items() if float(b or 0) > 0}
+    total = sum(pos.values())
+    if total <= 0:
+        out["error"] = (
+            f"Earliest month ({earliest}) had no positive pool balances. "
+            f"Check the pool mapping on Step 3."
+        )
+        out["period"] = earliest
+        return out
+    pd_ratios = {p: (b / total) for p, b in pos.items()}
+    out.update({
+        "ok": True,
+        "period": earliest,
+        "total": round(total, 2),
+        "pool_distribution": pd_ratios,
+        "by_pool": {p: round(b, 2) for p, b in pos.items()},
+    })
+    return out
 
 
 def _next_profile_id(profiles: list[dict[str, Any]]) -> str:
@@ -3949,8 +4058,24 @@ def step3_historical():
             sb = he["solr_backfill"]
             sb["solr_url"] = (request.form.get("solr_url") or "").strip() or sb["solr_url"]
             sb["core"] = (request.form.get("solr_core") or "").strip() or sb["core"]
+            mode_raw = (request.form.get("solr_backfill_mode") or "").strip().lower()
+            if mode_raw in ("per_loan_code", "distributed"):
+                sb["mode"] = mode_raw
             _save_state(state)
             flash("Saved 5300 Solr settings.", "success")
+
+        elif action == "set_solr_backfill_mode":
+            he = _ensure_hist_extracts(state)
+            sb = he["solr_backfill"]
+            mode_raw = (request.form.get("solr_backfill_mode") or "").strip().lower()
+            if mode_raw in ("per_loan_code", "distributed"):
+                sb["mode"] = mode_raw
+                _save_state(state)
+                label = ("Per-loan-code" if mode_raw == "per_loan_code"
+                         else "Distributed (earliest-month ratios)")
+                flash(f"5300 backfill mode set to: {label}.", "success")
+            else:
+                flash("Invalid backfill mode.", "error")
 
         elif action == "test_solr_fetch":
             he = _ensure_hist_extracts(state)
@@ -4076,20 +4201,54 @@ def step3_historical():
                 except Exception:  # noqa: BLE001
                     cleanup_removed = 0
 
-                sb["last_run"] = solr_5300_backfill.backfill_missing_quarters(
-                    cu, charter_int, sb["solr_url"], sb["core"],
-                    period, months,
-                    existing_dates=existing,
-                )
-                # Seed any new canonical loan codes into pool_map so they
-                # appear in the Loan Code Mapping step for pool assignment.
-                lr = sb["last_run"]
-                pool_map = state.setdefault("pool_map", {})
+                mode = sb.get("mode") or "per_loan_code"
                 added_to_pool_map: list[str] = []
-                for code in (lr.get("new_loan_codes") or []):
-                    if code not in pool_map:
-                        pool_map[code] = ""
-                        added_to_pool_map.append(code)
+                dist_info: dict = {}
+                if mode == "distributed":
+                    dist_info = _earliest_month_pool_distribution(state)
+                    if not dist_info.get("ok"):
+                        flash(
+                            "5300 backfill (distributed): "
+                            + (dist_info.get("error")
+                               or "could not compute pool distribution"),
+                            "error",
+                        )
+                        sb["last_run"] = {
+                            "ok": False,
+                            "mode": "distributed",
+                            "error": dist_info.get("error") or "no distribution",
+                        }
+                        _save_state(state)
+                        return redirect(url_for("setup.step3_historical"))
+                    sb["last_run"] = (
+                        solr_5300_backfill
+                        .backfill_missing_quarters_distributed(
+                            cu, charter_int, sb["solr_url"], sb["core"],
+                            period, months,
+                            pool_distribution=dist_info["pool_distribution"],
+                            existing_dates=existing,
+                            source_period_iso=dist_info.get("period") or "",
+                        )
+                    )
+                else:
+                    sb["last_run"] = (
+                        solr_5300_backfill.backfill_missing_quarters(
+                            cu, charter_int, sb["solr_url"], sb["core"],
+                            period, months,
+                            existing_dates=existing,
+                        )
+                    )
+                    # Seed any new canonical loan codes into pool_map so
+                    # they appear in the Loan Code Mapping step for
+                    # pool assignment. (Distributed mode writes pool
+                    # names directly, no seeding needed.)
+                    pool_map = state.setdefault("pool_map", {})
+                    for code in (sb["last_run"].get("new_loan_codes")
+                                 or []):
+                        if code not in pool_map:
+                            pool_map[code] = ""
+                            added_to_pool_map.append(code)
+                lr = sb["last_run"]
                 _save_state(state)
                 if lr.get("ok"):
                     filled = len(lr.get("months_filled") or [])
@@ -4098,12 +4257,24 @@ def step3_historical():
                     skipped = len(lr.get("months_skipped") or [])
                     none_yet = len(lr.get("months_no_data") or [])
                     stale = int(lr.get("stale_rows_removed") or 0)
+                    mode_label = ("distributed (earliest-month ratios)"
+                                  if mode == "distributed"
+                                  else "per loan code")
                     msg = (
-                        f"5300 backfill: filled {filled} month(s) across "
-                        f"{quarters} quarter(s) "
+                        f"5300 backfill [{mode_label}]: filled {filled} "
+                        f"month(s) across {quarters} quarter(s) "
                         f"({lr.get('rows_written', 0)} row(s)); "
-                        f"{skipped} skipped, {none_yet} quarter(s) had no Solr doc."
+                        f"{skipped} skipped, "
+                        f"{none_yet} quarter(s) had no Solr doc."
                     )
+                    if mode == "distributed" and dist_info:
+                        pools_n = len(dist_info.get("pool_distribution") or {})
+                        msg += (
+                            f" Distribution from earliest month "
+                            f"{dist_info.get('period')} "
+                            f"(${dist_info.get('total', 0):,.0f} across "
+                            f"{pools_n} pool(s))."
+                        )
                     if filled == 0:
                         msg += (
                             f" (Already covered: {len(upload_months)} month(s) "
@@ -4118,8 +4289,7 @@ def step3_historical():
                         )
                     if stale:
                         msg += (
-                            f" Removed {stale} stale row(s) for loan codes "
-                            f"no longer in the canonical map."
+                            f" Removed {stale} stale row(s)."
                         )
                     if added_to_pool_map:
                         msg += (
@@ -4825,6 +4995,15 @@ def step3_historical():
         and not p.get("excluded")
     ]
 
+    # Live preview of the earliest-month pool distribution that the
+    # "distributed" 5300 backfill mode would use. Cheap (<100ms) so we
+    # always compute it; template only renders the panel when mode is
+    # 'distributed'.
+    try:
+        solr_dist_preview = _earliest_month_pool_distribution(state)
+    except Exception:  # noqa: BLE001
+        solr_dist_preview = {"ok": False, "error": "preview failed"}
+
     return render_template(
         "setup/step3_historical.html",
         pool_suggestions=_DEFAULT_POOL_SUGGESTIONS,
@@ -4836,6 +5015,7 @@ def step3_historical():
         solr_canonical_map=solr_5300_backfill.load_canonical_map(),
         co_canonical_map=solr_5300_co_backfill.load_canonical_map(),
         recov_canonical_map=solr_5300_recov_backfill.load_canonical_map(),
+        solr_dist_preview=solr_dist_preview,
         section=section,
         **_wizard_ctx(active_key),
     )

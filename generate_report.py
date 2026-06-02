@@ -4779,6 +4779,23 @@ def _load_balance_history_from_db(config):
 
     ncua_lookup = _build_ncua_canonical_pool_lookup(config)
 
+    # Pool-name passthrough: rows written by the "distributed" 5300
+    # backfill mode use the user's pool name directly as ``loan_code``
+    # (e.g. "Real Estate"), which won't appear in pool_map (local CU
+    # codes -> pools) or the NCUA canonical map. Build a case-
+    # insensitive set of configured pool names so those rows route
+    # straight through.
+    configured_pool_names: dict[str, str] = {}
+    for p in (config.get('pools') or []):
+        if isinstance(p, dict):
+            name = str(p.get('name') or '').strip()
+            if name:
+                configured_pool_names[name.lower()] = name
+    for name in (config.get('pool_order') or []):
+        if isinstance(name, str) and name.strip():
+            configured_pool_names.setdefault(name.strip().lower(),
+                                             name.strip())
+
     # Sum balances per (year, month-end, pool), then average per (year, pool).
     by_year_month: dict[int, dict[str, dict[str, float]]] = {}
     n_skipped = 0
@@ -4795,9 +4812,13 @@ def _load_balance_history_from_db(config):
         if code_lc in suppressed_children.get(mo_key, ()):
             n_skipped += 1
             continue
-        pool = _resolve_pool_with_ncua(
-            r[1], pool_map_ci, ncua_lookup, default_pool,
-        )
+        # Distributed-mode rows: code IS already a configured pool name.
+        if code_lc in configured_pool_names:
+            pool = configured_pool_names[code_lc]
+        else:
+            pool = _resolve_pool_with_ncua(
+                r[1], pool_map_ci, ncua_lookup, default_pool,
+            )
         if not pool:
             continue
         try:
