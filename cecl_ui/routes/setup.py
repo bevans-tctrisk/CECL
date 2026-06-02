@@ -4561,7 +4561,7 @@ def step3_historical():
                 optional = ("loan_suffix", "original_fico_score")
                 new_map: dict[str, str] = {}
                 for fld in tuple(required) + optional:
-                    val = (request.form.get(fld) or "").strip()
+                    val = _norm_hdr(request.form.get(fld) or "")
                     if val:
                         new_map[fld] = val
                 missing = [f for f in required if not new_map.get(f)]
