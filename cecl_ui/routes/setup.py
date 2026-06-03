@@ -6954,6 +6954,13 @@ def step_dq_hist():
             sb = he["solr_backfill"]
             charter_raw = (state.get("charter_number") or "").strip()
             period = (he.get("target_period") or "").strip()
+            # WARM CUs don't visit the Historical step (which is where
+            # ``target_period`` is normally captured).  Fall back to the
+            # global Report Period anchor set on Step 1 (Identity).
+            if not period:
+                period = balance_check_service._report_period_cutoff(state)
+                if period:
+                    he["target_period"] = period
             months = int(he.get("history_months") or 84)
             try:
                 charter_int = int(re.sub(r"\D", "", charter_raw))
@@ -7166,7 +7173,11 @@ def step_dq_hist():
         map_status=map_status,
         extract_files=extract_files,
         solr_backfill=he.get("solr_backfill") or {},
-        target_period=he.get("target_period") or "",
+        target_period=(
+            he.get("target_period")
+            or balance_check_service._report_period_cutoff(state)
+            or ""
+        ),
         history_months=he.get("history_months") or 84,
         **_wizard_ctx("dq_hist"),
     )
