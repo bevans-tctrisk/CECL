@@ -199,6 +199,64 @@
 </details>
 
 {# ===================================================================
+   Source D: Backfill from WARM workbook (Charge off History tab)
+   =================================================================== #}
+{% set warm = state.get('warm') or {} %}
+<details {% if warm.get('saved_path') %}open{% endif %}
+         style="margin-top:14px; padding:10px 12px; border:1px solid #cdd;
+                border-radius:6px;">
+  <summary><strong>D. Backfill from WARM workbook</strong></summary>
+  <p class="muted">
+    Reads the per-pool monthly DQ % from the
+    <code>Charge off History</code> tab of the attached WARM workbook
+    (4th section, header <code>DQ %</code>). Each cell becomes one row in
+    <code>loan_code_delinquency_history</code> with
+    <code>source = "WARM:&lt;filename&gt;"</code>. Re-running replaces
+    only the prior WARM rows &mdash; rows from extracts, 5300, or manual
+    entry are left alone.
+  </p>
+
+  {% if warm.get('saved_path') %}
+    <p>
+      WARM file:
+      <code>{{ warm.get('filename') or warm.get('saved_path') }}</code>
+    </p>
+    <form method="post" style="margin:8px 0;">
+      <input type="hidden" name="action" value="load_warm_dq_history">
+      <button class="btn btn-primary" type="submit">
+        Load DQ % from WARM
+      </button>
+    </form>
+  {% else %}
+    <div class="flash info" style="margin:8px 0;">
+      No WARM workbook is attached to this CU. Re-upload from the Start
+      screen if you have one, or use sources A&ndash;C above.
+    </div>
+  {% endif %}
+
+  {% set wr = dh.get('last_warm_run') %}
+  {% if wr %}
+  <div style="margin-top:10px; padding:8px 10px; border:1px dashed #bbb;
+              border-radius:4px; background:#fff;">
+    <strong>Last run:</strong>
+    {% if wr.get('ok') %}
+      wrote {{ wr.get('rows_written', 0) }} row(s) from
+      <code>{{ wr.get('sheet') }}</code> &mdash;
+      {{ wr.get('date_columns', 0) }} month(s)
+      &times; {{ wr.get('pool_count', 0) }} pool(s)
+      ({{ wr.get('first_period') }} &rarr; {{ wr.get('last_period') }}).
+      {% if wr.get('source_tag') %}
+        Source tag: <code>{{ wr.source_tag }}</code>.
+      {% endif %}
+    {% else %}
+      <span style="color:#a33;">failed{% if wr.get('error') %} &mdash;
+        {{ wr.get('error') }}{% endif %}</span>
+    {% endif %}
+  </div>
+  {% endif %}
+</details>
+
+{# ===================================================================
    Source C: Manual entry
    =================================================================== #}
 <details style="margin-top:14px; padding:10px 12px; border:1px solid #cdd;

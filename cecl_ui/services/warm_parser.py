@@ -1100,3 +1100,158 @@ def scan_historical_folder(folder: str | Path) -> dict[str, Any]:
             pass
 
     return result
+
+
+# ---------------------------------------------------------------------
+# DQ % history loader (Charge off History tab -> 4th section "DQ %")
+# ---------------------------------------------------------------------
+
+SHEET_CHARGE_OFF_HISTORY = "Charge off History"
+
+_DQ_HIST_SECTION_NAMES = ("dq %", "dq%")
+_DQ_HIST_NEXT_SECTIONS = (
+    "charge offs", "recoveries", "net charge offs", "dq %", "dq%",
+)
+_DQ_HIST_SKIP_PREFIXES = ("hide", "exclude", "total")
+
+
+def parse_dq_history_from_warm(path: str) -> dict[str, Any]:
+    """Extract per-pool monthly DQ % from a WARM workbook.
+
+    Looks for the "Charge off History" sheet, finds the row whose column A
+    is "DQ %" (case-insensitive), reads month-end datetime headers from the
+    same row across columns C..end, then iterates pool rows below until a
+    blank / "Total ..." / next-section row.
+
+    Returns::
+
+        {
+          "ok":   bool,
+          "error": str | None,
+          "rows": [ {"as_of_date": "YYYY-MM-DD",
+                      "loan_code": "<WARM pool label>",
+                      "dq_pct":    float}, ... ],
+          "sheet":          str,
+          "section_row":    int,
+          "date_columns":   int,
+          "pool_count":     int,
+          "first_period":   str | None,
+          "last_period":    str | None,
+        }
+
+    DQ values are stored as fractions in the WARM template
+    (``0.024 == 2.4%``).  Anything > 1.5 is divided by 100 to mirror the
+    Source-C manual-entry convention.
+    """
+    out: dict[str, Any] = {
+        "ok": False, "error": None, "rows": [],
+        "sheet": "", "section_row": 0, "date_columns": 0,
+        "pool_count": 0, "first_period": None, "last_period": None,
+    }
+    try:
+        import openpyxl  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"openpyxl import failed: {exc}"
+        return out
+
+    p = Path(path)
+    if not p.exists():
+        out["error"] = f"WARM file not found: {p}"
+        return out
+
+    try:
+        wb = openpyxl.load_workbook(p, data_only=True, read_only=False)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"Could not open workbook: {exc}"
+        return out
+
+    target_sheet = None
+    for name in wb.sheetnames:
+        if "charge off history" in name.strip().lower():
+            target_sheet = name
+            break
+    if target_sheet is None:
+        out["error"] = (
+            f"Sheet '{SHEET_CHARGE_OFF_HISTORY}' not found in workbook."
+        )
+        return out
+    ws = wb[target_sheet]
+    out["sheet"] = target_sheet
+
+    # Find the "DQ %" section header row (col A).
+    section_row = 0
+    max_row = ws.max_row or 0
+    max_col = ws.max_column or 0
+    for r in range(1, max_row + 1):
+        v = ws.cell(row=r, column=1).value
+        if v is None:
+            continue
+        norm = str(v).strip().lower()
+        if norm in _DQ_HIST_SECTION_NAMES:
+            section_row = r
+            break
+    if not section_row:
+        out["error"] = "Could not find 'DQ %' section in Charge off History."
+        return out
+    out["section_row"] = section_row
+
+    # Build the (col_index, iso_date) list from the same row.
+    date_cols: list[tuple[int, str]] = []
+    for c in range(2, max_col + 1):
+        cell_val = ws.cell(row=section_row, column=c).value
+        if cell_val is None:
+            continue
+        # openpyxl returns datetime objects for native date cells.
+        try:
+            iso = cell_val.strftime("%Y-%m-%d")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            continue
+        date_cols.append((c, iso))
+    out["date_columns"] = len(date_cols)
+    if not date_cols:
+        out["error"] = "DQ % header row had no date columns."
+        return out
+    out["first_period"] = date_cols[0][1]
+    out["last_period"] = date_cols[-1][1]
+
+    # Walk pool rows.
+    rows_out: list[dict[str, Any]] = []
+    pools_seen: set[str] = set()
+    for r in range(section_row + 1, max_row + 1):
+        label = ws.cell(row=r, column=1).value
+        if label is None:
+            break
+        s = str(label).strip()
+        if not s:
+            break
+        s_lc = s.lower()
+        # Stop at the next section header.
+        if r != section_row and s_lc in _DQ_HIST_NEXT_SECTIONS:
+            break
+        # Skip hide/exclude/total rows but keep walking.
+        if any(s_lc.startswith(p) for p in _DQ_HIST_SKIP_PREFIXES):
+            continue
+        pools_seen.add(s)
+        for col_idx, iso in date_cols:
+            v = ws.cell(row=r, column=col_idx).value
+            if v is None:
+                continue
+            try:
+                pct = float(v)
+            except (TypeError, ValueError):
+                continue
+            # Mirror Source-C convention: anything > 1.5 was typed as a
+            # percent and needs to become a fraction.
+            if pct > 1.5:
+                pct = pct / 100.0
+            rows_out.append({
+                "as_of_date": iso,
+                "loan_code": s,
+                "dq_pct": pct,
+            })
+
+    out["pool_count"] = len(pools_seen)
+    out["rows"] = rows_out
+    out["ok"] = True
+    return out
+

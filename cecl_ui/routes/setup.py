@@ -7020,6 +7020,88 @@ def step_dq_hist():
                     )
             return redirect(url_for("setup.step_dq_hist"))
 
+        # ---- Source D: WARM workbook DQ % history -------------------
+        if action == "load_warm_dq_history":
+            warm_meta = state.get("warm") or {}
+            saved_path = warm_meta.get("saved_path") or ""
+            if not cu:
+                flash(
+                    "Set the credit union on the Identity step first.",
+                    "error",
+                )
+                return redirect(url_for("setup.step_dq_hist"))
+            if not saved_path:
+                flash(
+                    "No WARM workbook is attached to this CU. Re-upload "
+                    "it on the Start screen, then try again.",
+                    "error",
+                )
+                return redirect(url_for("setup.step_dq_hist"))
+            res = warm_parser.parse_dq_history_from_warm(saved_path)
+            dh["last_warm_run"] = res
+            if not res.get("ok"):
+                flash(
+                    f"Could not load DQ history from WARM: "
+                    f"{res.get('error')}",
+                    "error",
+                )
+                _save_state(state)
+                return redirect(url_for("setup.step_dq_hist"))
+            try:
+                delinquency_hist_processor.ensure_table()
+            except Exception as exc:  # noqa: BLE001
+                flash(f"DB error: {exc}", "error")
+                return redirect(url_for("setup.step_dq_hist"))
+            # Replace WARM rows only — leave 5300 / extract / manual alone.
+            try:
+                delinquency_hist_processor.delete_rows_by_source_prefix(
+                    cu, "WARM:",
+                )
+            except Exception as exc:  # noqa: BLE001
+                flash(
+                    f"Could not clear prior WARM DQ rows: {exc}", "error",
+                )
+                return redirect(url_for("setup.step_dq_hist"))
+            warm_fn = warm_meta.get("filename") or Path(saved_path).name
+            source_tag = f"WARM:{warm_fn}"
+            written = 0
+            try:
+                eng = delinquency_hist_processor._engine_lazy()
+                with eng.begin() as conn:
+                    for row in res.get("rows") or []:
+                        pct = row.get("dq_pct")
+                        if pct is None:
+                            continue
+                        conn.execute(
+                            delinquency_hist_processor._UPSERT,
+                            {
+                                "cu": cu,
+                                "as_of_date": row["as_of_date"],
+                                "loan_code": row["loan_code"],
+                                "dq_amount": 0.0,
+                                "total_balance": None,
+                                "dq_pct": float(pct),
+                                "source": source_tag,
+                            },
+                        )
+                        written += 1
+            except Exception as exc:  # noqa: BLE001
+                flash(f"DB write failed: {exc}", "error")
+                _save_state(state)
+                return redirect(url_for("setup.step_dq_hist"))
+            res["rows_written"] = written
+            res["source_tag"] = source_tag
+            dh["last_warm_run"] = res
+            _save_state(state)
+            flash(
+                f"Loaded {written} DQ row(s) from WARM "
+                f"&ldquo;{res.get('sheet')}&rdquo; tab "
+                f"({res.get('date_columns')} month(s) &times; "
+                f"{res.get('pool_count')} pool(s)).",
+                "success",
+            )
+            return redirect(url_for("setup.step_dq_hist"))
+
         # ---- Source C: manual entry ---------------------------------
         if action == "save_manual_dq":
             dates = request.form.getlist("manual_date")
