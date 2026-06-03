@@ -233,7 +233,7 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         "no_score_label": state.get("no_score_label", "Not Reported"),
         "reports": state["reports"],
         "economic_data": state["economic_data"],
-        "mgmt_adj": state["mgmt_adj"],
+        "mgmt_adj": state.get("mgmt_adj") or {"ltv_baseline": 0.9, "probability_factor": 0.35},
     })
     # Per-pool management-adjustment overlay — only emitted when non-empty so
     # the YAML stays clean for CUs that don't use it.
