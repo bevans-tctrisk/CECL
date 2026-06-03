@@ -55,7 +55,7 @@ def create_app() -> Flask:
         "CECL_UI_SECRET", "dev-secret-change-me"
     )
     app.config["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
-    app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB upload cap
+    app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1 GB upload cap
 
     # ------------------------------------------------------------------
     # Server-side sessions.  The wizard accumulates pool-code lists,
