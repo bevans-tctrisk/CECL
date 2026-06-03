@@ -38,11 +38,14 @@
                        {% if pool_use_default.get(p) %}checked{% endif %}>
               </td>
               <td>
-                <input type="number" step="0.01"
-                       name="pool_pct__{{ p }}"
-                       value="{{ pool_overlay_pct[p] }}"
-                       placeholder="e.g. 0.50"
-                       style="width:120px;">
+                <span style="display:inline-flex; align-items:center; gap:4px;">
+                  <input type="number" step="0.01"
+                         name="pool_pct__{{ p }}"
+                         value="{{ pool_overlay_pct[p] }}"
+                         placeholder="e.g. 1.25"
+                         style="width:100px;">
+                  <span class="muted">%</span>
+                </span>
               </td>
               <td class="muted">
                 {% if pool_overlay_pct[p] %}

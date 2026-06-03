@@ -9860,21 +9860,38 @@ def step8_mgmt_adj():
         # Persist into state.pool_settings so the YAML / report engine
         # can pick it up (alongside risk_rated, acl_months, brr).
         existing_ps = state.get("pool_settings") or []
-        ps_by_name = {(p.get("name") or "").strip(): p for p in existing_ps}
+        # Case-insensitive lookup so ``Visa`` and ``visa`` don't create
+        # duplicate entries.
+        ps_by_name = {
+            (p.get("name") or "").strip().lower(): p for p in existing_ps
+        }
+        # Pools whose risk-rated setting is configured elsewhere
+        # (Step 2 WARM / Step 4 Pools). When step8 is the first step
+        # touching pool_settings (e.g. user skipped earlier configuration
+        # for the default_pool), default risk_rated to True so the
+        # report renders per-grade detail — matches report_tct.py's
+        # ``risk_rated_map.get(pool, True)`` fallback. The user can flip
+        # it on Step 4 if a pool is genuinely non-risk-rated.
+        default_pool_lc = (state.get("default_pool") or "").strip().lower()
         for pname in pool_names:
             checked = request.form.get(f"pool_use_default__{pname}") == "on"
-            entry = ps_by_name.get(pname)
+            entry = ps_by_name.get(pname.lower())
             if entry is None:
+                # default_pool ("Other/Uncategorized" or similar) is
+                # almost always an Ignore bucket → leave NRR. Real pools
+                # default to risk_rated=True to match report-engine
+                # default and avoid silently collapsing per-grade detail.
+                is_default_bucket = pname.strip().lower() == default_pool_lc
                 entry = {
                     "name": pname,
-                    "risk_rated": False,
+                    "risk_rated": not is_default_bucket,
                     "brr": False,
                     "acl_months": 0,
                     "use_default_mgmt_adj": checked,
                     "excluded": False,
                 }
                 existing_ps.append(entry)
-                ps_by_name[pname] = entry
+                ps_by_name[pname.lower()] = entry
             else:
                 entry["use_default_mgmt_adj"] = checked
         state["pool_settings"] = existing_ps
