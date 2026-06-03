@@ -2851,21 +2851,28 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
 
         is_rr = risk_rated_flags.get(pool, has_db_data) if risk_rated_flags else (pool not in nrr)
 
-        # Compute env factor
-        if has_db_data:
-            if is_rr:
-                _, _, ncc_pct = _ncc(pdf, grades, config)
-            else:
-                ncc_pct = 0.0
-            dq_v = dq_var.get(pool, 0)
-            ncc_score = _env_score(ncc_pct * 100, _ncc_r)
-            dq_score = _env_score(dq_v * 100, _dq_r)
-            es_score = _env_score(econ_stress, _es_r)
-            env_factor_calc = (ncc_score + dq_score + es_score) / 100.0
+        # Env factor must match the value rendered on the "Env Factor by
+        # Pool" tab. That sheet computes per-pool env_f and stashes it in
+        # env_results — use it as the single source of truth so the two
+        # tabs never disagree. Fall back to a local recompute (and then
+        # to prior_env_factor) only if the Env Factor sheet skipped this
+        # pool for some reason.
+        if pool in env_results:
+            env_factor = env_results[pool]
         else:
-            env_factor_calc = 0
-        # Use prior report's env factor if available; otherwise computed
-        env_factor = prior_env_factor.get(pool, env_factor_calc)
+            if has_db_data:
+                if is_rr:
+                    _, _, ncc_pct = _ncc(pdf, grades, config)
+                else:
+                    ncc_pct = 0.0
+                dq_v = dq_var.get(pool, 0)
+                ncc_score = _env_score(ncc_pct * 100, _ncc_r)
+                dq_score = _env_score(dq_v * 100, _dq_r)
+                es_score = _env_score(econ_stress, _es_r)
+                env_factor_calc = (ncc_score + dq_score + es_score) / 100.0
+            else:
+                env_factor_calc = 0
+            env_factor = prior_env_factor.get(pool, env_factor_calc)
 
         pool_ll = life_loss.get(pool, 0)
 

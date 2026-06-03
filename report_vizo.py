@@ -2180,7 +2180,13 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
         else:
             is_rr = risk_rated_flags.get(pool, has_db_data)
 
-        # Compute env factor (fallback if WARM total not available)
+        # Compute env factor — must match the value rendered on the
+        # "Env Factor by Pool" tab. Both sheets feed identical inputs
+        # (pool ncc_pct, dq_v, econ_stress) through the same scoring
+        # ranges, so as long as we don't override with a prior report's
+        # value, the two tabs agree. The legacy prior_env_factor
+        # override was the source of cross-tab mismatches when a CU had
+        # been run before with a different env-range table.
         if has_db_data:
             if is_rr:
                 _, _, ncc_pct = _ncc(pdf, grades, config)
@@ -2190,11 +2196,9 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             ncc_score = _score(ncc_pct * 100, _ncc_r)
             dq_score = _score(dq_v * 100, _dq_r)
             es_score = _score(econ_stress, _es_r)
-            env_factor_calc = (ncc_score + dq_score + es_score) / 100.0
+            env_factor = (ncc_score + dq_score + es_score) / 100.0
         else:
-            env_factor_calc = 0
-        # Use prior report's env factor if available; otherwise computed
-        env_factor = prior_env_factor.get(pool, env_factor_calc)
+            env_factor = 0
 
         pool_ll = life_loss.get(pool, 0)
 
