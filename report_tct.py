@@ -212,7 +212,8 @@ def _pool_life_loss(pools, hist):
     for pool in pools:
         rates = []
         for y in years:
-            net = co.get(y, {}).get(pool, 0) - rc.get(y, {}).get(pool, 0)
+            net = abs(co.get(y, {}).get(pool, 0) or 0) \
+                  - abs(rc.get(y, {}).get(pool, 0) or 0)
             avg = ab.get(y, {}).get(pool, 0)
             if avg > 0:
                 rates.append(net / avg)
@@ -2745,7 +2746,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             for y in years:
                 if y < pe:
                     continue
-                total_net += co_data.get(y, {}).get(pool, 0) - rc_data.get(y, {}).get(pool, 0)
+                total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
+                             - abs(rc_data.get(y, {}).get(pool, 0) or 0)
         life_loss[pool] = total_net / avg_tot if avg_tot > 0 else 0
 
     # DQ variance per pool
@@ -3624,7 +3626,8 @@ def _sheet_display_hist_bal(wb, cu, snap, df, grades, config, hist):
             for y in years:
                 if y < pe:
                     continue
-                total_net += co_data.get(y, {}).get(pool, 0) - rc_data.get(y, {}).get(pool, 0)
+                total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
+                             - abs(rc_data.get(y, {}).get(pool, 0) or 0)
         pool_life_rates[pool] = total_net / avg_tot if avg_tot > 0 else 0
 
     # ── Title block ──
@@ -3971,6 +3974,9 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
             else:
                 val = _windowed_year_val(hist.get('co_monthly', {}),
                                          co_data, pool, y, earliest, earliest_mo)
+            # Always display charge-offs as positive losses regardless
+            # of how the source CU signs them.
+            val = abs(val or 0)
             ws.cell(row=r, column=2 + yi, value=val).number_format = ACCT_FMT
             ws.cell(row=r, column=2 + yi).font = FNT_A10B
             acl_total += val
@@ -4007,6 +4013,8 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
             else:
                 val = _windowed_year_val(hist.get('rc_monthly', {}),
                                          rc_data, pool, y, earliest, earliest_mo)
+            # Always display recoveries as positive regardless of sign.
+            val = abs(val or 0)
             ws.cell(row=r, column=2 + yi, value=val).number_format = ACCT_FMT
             ws.cell(row=r, column=2 + yi).font = FNT_A10B
             acl_total += val
@@ -4041,13 +4049,14 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
                                             pool, y, earliest, earliest_mo)
                 rc_val = _windowed_year_val(warm_rc_monthly, warm_rc,
                                             pool, y, earliest, earliest_mo)
-                net = co_val - rc_val
+                # Net = |CO| - |Recov| regardless of source sign.
+                net = abs(co_val or 0) - abs(rc_val or 0)
             else:
                 co_val = _windowed_year_val(hist.get('co_monthly', {}),
                                             co_data, pool, y, earliest, earliest_mo)
                 rc_val = _windowed_year_val(hist.get('rc_monthly', {}),
                                             rc_data, pool, y, earliest, earliest_mo)
-                net = co_val - rc_val
+                net = abs(co_val or 0) - abs(rc_val or 0)
             ws.cell(row=r, column=2 + yi, value=net).number_format = ACCT_FMT
             ws.cell(row=r, column=2 + yi).font = FNT_A10B
             acl_total += net
@@ -4587,7 +4596,8 @@ def _sheet_detail_co_hist(wb, cu, snap, config, hist):
         rc_pools = rc_monthly.get(ym, {})
         all_pool_keys = set(list(co_pools.keys()) + list(rc_pools.keys()))
         for p in all_pool_keys:
-            net_monthly[ym][p] = co_pools.get(p, 0) - rc_pools.get(p, 0)
+            net_monthly[ym][p] = abs(co_pools.get(p, 0) or 0) \
+                                 - abs(rc_pools.get(p, 0) or 0)
 
     r, _, _ = _write_section(
         ws, r, "Net Loss", net_monthly, pools,
