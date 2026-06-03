@@ -484,7 +484,11 @@ def _coerce_number(v: Any) -> float | None:
     if not s:
         return None
     neg = False
-    if s.startswith("(") and s.endswith(")"):
+    # Accountants commonly wrap negatives in parentheses; some workbooks
+    # use angle brackets (e.g. "<561,006.75>") instead. Treat both as
+    # negative-marker wrappers.
+    if (s.startswith("(") and s.endswith(")")) or \
+            (s.startswith("<") and s.endswith(">")):
         neg = True
         s = s[1:-1]
     s = s.replace("$", "").replace(",", "").replace(" ", "")
@@ -910,6 +914,8 @@ def analyse_per_month_file(
     path: str | Path,
     stop_row: int | None = None,
     as_of_cell: str | None = None,
+    acl_row: int | None = None,
+    acl_col: str | None = None,
 ) -> dict[str, Any]:
     """Detect layout + pool labels in a single-month balance-sheet file.
 
@@ -1091,11 +1097,37 @@ def analyse_per_month_file(
     # Detect ACL/ALLL line. The row may sit far below the LOANS section
     # (typically under 'Other Liabilities' or as a contra-asset). Scan
     # the whole grid; prefer hits in the same label column we picked.
-    acl_row_idx, acl_label, _acl_col = _find_acl_row_in_grid(
-        rows, preferred_col=detail_col)
+    # When the caller passed an explicit ``acl_row`` (1-based), honour
+    # it instead of auto-detecting -- the user has already chosen.
+    if isinstance(acl_row, int) and acl_row > 0 and acl_row - 1 < len(rows):
+        ridx = acl_row - 1
+        row = rows[ridx]
+        # Try the same label column as the loans section, then any
+        # string cell on the row.
+        lbl_val: Any = ""
+        if detail_col < len(row):
+            lbl_val = row[detail_col]
+        if not isinstance(lbl_val, str) or not lbl_val.strip():
+            for v in row:
+                if isinstance(v, str) and v.strip():
+                    lbl_val = v
+                    break
+        acl_row_idx = ridx
+        acl_label = (str(lbl_val).strip() if isinstance(lbl_val, str) else "")
+    else:
+        acl_row_idx, acl_label, _acl_col = _find_acl_row_in_grid(
+            rows, preferred_col=detail_col)
+    # Pick the column to read the ACL value from. User override wins;
+    # otherwise fall back to the auto-detected balance column for the
+    # loans section.
+    acl_col_idx = balance_col
+    if isinstance(acl_col, str) and acl_col.strip():
+        ovr = _col_letter_to_idx(acl_col) - 1
+        if ovr >= 0:
+            acl_col_idx = ovr
     acl_value: float | None = None
-    if acl_row_idx is not None and balance_col < len(rows[acl_row_idx]):
-        acl_value = _coerce_number(rows[acl_row_idx][balance_col])
+    if acl_row_idx is not None and acl_col_idx < len(rows[acl_row_idx]):
+        acl_value = _coerce_number(rows[acl_row_idx][acl_col_idx])
         if acl_value is not None:
             acl_value = abs(acl_value)
 
@@ -1112,6 +1144,9 @@ def analyse_per_month_file(
         "acl_row": (acl_row_idx + 1) if acl_row_idx is not None else None,
         "acl_label": acl_label,
         "acl_value": acl_value,
+        "acl_col": get_column_letter(acl_col_idx + 1)
+            if acl_col_idx is not None and acl_col_idx >= 0 else "",
+        "auto_acl_col": get_column_letter(balance_col + 1),
         "auto_stop_row": (auto_end_idx + 1) if auto_end_idx < len(rows) else None,
         "stop_row": (effective_end_idx + 1)
             if effective_end_idx < len(rows) else None,

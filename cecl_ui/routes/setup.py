@@ -50,16 +50,16 @@ STATE_KEY = "setup_state"
 WIZARD_STEPS_WARM = [
     ("identity",    "1. CU Identity"),
     ("warm",        "2. Loan Pools"),
-    ("balances",    "3. Balance Titles"),
-    ("baseline",    "4. Historical Balances"),
-    ("dq_hist",      "5. Historical DQ"),
-    ("monthly_bal", "6. Monthly Balance File"),
-    ("grades",      "7. Credit Grades and Business Risk Ratings"),
-    ("credit_pull",  "8. Credit Pull"),
-    ("orig_score",  "9. Original Score Baseline"),
-    ("sample",      "10. Loan Data Extract(s)"),
-    ("columns",     "11. Column Mappings"),
-    ("pools",        "12. Loan Code Mapping"),
+    ("pools",       "3. Loan Code Mapping"),
+    ("balances",    "4. Balance Titles"),
+    ("baseline",    "5. Historical Balances"),
+    ("dq_hist",      "6. Historical DQ"),
+    ("monthly_bal", "7. Monthly Balance File"),
+    ("grades",      "8. Credit Grades and Business Risk Ratings"),
+    ("credit_pull",  "9. Credit Pull"),
+    ("orig_score",  "10. Original Score Baseline"),
+    ("sample",      "11. Loan Data Extract(s)"),
+    ("columns",     "12. Column Mappings"),
     ("balance_check","13. Balance Adjustment"),
     ("co_recov",     "14. Charge-Offs & Recoveries"),
     ("impaired",     "15. Impaired Loans"),
@@ -74,17 +74,17 @@ WIZARD_STEPS_WARM = [
 WIZARD_STEPS_NO_WARM = [
     ("identity",    "1. CU Identity"),
     ("loan_pools",  "2. Loan Pools"),
-    ("historical",  "3. Historical Balances"),
-    ("co_history",   "4. Historical Charge-Offs"),
-    ("recov_history","5. Historical Recoveries"),
-    ("dq_hist",      "6. Historical DQ"),
-    ("monthly_bal", "7. Monthly Balance File"),
-    ("grades",       "8. Credit Grades and Business Risk Ratings"),
-    ("credit_pull",  "9. Credit Pull"),
-    ("orig_score",  "10. Original Score Baseline"),
-    ("sample",      "11. Loan Data Extract(s)"),
-    ("columns",     "12. Column Mappings"),
-    ("pools",        "13. Loan Code Mapping"),
+    ("pools",       "3. Loan Code Mapping"),
+    ("historical",  "4. Historical Balances"),
+    ("co_history",   "5. Historical Charge-Offs"),
+    ("recov_history","6. Historical Recoveries"),
+    ("dq_hist",      "7. Historical DQ"),
+    ("monthly_bal", "8. Monthly Balance File"),
+    ("grades",       "9. Credit Grades and Business Risk Ratings"),
+    ("credit_pull",  "10. Credit Pull"),
+    ("orig_score",  "11. Original Score Baseline"),
+    ("sample",      "12. Loan Data Extract(s)"),
+    ("columns",     "13. Column Mappings"),
     ("balance_check","14. Balance Adjustment"),
     ("co_recov",     "15. Charge-Offs & Recoveries"),
     ("impaired",     "16. Impaired Loans"),
@@ -942,11 +942,10 @@ def step2_warm():
             return redirect(url_for("setup.step3_baseline"))
 
         elif action in ("next", "skip"):
-            # WARM users go to Step 3 (Balance Titles); no-WARM users skip
-            # ahead to the historical-data step.
-            if state.get("has_warm_files") == "yes":
-                return redirect(url_for("setup.step3_balances"))
-            return redirect(url_for("setup.step3_historical"))
+            # Both WARM and no-WARM paths now go to the dedicated
+            # Loan Code Mapping step (Step 3) before any further
+            # data-collection steps.
+            return redirect(url_for("setup.step4_pools"))
 
         elif action == "save_pool_settings":
             names = request.form.getlist("ps_name")
@@ -990,10 +989,8 @@ def step2_warm():
 
             _save_state(state)
             flash(f"Saved settings for {len(updated)} pool(s).", "success")
-            # Move on to the next logical step.
-            if state.get("has_warm_files") == "yes":
-                return redirect(url_for("setup.step3_balances"))
-            return redirect(url_for("setup.step3_historical"))
+            # Move on to the dedicated Loan Code Mapping step.
+            return redirect(url_for("setup.step4_pools"))
 
     return render_template("setup/step2_warm.html", **_wizard_ctx("warm"))
 
@@ -1052,10 +1049,10 @@ def step_loan_pools():
 
             _save_state(state)
             flash(f"Saved settings for {len(updated)} pool(s).", "success")
-            return redirect(url_for("setup.step3_historical"))
+            return redirect(url_for("setup.step4_pools"))
 
         if action in ("next", "skip"):
-            return redirect(url_for("setup.step3_historical"))
+            return redirect(url_for("setup.step4_pools"))
 
     return render_template("setup/step_loan_pools.html", **_wizard_ctx("loan_pools"))
 
@@ -1355,7 +1352,9 @@ def _ingest_per_month_workbook(
     """
     try:
         analysis = monthly_bal_parser.analyse_per_month_file(
-            target, stop_row=stop_row, as_of_cell=as_of_cell)
+            target, stop_row=stop_row, as_of_cell=as_of_cell,
+            acl_row=((mb.get("acl") or {}).get("row") or None),
+            acl_col=((mb.get("acl") or {}).get("col") or None))
     except Exception as exc:  # noqa: BLE001
         return ("error", f"Could not analyse {target.name}: {exc}")
 
@@ -1623,6 +1622,17 @@ def _save_acl_form(mb: dict, form) -> None:
             acl_state["row"] = int(row_raw)
         except (TypeError, ValueError):
             pass
+    # Column override for the monthly-file source. When the auto-
+    # detected pool-balance column doesn't hold the ACL number
+    # (e.g. ACL value sits in a different column than loan balances)
+    # the user can pin a specific Excel column letter here.
+    col_raw = form.get("acl_col")
+    if col_raw is not None:
+        col_clean = str(col_raw).strip().upper()
+        if col_clean and col_clean.isalpha():
+            acl_state["col"] = col_clean
+        elif col_clean == "":
+            acl_state.pop("col", None)
     # Separate-file metadata.
     sep = acl_state.setdefault("separate_file", {})
     sep["sheet"] = (form.get("acl_sep_sheet") or "").strip()
@@ -2165,12 +2175,19 @@ def step5_monthly_bal():
                     continue
                 scanned += 1
                 try:
-                    res = monthly_bal_parser.analyse_per_month_file(sp)
+                    res = monthly_bal_parser.analyse_per_month_file(
+                        sp,
+                        acl_row=acl_state.get("row") or None,
+                        acl_col=acl_state.get("col") or None,
+                    )
                 except Exception:  # noqa: BLE001
                     continue
                 if res.get("acl_value") is not None:
                     if not acl_state.get("row") and res.get("acl_row"):
                         acl_state["row"] = int(res["acl_row"])
+                        acl_state["label"] = res.get("acl_label", "")
+                    elif acl_state.get("row") and res.get("acl_label"):
+                        # Refresh the displayed label from the row we read.
                         acl_state["label"] = res.get("acl_label", "")
                     hist[period] = float(res["acl_value"])
                     populated += 1
@@ -2201,10 +2218,70 @@ def step5_monthly_bal():
                 target_row = int(request.form.get("acl_row") or 0)
             except ValueError:
                 target_row = 0
+            mb_source = (mb.get("source") or "").strip()
             saved_path = mb.get("saved_path")
-            if not saved_path or not target_row:
-                flash("Upload a monthly balance file and pick a row number "
-                      "before refreshing.", "error")
+            if not target_row:
+                flash("Pick a row number before refreshing.", "error")
+            elif mb_source == "per_month":
+                # Walk every uploaded per-month file, reading the user's
+                # chosen row at the layout's balance column. This lets
+                # the user override auto-detect when it picks the wrong
+                # ACL line.
+                acl_state = mb.setdefault("acl", {})
+                acl_state["row"] = target_row
+                hist: dict[str, float] = {}
+                scanned = 0
+                populated = 0
+                last_label = ""
+                for mf in (mb.get("monthly_files") or []):
+                    sp = mf.get("saved_path")
+                    period = mf.get("period")
+                    if not sp or not Path(sp).is_file() or not period:
+                        continue
+                    scanned += 1
+                    try:
+                        res = monthly_bal_parser.analyse_per_month_file(
+                            sp, acl_row=target_row,
+                            acl_col=acl_state.get("col") or None,
+                        )
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if res.get("acl_value") is not None:
+                        hist[period] = float(res["acl_value"])
+                        populated += 1
+                        if res.get("acl_label"):
+                            last_label = res["acl_label"]
+                acl_state["history"] = hist
+                if last_label:
+                    acl_state["label"] = last_label
+                state["monthly_bal"] = mb
+                _save_state(state)
+                if scanned == 0:
+                    flash(
+                        "No uploaded per-month files to refresh.",
+                        "warning",
+                    )
+                elif populated == 0:
+                    flash(
+                        f"Read row {target_row} from {scanned} file(s) "
+                        "but found no numeric balances. Double-check "
+                        "the row number.",
+                        "warning",
+                    )
+                else:
+                    flash(
+                        f"Refreshed ACL row {target_row}"
+                        + (f" ({last_label})" if last_label else "")
+                        + f": {populated} of {scanned} month(s) parsed.",
+                        "success",
+                    )
+                return redirect(url_for("setup.step5_monthly_bal"))
+            elif not saved_path:
+                flash(
+                    "Upload a monthly balance file and pick a row number "
+                    "before refreshing.",
+                    "error",
+                )
             else:
                 res = monthly_bal_parser.extract_row_history(
                     saved_path, mb.get("sheet", ""), mb.get("header_row", 0),
@@ -2393,7 +2470,10 @@ def step5_monthly_bal():
                     continue
                 scanned += 1
                 analysis = monthly_bal_parser.analyse_per_month_file(
-                    entry_path)
+                    entry_path,
+                    acl_row=((mb.get("acl") or {}).get("row") or None),
+                    acl_col=((mb.get("acl") or {}).get("col") or None),
+                )
                 period = analysis.get("detected_period") or ""
                 if not period:
                     skipped_no_period.append(entry_path.name)
@@ -3825,6 +3905,225 @@ def _remove_hist_extract_anchor(state: dict[str, Any], name: str) -> bool:
     return removed
 
 
+def _aggregate_history_by_pool(
+    view: dict[str, Any] | None,
+    pool_map: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    """Roll a per-loan-code history matrix up to per-pool.
+
+    ``view`` is the dict returned by ``chargeoff_hist_processor.history_matrix``
+    (or its recovery / delinquency twins). ``pool_map`` is
+    ``state['pool_map']``: a case-insensitive lookup from raw loan_code
+    (numeric like ``'31'`` or NCUA canonical like ``'Used Vehicles'``)
+    to a configured pool name. Codes whose mapped pool is empty,
+    "Ignore", or missing are dropped from the rolled-up view (those
+    codes still surface in the inline "unmapped codes" picker).
+
+    Returns a new dict with the same shape but with column key = pool
+    name. ``cells[m][pool]`` carries an aggregated ``amount`` across
+    every contributing raw code. Returns ``view`` unchanged when no
+    pool_map is supplied (so the table still renders something useful
+    when the user hasn't done any mapping yet).
+    """
+    if not view:
+        return view
+    if not isinstance(view, dict):
+        return view
+    if "codes" not in view or "cells" not in view:
+        return view
+    pm_ci: dict[str, str] = {}
+    for k, v in (pool_map or {}).items():
+        if not isinstance(k, str):
+            continue
+        ks = k.strip().lower()
+        if not ks:
+            continue
+        pm_ci[ks] = (v or "").strip() if isinstance(v, str) else ""
+    if not pm_ci:
+        return view
+
+    def _pool_for(code: str) -> str:
+        if not isinstance(code, str):
+            return ""
+        return pm_ci.get(code.strip().lower(), "")
+
+    months = list(view.get("months") or [])
+    raw_cells = view.get("cells") or {}
+    raw_totals_code = view.get("totals_by_code") or {}
+
+    new_cells: dict[str, dict[str, dict[str, float]]] = {}
+    new_totals_month: dict[str, dict[str, Any]] = {}
+    new_totals_code: dict[str, dict[str, Any]] = {}
+    pool_first_month: dict[str, str] = {}
+    pool_last_month: dict[str, str] = {}
+    pools_seen: set[str] = set()
+    row_count = 0
+
+    # Months are stored newest-first; iterate oldest->newest for
+    # NEW/DROP first/last detection.
+    for m in reversed(months):
+        per_month = raw_cells.get(m) or {}
+        agg: dict[str, float] = {}
+        for code, cell in per_month.items():
+            pool = _pool_for(code)
+            if not pool or pool.lower() == "ignore":
+                continue
+            amt = float((cell or {}).get("amount") or 0.0)
+            agg[pool] = agg.get(pool, 0.0) + amt
+        if not agg:
+            continue
+        new_cells[m] = {p: {"amount": a} for p, a in agg.items()}
+        tm_amount = sum(agg.values())
+        new_totals_month[m] = {"amount": tm_amount, "codes": len(agg)}
+        for p, a in agg.items():
+            pools_seen.add(p)
+            tc = new_totals_code.setdefault(p, {"amount": 0.0, "months": 0})
+            tc["amount"] += a
+            tc["months"] += 1
+            if p not in pool_first_month:
+                pool_first_month[p] = m
+            pool_last_month[p] = m
+            row_count += 1
+
+    pools_sorted = sorted(pools_seen)
+    months_sorted = sorted(new_cells.keys(), reverse=True)
+    new_in_month: dict[str, list[str]] = {m: [] for m in months_sorted}
+    dropped_after_month: dict[str, list[str]] = {m: [] for m in months_sorted}
+    last_month_iso = months_sorted[0] if months_sorted else ""
+    for p in pools_sorted:
+        fm = pool_first_month.get(p)
+        if fm and fm in new_in_month:
+            new_in_month[fm].append(p)
+        lm = pool_last_month.get(p)
+        if lm and lm != last_month_iso and lm in dropped_after_month:
+            dropped_after_month[lm].append(p)
+
+    return {
+        "months": months_sorted,
+        "codes": pools_sorted,
+        "cells": new_cells,
+        "totals_by_month": new_totals_month,
+        "totals_by_code": new_totals_code,
+        "new_in_month": new_in_month,
+        "dropped_after_month": dropped_after_month,
+        "row_count": row_count,
+        "_aggregated_by_pool": True,
+    }
+
+
+def _aggregate_dq_history_by_pool(
+    view: dict[str, Any] | None,
+    pool_map: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    """Pool-rollup variant for the DQ history matrix.
+
+    DQ cells carry ``dq_pct`` / ``dq_amount`` / ``total_balance``; the
+    template formats either ``dq_pct`` directly or ``amount/total``.
+    Aggregation sums ``amount`` and ``total_balance`` per pool, then
+    derives the rolled-up ``dq_pct`` from those sums (balance-weighted).
+    """
+    if not view or not isinstance(view, dict):
+        return view
+    if "codes" not in view or "cells" not in view:
+        return view
+    pm_ci: dict[str, str] = {}
+    for k, v in (pool_map or {}).items():
+        if not isinstance(k, str):
+            continue
+        ks = k.strip().lower()
+        if not ks:
+            continue
+        pm_ci[ks] = (v or "").strip() if isinstance(v, str) else ""
+    if not pm_ci:
+        return view
+
+    def _pool_for(code: str) -> str:
+        if not isinstance(code, str):
+            return ""
+        return pm_ci.get(code.strip().lower(), "")
+
+    months = list(view.get("months") or [])
+    raw_cells = view.get("cells") or {}
+    new_cells: dict[str, dict[str, dict[str, Any]]] = {}
+    pools_seen: set[str] = set()
+    totals_code: dict[str, dict[str, Any]] = {}
+    row_count = 0
+
+    for m in months:
+        per_month = raw_cells.get(m) or {}
+        agg: dict[str, dict[str, Any]] = {}
+        for code, cell in per_month.items():
+            pool = _pool_for(code)
+            if not pool or pool.lower() == "ignore":
+                continue
+            amt = (cell or {}).get("amount")
+            tot = (cell or {}).get("total_balance")
+            pct = (cell or {}).get("dq_pct")
+            slot = agg.setdefault(pool, {
+                "amount": 0.0, "total_balance": 0.0,
+                "_pct_num": 0.0, "_pct_den": 0.0,
+                "_have_amount": False, "_have_total": False,
+            })
+            try:
+                amt_v = float(amt) if amt is not None else 0.0
+            except (TypeError, ValueError):
+                amt_v = 0.0
+            slot["amount"] += amt_v
+            if amt is not None:
+                slot["_have_amount"] = True
+            if tot is not None:
+                try:
+                    tv = float(tot)
+                except (TypeError, ValueError):
+                    tv = 0.0
+                slot["total_balance"] += tv
+                slot["_have_total"] = True
+            elif pct is not None:
+                # No balance available; weight the % by amount so the
+                # rolled-up dq_pct stays sensible across mixed sources.
+                try:
+                    pv = float(pct)
+                except (TypeError, ValueError):
+                    pv = 0.0
+                slot["_pct_num"] += pv * max(amt_v, 1.0)
+                slot["_pct_den"] += max(amt_v, 1.0)
+        if not agg:
+            continue
+        out_cells: dict[str, dict[str, Any]] = {}
+        for pool, slot in agg.items():
+            cell: dict[str, Any] = {"amount": slot["amount"]}
+            tot_val = slot["total_balance"] if slot["_have_total"] else None
+            if tot_val is not None and tot_val > 0:
+                cell["total_balance"] = tot_val
+                cell["dq_pct"] = slot["amount"] / tot_val
+            elif slot["_pct_den"] > 0:
+                cell["dq_pct"] = slot["_pct_num"] / slot["_pct_den"]
+                cell["total_balance"] = None
+            else:
+                cell["total_balance"] = None
+                cell["dq_pct"] = None
+            out_cells[pool] = cell
+            pools_seen.add(pool)
+            tc = totals_code.setdefault(
+                pool, {"amount": 0.0, "months": 0}
+            )
+            tc["amount"] += slot["amount"]
+            tc["months"] += 1
+            row_count += 1
+        new_cells[m] = out_cells
+
+    pools_sorted = sorted(pools_seen)
+    months_sorted = sorted(new_cells.keys(), reverse=True)
+    return {
+        "months": months_sorted,
+        "codes": pools_sorted,
+        "cells": new_cells,
+        "totals_by_code": totals_code,
+        "row_count": row_count,
+        "_aggregated_by_pool": True,
+    }
+
+
 @setup_bp.route("/step/historical", methods=["GET", "POST"])
 @setup_bp.route("/step/co-history", methods=["GET", "POST"],
                 endpoint="step3a_co_history")
@@ -5244,6 +5543,24 @@ def step3_historical():
                     "error",
                 )
 
+        elif action == "process_co_workbook":
+            res = monthly_co_recov_aggregator.aggregate_workbook(state, "co")
+            state["monthly_co_aggregate"] = res
+            if res.get("ok"):
+                msg = (
+                    f"Charge-off workbook aggregation: wrote "
+                    f"{res['total_rows_written']} row(s) across "
+                    f"{len(res['months_written'])} month(s) "
+                    f"(${res['total_amount']:,.2f} total)."
+                )
+                flash(msg, "success")
+            else:
+                flash(
+                    "Charge-off workbook aggregation failed: "
+                    + (res.get("error") or "see file errors below."),
+                    "error",
+                )
+
         elif action == "process_recov_monthly":
             res = monthly_co_recov_aggregator.aggregate_all(state, "recov")
             state["monthly_recov_aggregate"] = res
@@ -5262,13 +5579,145 @@ def step3_historical():
                     "error",
                 )
 
+        elif action == "process_recov_workbook":
+            res = monthly_co_recov_aggregator.aggregate_workbook(state, "recov")
+            state["monthly_recov_aggregate"] = res
+            if res.get("ok"):
+                msg = (
+                    f"Recoveries workbook aggregation: wrote "
+                    f"{res['total_rows_written']} row(s) across "
+                    f"{len(res['months_written'])} month(s) "
+                    f"(${res['total_amount']:,.2f} total)."
+                )
+                flash(msg, "success")
+            else:
+                flash(
+                    "Recoveries workbook aggregation failed: "
+                    + (res.get("error") or "see file errors below."),
+                    "error",
+                )
+
         elif action == "save_co_columns":
-            state["co_columns"] = _read_co_recov_column_form("co")
-            flash("Saved charge-off column mapping.", "success")
+            cols = _read_co_recov_column_form("co")
+            state["co_columns"] = cols
+            sig = (state.get("co_active_signature") or "").strip()
+            if sig:
+                layout_map = dict(state.get("co_layout_columns") or {})
+                layout_map[sig] = cols
+                state["co_layout_columns"] = layout_map
+                flash(
+                    f"Saved charge-off column mapping for layout {sig[:8]}\u2026.",
+                    "success",
+                )
+            else:
+                flash("Saved charge-off column mapping.", "success")
 
         elif action == "save_recov_columns":
-            state["recov_columns"] = _read_co_recov_column_form("recov")
-            flash("Saved recoveries column mapping.", "success")
+            cols = _read_co_recov_column_form("recov")
+            state["recov_columns"] = cols
+            sig = (state.get("recov_active_signature") or "").strip()
+            if sig:
+                layout_map = dict(state.get("recov_layout_columns") or {})
+                layout_map[sig] = cols
+                state["recov_layout_columns"] = layout_map
+                flash(
+                    f"Saved recoveries column mapping for layout {sig[:8]}\u2026.",
+                    "success",
+                )
+            else:
+                flash("Saved recoveries column mapping.", "success")
+
+        elif action in (
+            "map_unmapped_co_codes", "map_unmapped_recov_codes",
+        ):
+            # Inline mapping of unmapped charge-off / recovery loan codes
+            # straight into the global state['pool_map'] (the same store
+            # Step 3 Loan Code Mapping edits). Form posts a list of
+            # ``unmapped_code`` values plus indexed ``unmapped_pool_<i>``
+            # selects; we zip them and merge non-empty selections.
+            form = request.form
+            codes = form.getlist("unmapped_code")
+            pool_map = dict(state.get("pool_map") or {})
+            saved = 0
+            for i, raw in enumerate(codes):
+                raw = (raw or "").strip()
+                if not raw:
+                    continue
+                pool = (form.get(f"unmapped_pool_{i}") or "").strip()
+                if not pool:
+                    continue
+                pool_map[raw] = pool
+                saved += 1
+            state["pool_map"] = pool_map
+            _save_state(state)
+            kind_label = (
+                "charge-off" if action == "map_unmapped_co_codes"
+                else "recoveries"
+            )
+            if saved:
+                flash(
+                    f"Mapped {saved} {kind_label} loan code(s) into the "
+                    "global Step 3 Loan Code Mapping.",
+                    "success",
+                )
+            else:
+                flash(
+                    "No mappings selected. Pick a pool for at least one "
+                    "code before clicking Save.",
+                    "info",
+                )
+
+        elif action in (
+            "save_co_loan_code_map", "save_recov_loan_code_map",
+        ):
+            kind = "co" if action == "save_co_loan_code_map" else "recov"
+            sig_key = (
+                "co_active_signature" if kind == "co"
+                else "recov_active_signature"
+            )
+            map_key = (
+                "co_loan_code_map" if kind == "co"
+                else "recov_loan_code_map"
+            )
+            sig = (state.get(sig_key) or "").strip()
+            if not sig:
+                flash(
+                    "Click 'Column Mapping' on a layout row first so "
+                    "the wizard knows which layout to save the loan-code "
+                    "mapping under.",
+                    "error",
+                )
+            else:
+                form = request.form
+                # Form posts pairs of fields named
+                # ``<kind>_lcm_<i>_raw`` and ``<kind>_lcm_<i>_pool``;
+                # collect them by index.
+                prefix = "co_lcm_" if kind == "co" else "recov_lcm_"
+                indices: set[str] = set()
+                for fname in form.keys():
+                    if fname.startswith(prefix) and (
+                        fname.endswith("_raw") or fname.endswith("_pool")
+                    ):
+                        idx = fname[len(prefix):].rsplit("_", 1)[0]
+                        indices.add(idx)
+                pairs: dict[str, str] = {}
+                for idx in indices:
+                    raw = (form.get(f"{prefix}{idx}_raw") or "").strip()
+                    pool = (form.get(f"{prefix}{idx}_pool") or "").strip()
+                    if raw and pool:
+                        pairs[raw] = pool
+                full_map = dict(state.get(map_key) or {})
+                full_map[sig] = pairs
+                state[map_key] = full_map
+                kind_label = (
+                    "charge-off" if kind == "co" else "recoveries"
+                )
+                flash(
+                    f"Saved {len(pairs)} loan-code mapping(s) for the "
+                    f"{kind_label} layout {sig[:8]}\u2026. They will be "
+                    "applied the next time you aggregate.",
+                    "success",
+                )
 
         elif action == "reinspect_co_monthly":
             _refresh_co_recov_inspect(state, "co", force=True)
@@ -5300,22 +5749,44 @@ def step3_historical():
 
         elif action in ("ignore_co_layout", "ignore_recov_layout"):
             kind = "co" if action == "ignore_co_layout" else "recov"
-            sig = (request.form.get("signature") or "").strip()
+            # Accept one OR many signatures (the wizard's bulk-ignore
+            # form posts multiple "signature" inputs).
+            raw_sigs = request.form.getlist("signature")
+            new_sigs = [s.strip() for s in raw_sigs if s and s.strip()]
+            if not new_sigs:
+                one = (request.form.get("signature") or "").strip()
+                if one:
+                    new_sigs = [one]
             sig_key = f"{kind}_ignored_signatures"
             sigs = list(state.get(sig_key) or [])
-            if sig and sig not in sigs:
-                sigs.append(sig)
-                state[sig_key] = sigs
-            removed = _remove_files_with_signature(
-                state, kind, sig, is_sample=False,
-            )
+            added = 0
+            removed_total = 0
+            for sig in new_sigs:
+                if sig not in sigs:
+                    sigs.append(sig)
+                    added += 1
+                removed_total += _remove_files_with_signature(
+                    state, kind, sig, is_sample=False,
+                )
+            state[sig_key] = sigs
             _refresh_layouts_in_scan_data(state, kind, "monthly")
             _refresh_layouts_in_scan_data(state, kind, "sample")
             kind_label = "charge-off" if kind == "co" else "recoveries"
-            msg = f"Ignored layout — future scans will skip matching {kind_label} files."
-            if removed:
-                msg += f" Removed {removed} already-added file(s)."
-            flash(msg, "success")
+            if not new_sigs:
+                flash(
+                    f"Pick at least one {kind_label} layout to ignore.",
+                    "error",
+                )
+            else:
+                count = len(new_sigs)
+                noun = "layout" if count == 1 else "layouts"
+                msg = (
+                    f"Ignored {count} {kind_label} {noun} \u2014 future "
+                    f"scans will skip matching files."
+                )
+                if removed_total:
+                    msg += f" Removed {removed_total} already-added file(s)."
+                flash(msg, "success")
 
         elif action in ("unignore_co_layout", "unignore_recov_layout"):
             kind = "co" if action == "unignore_co_layout" else "recov"
@@ -5362,7 +5833,31 @@ def step3_historical():
                 files.insert(0, files.pop(target_idx))
                 hs[list_key] = files
                 state["hist_scan"] = hs
-                _refresh_co_recov_inspect(state, kind, force=True)
+                # Stash the file's signature so save_co_columns /
+                # save_recov_columns / save_*_loan_code_map know which
+                # layout slot to write to.  Restore any previously-saved
+                # per-layout column mapping so the form shows that
+                # layout's last-saved values rather than auto-detected.
+                sig_key = (
+                    "co_active_signature" if kind == "co"
+                    else "recov_active_signature"
+                )
+                cols_key = "co_columns" if kind == "co" else "recov_columns"
+                layout_cols_key = (
+                    "co_layout_columns" if kind == "co"
+                    else "recov_layout_columns"
+                )
+                sig, _ = _file_layout_signature(Path(sample_path))
+                state[sig_key] = sig or ""
+                saved_layout = (
+                    (state.get(layout_cols_key) or {}).get(sig)
+                    if sig else None
+                )
+                force_seed = True
+                if saved_layout:
+                    state[cols_key] = dict(saved_layout)
+                    force_seed = False
+                _refresh_co_recov_inspect(state, kind, force=force_seed)
                 flash(
                     f"Loaded {Path(sample_path).name} into the "
                     f"{kind_label} Column Mapping card below.",
@@ -5530,8 +6025,29 @@ def step3_historical():
         _first_name = (_files[0].get("name") or "").strip()
         _ins_name = (_ins.get("filename") or "").strip()
         if _first_name and _first_name != _ins_name:
+            # Preserve any saved per-layout mapping for the file now at
+            # files[0]: only force a fresh seed when no saved mapping
+            # exists for that layout.
+            _sig_key = (
+                "co_active_signature" if _kind == "co"
+                else "recov_active_signature"
+            )
+            _layout_cols_key = (
+                "co_layout_columns" if _kind == "co"
+                else "recov_layout_columns"
+            )
+            _cols_key = "co_columns" if _kind == "co" else "recov_columns"
             try:
-                _refresh_co_recov_inspect(state, _kind, force=True)
+                _path = Path(_files[0].get("path") or "")
+                _sig, _ = _file_layout_signature(_path) if _path else ("", [])
+                _saved = (state.get(_layout_cols_key) or {}).get(_sig)
+                if _sig:
+                    state[_sig_key] = _sig
+                _force = True
+                if _saved:
+                    state[_cols_key] = dict(_saved)
+                    _force = False
+                _refresh_co_recov_inspect(state, _kind, force=_force)
             except Exception:  # noqa: BLE001
                 # Non-fatal — fall back to whatever inspect is cached.
                 pass
@@ -5559,18 +6075,164 @@ def step3_historical():
     except Exception:  # noqa: BLE001
         solr_dist_preview = {"ok": False, "error": "preview failed"}
 
+    # Distinct loan codes from the active CO/Recov sample file so the
+    # template can render a per-layout loan-code -> pool mapping table.
+    # ``co_distinct_codes`` / ``recov_distinct_codes`` are lists of raw
+    # strings; the saved mapping is a dict in
+    # ``state.{kind}_loan_code_map[active_signature]``.
+    def _distinct_for(_kind: str) -> list[str]:
+        ins_key = "co_inspect" if _kind == "co" else "recov_inspect"
+        cols_key = "co_columns" if _kind == "co" else "recov_columns"
+        ins = state.get(ins_key) or {}
+        fname = (ins.get("filename") or "").strip()
+        if not fname:
+            return []
+        # Locate the inspected file's path on disk.
+        list_key = (
+            "monthly_co_files" if _kind == "co" else "monthly_recov_files"
+        )
+        candidates: list[str] = []
+        for entry in (state.get("hist_scan") or {}).get(list_key) or []:
+            if (entry.get("name") or "") == fname:
+                p = (entry.get("path") or "").strip()
+                if p:
+                    candidates.append(p)
+        single_list_key = (
+            "co_files" if _kind == "co" else "recov_files"
+        )
+        for entry in (state.get("hist_scan") or {}).get(single_list_key) or []:
+            if (entry.get("name") or "") == fname:
+                p = (entry.get("path") or "").strip()
+                if p:
+                    candidates.append(p)
+        for path_str in candidates:
+            p = Path(path_str)
+            if not p.exists():
+                continue
+            code_header = (
+                (state.get(cols_key) or {}).get("loan_code") or ""
+            ).strip() or None
+            try:
+                return monthly_co_recov_aggregator.extract_distinct_loan_codes(
+                    p, code_header
+                )
+            except Exception:  # noqa: BLE001
+                return []
+        return []
+
+    co_distinct_codes = _distinct_for("co")
+    recov_distinct_codes = _distinct_for("recov")
+
+    # Also surface every distinct loan_code already present in the DB
+    # history tables (typically NCUA canonical names like "Used Vehicles"
+    # written by the 5300 backfills, plus any user-uploaded codes).
+    # Merge into the per-section distinct list so the inline "map
+    # unmapped codes" UI lets the user assign 5300 codes to pools too,
+    # even when no raw CO/Recov file is loaded.
+    def _merge_db_codes(existing: list[str], view: dict[str, Any] | None) -> list[str]:
+        if not view:
+            return existing
+        codes = list(view.get("codes") or [])
+        if not codes:
+            return existing
+        seen = {c.strip().lower() for c in existing if isinstance(c, str)}
+        out = list(existing)
+        for c in codes:
+            if not isinstance(c, str):
+                continue
+            key = c.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(c)
+        return out
+
+    co_distinct_codes = _merge_db_codes(co_distinct_codes, co_history_view)
+    recov_distinct_codes = _merge_db_codes(
+        recov_distinct_codes, recov_history_view
+    )
+
+    # Group every uploaded CO/Recov file by header signature so the
+    # template can render a layout picker.  The picker lets the user
+    # switch the Column Mapping card between layouts even when the
+    # files were uploaded individually (no folder scan).
+    def _layouts_for(_kind: str) -> list[dict[str, Any]]:
+        list_key = (
+            "monthly_co_files" if _kind == "co" else "monthly_recov_files"
+        )
+        sig_key = (
+            "co_active_signature" if _kind == "co"
+            else "recov_active_signature"
+        )
+        layout_cols_key = (
+            "co_layout_columns" if _kind == "co"
+            else "recov_layout_columns"
+        )
+        loan_map_key = (
+            "co_loan_code_map" if _kind == "co"
+            else "recov_loan_code_map"
+        )
+        rows = (state.get("hist_scan") or {}).get(list_key) or []
+        active_sig = (state.get(sig_key) or "").strip()
+        saved_cols = state.get(layout_cols_key) or {}
+        saved_lcm = state.get(loan_map_key) or {}
+        groups: dict[str, dict[str, Any]] = {}
+        for entry in rows:
+            p_str = (entry.get("path") or "").strip()
+            if not p_str:
+                continue
+            p = Path(p_str)
+            if not p.exists():
+                continue
+            sig, _h = _file_layout_signature(p)
+            if not sig:
+                continue
+            g = groups.setdefault(sig, {
+                "signature": sig,
+                "sample_path": p_str,
+                "sample_file": p.name,
+                "file_count": 0,
+                "is_active": (sig == active_sig),
+                "has_column_mapping": sig in saved_cols,
+                "has_loan_code_map": bool(saved_lcm.get(sig)),
+                "loan_code_map_count": len(saved_lcm.get(sig) or {}),
+            })
+            g["file_count"] += 1
+        return sorted(
+            groups.values(), key=lambda g: g["sample_file"].lower()
+        )
+
+    co_layouts = _layouts_for("co")
+    recov_layouts = _layouts_for("recov")
+
+    # Roll the CO/Recov "what's loaded" tables up by mapped pool name so
+    # they reflect the user's Step 3 Loan Code Mapping (5300 NCUA names
+    # collapsed into pools). The raw matrix is still used above for the
+    # unmapped-codes picker.
+    pool_map_for_agg = state.get("pool_map") or {}
+    co_history_view_pool = _aggregate_history_by_pool(
+        co_history_view, pool_map_for_agg
+    )
+    recov_history_view_pool = _aggregate_history_by_pool(
+        recov_history_view, pool_map_for_agg
+    )
+
     return render_template(
         "setup/step3_historical.html",
         pool_suggestions=_DEFAULT_POOL_SUGGESTIONS,
         step2_pools=step2_pools,
         history_view=history_view,
-        co_history_view=co_history_view,
-        recov_history_view=recov_history_view,
+        co_history_view=co_history_view_pool or co_history_view,
+        recov_history_view=recov_history_view_pool or recov_history_view,
         matrix_view=view_mode,
         solr_canonical_map=solr_5300_backfill.load_canonical_map(),
         co_canonical_map=solr_5300_co_backfill.load_canonical_map(),
         recov_canonical_map=solr_5300_recov_backfill.load_canonical_map(),
         solr_dist_preview=solr_dist_preview,
+        co_distinct_codes=co_distinct_codes,
+        recov_distinct_codes=recov_distinct_codes,
+        co_layouts=co_layouts,
+        recov_layouts=recov_layouts,
         section=section,
         **_wizard_ctx(active_key),
     )
@@ -6186,6 +6848,37 @@ def step_dq_hist():
         action = request.form.get("action", "")
         cu = (state.get("credit_union") or "").strip()
 
+        # ---- Inline NCUA / loan-code -> pool mapping ----------------
+        if action == "map_unmapped_dq_codes":
+            form = request.form
+            codes = form.getlist("unmapped_code")
+            pool_map = dict(state.get("pool_map") or {})
+            saved = 0
+            for i, raw in enumerate(codes):
+                raw = (raw or "").strip()
+                if not raw:
+                    continue
+                pool = (form.get(f"unmapped_pool_{i}") or "").strip()
+                if not pool:
+                    continue
+                pool_map[raw] = pool
+                saved += 1
+            state["pool_map"] = pool_map
+            _save_state(state)
+            if saved:
+                flash(
+                    f"Mapped {saved} DQ loan code(s) into the global "
+                    "Step 3 Loan Code Mapping.",
+                    "success",
+                )
+            else:
+                flash(
+                    "No mappings selected. Pick a pool for at least one "
+                    "code before clicking Save.",
+                    "info",
+                )
+            return redirect(url_for("setup.step_dq_hist"))
+
         # ---- Settings -----------------------------------------------
         if action == "save_settings":
             try:
@@ -6455,6 +7148,12 @@ def step_dq_hist():
         delinquency_hist_processor.history_matrix(cu) if cu
         else {"months": [], "codes": [], "cells": {}, "row_count": 0}
     )
+    # Roll the stored-history table up by mapped pool name so the
+    # display reflects the user's Step 3 Loan Code Mapping.  Raw
+    # ``matrix`` is still used by the inline "unmapped codes" picker.
+    matrix_pool = _aggregate_dq_history_by_pool(
+        matrix, state.get("pool_map") or {}
+    )
     map_status = solr_5300_delq_backfill.map_status()
     extract_files = (
         (state.get("sample_uploads") or {}).get("dq_extract_files") or []
@@ -6463,6 +7162,7 @@ def step_dq_hist():
         "setup/step_dq_hist.html",
         dh=dh,
         matrix=matrix,
+        matrix_pool=matrix_pool,
         map_status=map_status,
         extract_files=extract_files,
         solr_backfill=he.get("solr_backfill") or {},
@@ -7607,6 +8307,7 @@ def step4_pools():
                 "saved_path": str(target),
                 "code_column": parsed["code_column"],
                 "name_column": parsed["name_column"],
+                "header_row": parsed.get("header_row", 1),
                 "headers": parsed["headers"],
                 "rows": parsed["rows"],
             }
@@ -7621,6 +8322,144 @@ def step4_pools():
         if action == "dismiss_upload":
             state.pop("pool_map_upload", None)
             _save_state(state)
+            return redirect(url_for("setup.step4_pools"))
+
+        # ---- Re-parse the staged upload with user-picked columns ----
+        # ``apply_header_row``  - reread file at chosen row, auto-detect
+        #                        code / name columns from the new
+        #                        header row (clears stale picks).
+        # ``rechoose_columns``  - reread file at chosen row, honor the
+        #                        user-picked code_col / name_col.
+        if action in ("rechoose_columns", "apply_header_row"):
+            upload = state.get("pool_map_upload") or {}
+            saved_path = upload.get("saved_path")
+            if not saved_path or not Path(saved_path).exists():
+                flash("No staged upload to re-parse \u2014 please upload again.",
+                      "error")
+                state.pop("pool_map_upload", None)
+                _save_state(state)
+                return redirect(url_for("setup.step4_pools"))
+            hdr_raw = (request.form.get("header_row") or "").strip()
+            try:
+                header_row = int(hdr_raw) if hdr_raw else None
+            except ValueError:
+                header_row = None
+            if header_row is not None and header_row < 1:
+                header_row = 1
+            if action == "apply_header_row":
+                # Force auto-detection so the dropdowns repopulate from
+                # the new header row.
+                code_col = None
+                name_col = None
+            else:
+                code_col = (request.form.get("code_col") or "").strip() or None
+                name_col = (request.form.get("name_col") or "").strip() or None
+                if code_col and name_col and code_col == name_col:
+                    flash(
+                        "Code column and pool-name column must be different.",
+                        "error",
+                    )
+                    return redirect(url_for("setup.step4_pools"))
+            try:
+                parsed = sample_parser.parse_pool_map_file(
+                    Path(saved_path),
+                    code_col=code_col,
+                    name_col=name_col,
+                    header_row=header_row,
+                )
+            except ValueError as exc:
+                # The chosen row didn't yield 2+ usable columns via
+                # pandas. Salvage the raw cells of that row so the
+                # user can still adjust selections.
+                if header_row:
+                    raw_cells = sample_parser._read_row_cells(
+                        Path(saved_path), header_row
+                    )
+                    raw_headers = [c for c in raw_cells if c]
+                else:
+                    raw_headers = []
+                if raw_headers:
+                    state["pool_map_upload"] = {
+                        "filename": upload.get("filename"),
+                        "saved_path": saved_path,
+                        "code_column": (
+                            raw_headers[0] if raw_headers else ""
+                        ),
+                        "name_column": (
+                            raw_headers[1] if len(raw_headers) > 1 else ""
+                        ),
+                        "header_row": header_row or 1,
+                        "headers": raw_headers,
+                        "rows": [],
+                    }
+                    _save_state(state)
+                flash(
+                    f"Header row {header_row or '(auto)'} doesn't look "
+                    f"like a usable header: {exc}",
+                    "error",
+                )
+                return redirect(url_for("setup.step4_pools"))
+            except Exception as exc:  # noqa: BLE001
+                flash(f"Could not re-parse pool-map file: {exc}", "error")
+                return redirect(url_for("setup.step4_pools"))
+            if not parsed["rows"]:
+                # Still keep the new headers so the dropdowns refresh
+                # even if the row had no usable data below it.
+                row_for_cells = parsed.get("header_row", 1)
+                raw_cells = sample_parser._read_row_cells(
+                    Path(saved_path), row_for_cells
+                )
+                merged_headers = list(parsed["headers"])
+                for cell in raw_cells:
+                    if cell and cell not in merged_headers:
+                        merged_headers.append(cell)
+                state["pool_map_upload"] = {
+                    "filename": upload.get("filename"),
+                    "saved_path": saved_path,
+                    "code_column": parsed["code_column"],
+                    "name_column": parsed["name_column"],
+                    "header_row": parsed.get("header_row", 1),
+                    "headers": merged_headers,
+                    "rows": [],
+                }
+                _save_state(state)
+                flash(
+                    f"Header row {parsed.get('header_row', 1)} loaded "
+                    f"({len(parsed['headers'])} column(s)) but no data "
+                    "rows below it &mdash; pick a different header row "
+                    "or the right code / name columns.",
+                    "warning",
+                )
+                return redirect(url_for("setup.step4_pools"))
+            # Always pull the raw cell values of the chosen header
+            # row directly from the file so the dropdowns have every
+            # column visible (pandas can collapse blank trailing cols
+            # or rename duplicates in ways that hide picks).
+            row_for_cells = parsed.get("header_row", 1)
+            raw_cells = sample_parser._read_row_cells(
+                Path(saved_path), row_for_cells
+            )
+            merged_headers = list(parsed["headers"])
+            for cell in raw_cells:
+                if cell and cell not in merged_headers:
+                    merged_headers.append(cell)
+            state["pool_map_upload"] = {
+                "filename": upload.get("filename"),
+                "saved_path": saved_path,
+                "code_column": parsed["code_column"],
+                "name_column": parsed["name_column"],
+                "header_row": parsed.get("header_row", 1),
+                "headers": merged_headers,
+                "rows": parsed["rows"],
+            }
+            _save_state(state)
+            flash(
+                f"Re-parsed (header row {parsed.get('header_row', 1)}): "
+                f"code = <code>{parsed['code_column']}</code>, "
+                f"name = <code>{parsed['name_column']}</code> &mdash; "
+                f"{parsed['row_count']} mapping(s) ready to review.",
+                "success",
+            )
             return redirect(url_for("setup.step4_pools"))
 
         # ---- Resolve "unrecognized" pool names ---------------------
@@ -7896,13 +8735,26 @@ def step4_pools():
                 flash("No mappings selected.", "info")
             return redirect(url_for("setup.step4_pools"))
 
-        # Default: save and advance.
+        # Default: save and advance.  Also handles the "Save progress" /
+        # "Save progress & exit" buttons in the stepper, which submit this
+        # same form (via HTML5 form="step-form") so any in-DOM edits the
+        # user made are persisted instead of being silently dropped.
         new_map = _parse_kv_rows(request.form, "pool_code", "pool_name")
         state["pool_map"] = new_map
         state["default_pool"] = request.form.get(
             "default_pool", "Ignore"
         ).strip() or "Ignore"
         _save_state(state)
+
+        if action in ("save_progress_stay", "save_progress_exit"):
+            # _save_state above already auto-persisted the draft; just
+            # mirror the /save-progress UX for these two action values.
+            label = state.get("credit_union") or state.get("short_name") or "draft"
+            flash(f"Saved progress for {label}.", "success")
+            if action == "save_progress_exit":
+                session.pop(STATE_KEY, None)
+                return redirect(url_for("home.index"))
+            return redirect(url_for("setup.step4_pools"))
 
         # Soft-validate names against the WARM pool list (warning only).
         warm_pools = ((state.get("warm") or {}).get("pools")) or []
@@ -7932,8 +8784,12 @@ def step4_pools():
                     "info",
                 )
 
-        return redirect(url_for("setup.step_balance_check"))
-    # Compute "raw codes detected in sample but not yet mapped" for the UI.
+        # Loan Code Mapping is now wizard step 3.  WARM users continue
+        # to Balance Titles (step3_balances); no-WARM users continue
+        # to Historical Balances (step3_historical).
+        if state.get("has_warm_files") == "yes":
+            return redirect(url_for("setup.step3_balances"))
+        return redirect(url_for("setup.step3_historical"))
     sample_codes = ((state.get("sample") or {}).get("pool_code_suggestions")) or []
     known = set((state.get("pool_map") or {}).keys())
     unmapped_sample = [c for c in sample_codes if c and c not in known]

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Loan Pools{% endblock %}
 {% block content %}
+{% set step_form_id = 'step-form' %}
 {% include "setup/_stepper.html" %}
 
 {% set warm_pools = (state.warm.pools if state.warm else []) or [] %}
@@ -68,9 +69,58 @@
     </form>
     {% else %}
       <p class="muted">
-        Detected columns: code = <code>{{ upload_review.code_column }}</code>,
+        Detected: header row <code>{{ upload_review.header_row or 1 }}</code>,
+        code = <code>{{ upload_review.code_column }}</code>,
         name = <code>{{ upload_review.name_column }}</code>.
       </p>
+      {# --- Manual column override -------------------------------- #}
+      {# Wrong column auto-detected?  Pick the right ones and
+         re-parse the same uploaded file. #}
+      <form method="post" style="margin:6px 0 14px 0; padding:8px 10px; background:#f7f9fc; border:1px solid #e3e7ee; border-radius:4px;">
+        <strong>Wrong column or header row picked?</strong>
+        <span class="muted">Adjust below and re-parse:</span>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-top:6px;">
+          <label style="display:flex; flex-direction:column; gap:2px;">
+            <span class="muted" style="font-size:0.85em;">Header row (1-based)</span>
+            <input type="number" name="header_row" min="1" step="1"
+                   value="{{ upload_review.header_row or 1 }}"
+                   style="width:90px;">
+          </label>
+          <button class="btn btn-secondary" type="submit" name="action" value="apply_header_row"
+                  title="Re-read the file using the new header row and let the tool pick columns automatically">
+            Apply header row &amp; refresh columns
+          </button>
+        </div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-top:10px;">
+          <label style="display:flex; flex-direction:column; gap:2px;">
+            <span class="muted" style="font-size:0.85em;">Code column</span>
+            <select name="code_col" style="min-width:180px;">
+              {% for h in upload_review.headers %}
+                <option value="{{ h }}" {% if h == upload_review.code_column %}selected{% endif %}>{{ h }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label style="display:flex; flex-direction:column; gap:2px;">
+            <span class="muted" style="font-size:0.85em;">Pool name column</span>
+            <select name="name_col" style="min-width:180px;">
+              {% for h in upload_review.headers %}
+                <option value="{{ h }}" {% if h == upload_review.name_column %}selected{% endif %}>{{ h }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          {# Hidden flag is irrelevant once we have two distinct
+             actions; the route reads the action name to decide
+             whether to honor user-picked columns or auto-detect. #}
+          <button class="btn btn-secondary" type="submit" name="action" value="rechoose_columns">
+            Re-parse with these columns
+          </button>
+          <button class="btn btn-link" type="submit" name="action" value="dismiss_upload"
+                  formnovalidate
+                  style="color:#a00;">
+            Discard upload
+          </button>
+        </div>
+      </form>
       {% set c = upload_review.counts %}
       <p style="margin:6px 0;">
         <span class="badge" style="background:#dfd; padding:2px 8px; border-radius:3px;">{{ c.match }} already match</span>
@@ -307,7 +357,7 @@
   </div>
   {% endif %}
 
-  <form method="post">
+  <form method="post" id="step-form">
     <div id="pool-rows">
       {% for code, name in state.pool_map.items() %}
       <div class="kv-row">
@@ -347,11 +397,49 @@
     </label>
 
     <div class="btn-row">
-      <a class="btn btn-secondary" href="{{ url_for('setup.step3_columns') }}">&larr; Back</a>
+      {% set _back = url_for('setup.step2_warm') if state.has_warm_files == 'yes' else url_for('setup.step_loan_pools') %}
+      {% set _next_label = 'Balance Titles' if state.has_warm_files == 'yes' else 'Historical Balances' %}
+      <a class="btn btn-secondary" href="{{ _back }}">&larr; Back</a>
       <button class="btn btn-primary" type="submit" name="action" value="save">
-        Next: Balance Adjustment &rarr;
+        Next: {{ _next_label }} &rarr;
       </button>
     </div>
   </form>
 </div>
+
+<script>
+  // Defines the global addPoolRow() called by the "+ Add row" button.
+  // Reads the pool list from the JSON island rendered above.
+  (function () {
+    function getPoolChoices() {
+      var el = document.getElementById('pool-options-data');
+      if (!el) return [];
+      try { return JSON.parse(el.textContent || '[]') || []; }
+      catch (e) { return []; }
+    }
+    window.addPoolRow = function () {
+      var container = document.getElementById('pool-rows');
+      if (!container) return;
+      var pools = getPoolChoices();
+      var row = document.createElement('div');
+      row.className = 'kv-row';
+      var html = '<input type="text" name="pool_code" value="" '
+        + 'placeholder="Raw code (e.g., AUTO_NEW)">'
+        + '<select name="pool_name">'
+        + '<option value="" selected>&mdash; choose &mdash;</option>';
+      for (var i = 0; i < pools.length; i++) {
+        var p = String(pools[i]).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        html += '<option value="' + p + '">' + p + '</option>';
+      }
+      html += '<option value="Ignore">Ignore (exclude from report)</option>'
+        + '</select>'
+        + '<button type="button" class="icon-btn" '
+        + 'onclick="this.parentElement.remove()">&times;</button>';
+      row.innerHTML = html;
+      container.appendChild(row);
+      var input = row.querySelector('input[name="pool_code"]');
+      if (input) input.focus();
+    };
+  })();
+</script>
 {% endblock %}

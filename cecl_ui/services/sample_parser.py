@@ -316,10 +316,44 @@ def _score_header(header: str, keywords: tuple[str, ...]) -> int:
     return 0
 
 
+def _read_row_cells(file_path: str | Path, row_1based: int) -> list[str]:
+    """Return the raw cell values of ``row_1based`` (1-based) from
+    an .xlsx/.xls/.csv file as cleaned strings. Trailing empties are
+    trimmed; embedded blanks are preserved. Returns ``[]`` on any
+    parsing error or when the row is out of range."""
+    p = Path(file_path)
+    suffix = p.suffix.lower()
+    try:
+        import pandas as pd
+        if suffix in {".xlsx", ".xls"}:
+            raw = pd.read_excel(p, header=None, dtype=object,
+                                nrows=row_1based)
+        elif suffix == ".csv":
+            raw = pd.read_csv(p, header=None, dtype=object,
+                              keep_default_na=False, nrows=row_1based)
+        else:
+            return []
+        idx = row_1based - 1
+        if idx < 0 or idx >= len(raw):
+            return []
+        cells = [
+            "" if v is None or str(v).strip().lower() == "nan"
+            else str(v).strip()
+            for v in raw.iloc[idx].tolist()
+        ]
+        # Strip trailing blanks
+        while cells and cells[-1] == "":
+            cells.pop()
+        return cells
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def parse_pool_map_file(
     file_path: str | Path,
     code_col: str | None = None,
     name_col: str | None = None,
+    header_row: int | None = None,
 ) -> dict[str, Any]:
     """Read an uploaded loan-code -> pool-name map file (xlsx/csv).
 
@@ -338,19 +372,61 @@ def parse_pool_map_file(
     """
     path = Path(file_path)
     suffix = path.suffix.lower()
+    # Convert 1-based header_row from caller to pandas' 0-based index;
+    # ``None`` means auto-detect.
+    hdr_idx: int | None
+    if header_row is None or header_row <= 0:
+        hdr_idx = None
+    else:
+        hdr_idx = int(header_row) - 1
+
     if suffix in {".xlsx", ".xls"}:
         import pandas as pd
-        df = pd.read_excel(path, dtype=object)
+        if hdr_idx is None:
+            # Read the first ~25 rows raw; pick the row with the most
+            # non-empty string cells as the header row.
+            raw = pd.read_excel(path, header=None, dtype=object, nrows=25)
+            best_row = 0
+            best_score = -1
+            for i in range(len(raw)):
+                row = raw.iloc[i]
+                score = sum(
+                    1 for v in row
+                    if v is not None
+                    and str(v).strip() != ""
+                    and str(v).strip().lower() != "nan"
+                )
+                if score > best_score:
+                    best_score = score
+                    best_row = i
+            hdr_idx = best_row
+        df = pd.read_excel(path, header=hdr_idx, dtype=object)
     elif suffix == ".csv":
         import pandas as pd
-        df = pd.read_csv(path, dtype=object, keep_default_na=False)
+        if hdr_idx is None:
+            raw = pd.read_csv(path, header=None, dtype=object,
+                              keep_default_na=False, nrows=25)
+            best_row = 0
+            best_score = -1
+            for i in range(len(raw)):
+                row = raw.iloc[i]
+                score = sum(
+                    1 for v in row
+                    if v is not None and str(v).strip() != ""
+                )
+                if score > best_score:
+                    best_score = score
+                    best_row = i
+            hdr_idx = best_row
+        df = pd.read_csv(path, header=hdr_idx, dtype=object,
+                         keep_default_na=False)
     else:
         raise ValueError(
             f"Unsupported pool-map file type '{suffix}'. "
             "Please upload an .xlsx, .xls, or .csv file."
         )
 
-    if df.empty or df.shape[1] < 2:
+    if df.shape[1] < 2:
         raise ValueError(
             "Pool-map file must have at least two columns "
             "(loan code and pool name)."
@@ -400,6 +476,7 @@ def parse_pool_map_file(
         "headers": headers,
         "code_column": code_h,
         "name_column": name_h,
+        "header_row": (hdr_idx + 1) if hdr_idx is not None else 1,
         "rows": rows,
         "row_count": len(rows),
     }

@@ -329,10 +329,11 @@
               <td style="padding:4px 10px;">
                 <input type="number" name="acl_row" min="1"
                        value="{{ acl.row or '' }}" style="width:80px;">
-                {% if mb.filename %}
+                {% if mb.filename or (mb.monthly_files and mb.monthly_files|length > 0) %}
                   <button class="btn btn-secondary" type="submit"
                           name="action" value="acl_refresh_row"
-                          style="margin-left:6px;">Refresh history</button>
+                          style="margin-left:6px;"
+                          title="Re-read the ACL row number above from every uploaded balance file.">Refresh history</button>
                 {% endif %}
                 <button class="btn btn-secondary" type="submit"
                         name="action" value="acl_scan_balance_files"
@@ -752,18 +753,108 @@
       </tbody>
     </table>
 
-    {# ACL still applies in per_month mode — re-use the existing block by
-       including a stripped-down version: just the radios + manual fields.
-       Source-mode "monthly_file" is replaced with separate or manual here. #}
+    {# ACL still applies in per_month mode. Users can either pull the ACL
+       row from each uploaded balance sheet, upload a separate file, or
+       enter values manually. #}
     {% set acl = mb.acl or {} %}
-    {% set acl_src = acl.source or 'manual' %}
+    {% set acl_src = acl.source or 'monthly_file' %}
+    {% set acl_hist = acl.history or {} %}
     {% set acl_man = acl.manual or {} %}
     <h4 style="margin-top:18px;">Allowance for Credit Loss (ACL)</h4>
     <p class="muted">
       A single ACL balance per month is needed for the reports. Pick a
-      source below (the &ldquo;monthly file&rdquo; option is only available
-      in single-file mode).
+      source below.
     </p>
+
+    <label style="display:block; margin:4px 0;">
+      <input type="radio" name="acl_source" value="monthly_file"
+             {% if acl_src == 'monthly_file' %}checked{% endif %}>
+      <strong>Pull from each monthly balance file.</strong>
+      <span class="muted">
+        The wizard auto-detects the row that holds the ACL balance.
+        You can override the row number if it picked the wrong one.
+      </span>
+    </label>
+
+    {% if acl_src == 'monthly_file' %}
+      <div style="margin:6px 0 14px 28px;">
+        {% if mb.monthly_files and mb.monthly_files|length > 0 %}
+          <table style="border-collapse:collapse; font-size:13px;">
+            <tr>
+              <th style="text-align:left; padding:4px 10px;">ACL row (1-based)</th>
+              <td style="padding:4px 10px;">
+                <input type="number" name="acl_row" min="1"
+                       value="{{ acl.row or '' }}" style="width:80px;">
+              </td>
+            </tr>
+            <tr>
+              <th style="text-align:left; padding:4px 10px;">ACL column (letter)</th>
+              <td style="padding:4px 10px;">
+                <input type="text" name="acl_col" maxlength="3"
+                       value="{{ acl.col or '' }}"
+                       placeholder="auto"
+                       style="width:80px; text-transform:uppercase;">
+                <span class="muted">leave blank to use the auto-detected
+                  balance column ({{ pm.balance_col or '?' }})</span>
+              </td>
+            </tr>
+            <tr>
+              <th></th>
+              <td style="padding:4px 10px;">
+                <button class="btn btn-secondary" type="submit"
+                        name="action" value="acl_refresh_row"
+                        title="Re-read the ACL row/column above from every uploaded balance file.">Refresh history</button>
+                <button class="btn btn-secondary" type="submit"
+                        name="action" value="acl_scan_balance_files"
+                        style="margin-left:6px;"
+                        title="Auto-detect the ACL row in every uploaded balance file and refresh the history table below.">
+                  Scan uploaded balance files
+                </button>
+                {% if acl.label %}
+                  <span class="muted" style="margin-left:8px;">
+                    Detected label: <strong>{{ acl.label }}</strong>
+                  </span>
+                {% endif %}
+              </td>
+            </tr>
+          </table>
+          {% if acl_hist %}
+            <p class="muted" style="margin:8px 0 4px 0;">
+              <strong>Historical ACL balances</strong>
+              ({{ acl_hist|length }} month{{ '' if acl_hist|length == 1 else 's' }}):
+            </p>
+            <table style="border-collapse:collapse; font-size:13px;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc;">Month-end</th>
+                  <th style="text-align:right; padding:4px 10px; border-bottom:1px solid #ccc;">ACL Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for d, v in acl_hist|dictsort %}
+                  <tr>
+                    <td style="padding:3px 10px;">{{ d }}</td>
+                    <td style="padding:3px 10px; text-align:right; font-variant-numeric:tabular-nums;">
+                      ${{ '{:,.2f}'.format(v) }}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% else %}
+            <p class="muted" style="margin-top:8px;">
+              No ACL row detected yet. Click
+              <em>Scan uploaded balance files</em> to auto-detect, or set
+              the row number above and refresh.
+            </p>
+          {% endif %}
+        {% else %}
+          <p class="muted">Upload at least one monthly balance file in
+            Section 1 to enable auto-detection.</p>
+        {% endif %}
+      </div>
+    {% endif %}
+
     <label style="display:block; margin:4px 0;">
       <input type="radio" name="acl_source" value="separate"
              {% if acl_src == 'separate' %}checked{% endif %}>
@@ -771,7 +862,7 @@
     </label>
     <label style="display:block; margin:4px 0;">
       <input type="radio" name="acl_source" value="manual"
-             {% if acl_src != 'separate' %}checked{% endif %}>
+             {% if acl_src == 'manual' %}checked{% endif %}>
       Enter manually:
     </label>
     <table style="border-collapse:collapse; font-size:13px; margin-left:24px;">
