@@ -373,7 +373,8 @@ def _pool_life_loss(pools, hist):
     for pool in pools:
         rates = []
         for y in years:
-            net = co.get(y, {}).get(pool, 0) - rc.get(y, {}).get(pool, 0)
+            net = abs(co.get(y, {}).get(pool, 0) or 0) \
+                  - abs(rc.get(y, {}).get(pool, 0) or 0)
             avg = ab.get(y, {}).get(pool, 0)
             if avg > 0:
                 rates.append(net / avg)
@@ -2092,7 +2093,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             for y in years:
                 if y < pe:
                     continue
-                total_net += co_data.get(y, {}).get(pool, 0) - rc_data.get(y, {}).get(pool, 0)
+                total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
+                             - abs(rc_data.get(y, {}).get(pool, 0) or 0)
         life_loss[pool] = total_net / avg_tot if avg_tot > 0 else 0
 
     # Column widths
@@ -2730,7 +2732,8 @@ def _sheet_loss_factor(wb, cu, snap, df, grades, config, hist):
             for y in years:
                 if y < pe:
                     continue
-                total_net += co_data.get(y, {}).get(pool, 0) - rc_data.get(y, {}).get(pool, 0)
+                total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
+                             - abs(rc_data.get(y, {}).get(pool, 0) or 0)
         pool_life_rates[pool] = total_net / avg_tot if avg_tot > 0 else 0
 
     # Column widths: A wide for grade labels, B-P uniform 12.33, Q+ defaults
@@ -3211,13 +3214,16 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
                                             pool, y, earliest, earliest_mo)
                 rc_val = _windowed_year_val(warm_rc_monthly, warm_rc,
                                             pool, y, earliest, earliest_mo)
-                net = co_val - rc_val
+                # Net = |CO| - |Recov| regardless of how each side
+                # is signed in the source data (some CUs store COs
+                # as negatives, some positive; recoveries vary too).
+                net = abs(co_val) - abs(rc_val)
             else:
                 co_val = _windowed_year_val(hist.get('co_monthly', {}),
                                             co_data, pool, y, earliest, earliest_mo)
                 rc_val = _windowed_year_val(hist.get('rc_monthly', {}),
                                             rc_data, pool, y, earliest, earliest_mo)
-                net = co_val - rc_val
+                net = abs(co_val) - abs(rc_val)
             ws.cell(row=r, column=2 + yi, value=net).number_format = ACCT
             ws.cell(row=r, column=2 + yi).font = V10B
             acl_total += net
@@ -4228,7 +4234,9 @@ def _sheet_detail_co_hist(wb, cu, snap, config, hist):
     r += 1
 
     # ── Net Loss section ──
-    # Build net monthly data = chargeoffs - recoveries (COs are positive losses)
+    # Net = |CO| - |Recov| so the displayed net is correct regardless
+    # of whether the source data signs charge-offs/recoveries positive
+    # or negative. (NCUA 5300, AIRES, and CU monthly files all differ.)
     net_monthly = {}
     all_ym_keys = set(list(co_monthly.keys()) + list(rc_monthly.keys()))
     for ym in all_ym_keys:
@@ -4237,7 +4245,7 @@ def _sheet_detail_co_hist(wb, cu, snap, config, hist):
         rc_pools = rc_monthly.get(ym, {})
         all_pool_keys = set(list(co_pools.keys()) + list(rc_pools.keys()))
         for p in all_pool_keys:
-            net_monthly[ym][p] = co_pools.get(p, 0) - rc_pools.get(p, 0)
+            net_monthly[ym][p] = abs(co_pools.get(p, 0) or 0) - abs(rc_pools.get(p, 0) or 0)
 
     r, _, _ = _write_section(
         ws, r, "Net Loss", net_monthly, pools,
