@@ -8207,7 +8207,7 @@ def step3_columns():
                 )
 
         _save_state(state)
-        return redirect(url_for("setup.step4_pools"))
+        return redirect(url_for("setup.step_balance_check"))
 
     # GET
     _hydrate_legacy_entries()

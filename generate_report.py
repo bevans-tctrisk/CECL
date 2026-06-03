@@ -959,7 +959,14 @@ def _load_monthly_balances_per_month(mb_cfg):
                 df = pd.read_csv(path, header=None, dtype=str)
             else:
                 if sheet:
-                    df = pd.read_excel(path, sheet_name=sheet, header=None)
+                    try:
+                        df = pd.read_excel(path, sheet_name=sheet, header=None)
+                    except Exception:
+                        # Some CUs (e.g. NOVA) name each monthly workbook's
+                        # sheet after the document number, so the configured
+                        # ``sheet`` only matches one file. Fall back to the
+                        # first worksheet so every period still loads.
+                        df = pd.read_excel(path, sheet_name=0, header=None)
                 else:
                     df = pd.read_excel(path, header=None)
         except Exception as e:

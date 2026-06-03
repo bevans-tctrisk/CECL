@@ -1043,7 +1043,21 @@ def analyse_per_month_file(
                 "detected_period": period_iso}
 
     detail_col = max(detail_col_counts.items(), key=lambda kv: kv[1])[0]
-    balance_col = max(balance_col_counts.items(), key=lambda kv: kv[1])[0]
+    # Balance sheets always show balances to the RIGHT of the label
+    # column. When a column to the LEFT of the label has more numeric
+    # cells (e.g. a GL-account-number column where every row carries a
+    # 6-digit code) we'd otherwise pick it as the balance column and
+    # produce huge bogus totals. Restrict the balance-column candidates
+    # to those at or right of the label column when at least one such
+    # candidate exists; otherwise fall back to the global max.
+    right_candidates = {c: n for c, n in balance_col_counts.items()
+                        if c > detail_col}
+    if right_candidates:
+        balance_col = max(right_candidates.items(),
+                          key=lambda kv: kv[1])[0]
+    else:
+        balance_col = max(balance_col_counts.items(),
+                          key=lambda kv: kv[1])[0]
 
     # Honour an explicit user-supplied stop_row (1-based). When the
     # user sets stop_row=N we treat row N as the first EXCLUDED row

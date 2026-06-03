@@ -274,7 +274,9 @@ def new_quarter(short_name: str):
         f.save(upload_dir / fn)
         saved += 1
 
-    # 2) Copy from folder path (non-recursive, common spreadsheet formats)
+    # 2) Copy from folder path (recursive, common spreadsheet formats).
+    # Subfolder layouts like 2026-Q1/{Jan,Feb,Mar} 2026/ are common, so
+    # walk the tree and flatten every spreadsheet into Raw_Uploads/.
     copied = 0
     folder_skipped: list[str] = []
     if folder_raw:
@@ -283,7 +285,7 @@ def new_quarter(short_name: str):
             flash(f"Folder not found: {folder_raw}", "error")
             return redirect(url_for("run.new_quarter", short_name=short_name))
         allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
-        for entry in src.iterdir():
+        for entry in src.rglob("*"):
             if not entry.is_file():
                 continue
             if entry.name.startswith("~$") or entry.name.startswith("."):
