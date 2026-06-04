@@ -7375,6 +7375,53 @@ def step_dq_hist():
     matrix_pool = _aggregate_dq_history_by_pool(
         matrix, state.get("pool_map") or {}
     )
+    # Build NCUA-canonical-name -> configured-pool suggestions for the
+    # inline unmapped-codes picker. Mirrors the auto-classification
+    # report-engine uses (``_build_ncua_canonical_pool_lookup``) so the
+    # wizard pre-selects the same pool the report would route a 5300
+    # canonical name to (e.g. "Used Vehicles" -> "Indirect Auto" when
+    # the CU has Auto-style pools). Users can still pick a different
+    # pool from the dropdown to override.
+    dq_suggestions: dict[str, str] = {}
+    try:
+        import importlib
+        _gr = importlib.import_module("generate_report")
+        _cfg_for_lookup = {
+            "pools": [
+                {"name": (p.get("name") or "").strip()}
+                for p in (state.get("pool_settings") or [])
+                if (p.get("name") or "").strip() and not p.get("excluded")
+            ],
+            "pool_order": [
+                (p.get("name") or "").strip()
+                for p in (state.get("pool_settings") or [])
+                if (p.get("name") or "").strip() and not p.get("excluded")
+            ],
+            "excluded_pools": [
+                (p.get("name") or "").strip()
+                for p in (state.get("pool_settings") or [])
+                if (p.get("name") or "").strip() and p.get("excluded")
+            ],
+        }
+        _ncua_lookup = _gr._build_ncua_canonical_pool_lookup(_cfg_for_lookup)
+        _pool_map_lc = {
+            str(k).strip().lower(): (v or "").strip()
+            for k, v in (state.get("pool_map") or {}).items()
+        }
+        for c in (matrix.get("codes") or []):
+            key = str(c).strip().lower()
+            if not key:
+                continue
+            if (_pool_map_lc.get(key) or "").strip():
+                continue  # already mapped via Step 3
+            sug = _ncua_lookup.get(key) or _ncua_lookup.get(
+                " ".join(key.split())
+            )
+            if sug:
+                dq_suggestions[c] = sug
+    except Exception:  # noqa: BLE001
+        # Suggestions are a UX nicety; never break the page render.
+        dq_suggestions = {}
     map_status = solr_5300_delq_backfill.map_status()
     extract_files = (
         (state.get("sample_uploads") or {}).get("dq_extract_files") or []
@@ -7393,6 +7440,7 @@ def step_dq_hist():
             or ""
         ),
         history_months=he.get("history_months") or 84,
+        dq_suggestions=dq_suggestions,
         **_wizard_ctx("dq_hist"),
     )
 

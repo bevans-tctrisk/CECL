@@ -438,17 +438,26 @@
     {% endfor %}
     <form method="post" style="margin-top:8px;">
       <input type="hidden" name="action" value="map_unmapped_dq_codes">
+      {% set _sug = dq_suggestions or {} %}
+      {% if _sug %}
+      <p class="muted" style="margin:4px 0;">
+        Dropdowns are pre-selected from the NCUA auto-classifier where
+        a configured pool matches the canonical name. Confirm or change
+        each pick before saving.
+      </p>
+      {% endif %}
       <table class="data-table" style="margin-top:4px; max-width:600px;">
         <thead><tr><th>Loan code</th><th>Map to pool</th></tr></thead>
         <tbody>
           {% for c in _dq_unmapped %}
+            {% set _picked = _sug.get(c) or '' %}
             <tr>
               <td><code>{{ c }}</code><input type="hidden" name="unmapped_code" value="{{ c }}"></td>
               <td>
                 <select name="unmapped_pool_{{ loop.index0 }}" style="min-width:200px;">
                   <option value="">&mdash; choose &mdash;</option>
                   {% for p in _dq_pool_choices %}
-                    <option value="{{ p }}">{{ p }}</option>
+                    <option value="{{ p }}"{% if _picked == p %} selected{% endif %}>{{ p }}</option>
                   {% endfor %}
                   <option value="Ignore">Ignore (exclude)</option>
                 </select>
