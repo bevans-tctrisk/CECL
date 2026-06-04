@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Management Adjustments{% endblock %}
 {% block content %}
+{% set step_form_id = 'step-form' %}
 {% include "setup/_stepper.html" %}
 <div class="card">
   <h2>Management Adjustments</h2>
@@ -9,7 +10,7 @@
     return here later when management decides a specific pool needs a manual
     bump.</p>
 
-  <form method="post">
+  <form method="post" id="step-form">
 
     <h3 style="margin-top:8px;">Per-pool overlay (optional)</h3>
     <p class="help">Enter a percentage to add to that pool's base loss rate.

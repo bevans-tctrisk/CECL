@@ -10189,6 +10189,7 @@ def step8_mgmt_adj():
     # Note: do NOT sort — WARM ordering is intentional.
 
     if request.method == "POST":
+        action = (request.form.get("action") or "").strip()
         try:
             state["mgmt_adj"]["ltv_baseline"] = float(
                 request.form.get("ltv_baseline", "0.9")
@@ -10299,6 +10300,19 @@ def step8_mgmt_adj():
         state["other_allowance_considerations"] = oac
 
         _save_state(state)
+
+        # Stepper "Save progress" / "Save progress & exit" buttons submit
+        # this same form (via HTML5 form="step-form") so the user's typed
+        # overlays land in state above before we redirect. Mirror the
+        # /save-progress UX rather than advancing to the next step.
+        if action in ("save_progress_stay", "save_progress_exit"):
+            label = state.get("credit_union") or state.get("short_name") or "draft"
+            flash(f"Saved progress for {label}.", "success")
+            if action == "save_progress_exit":
+                session.pop(STATE_KEY, None)
+                return redirect(url_for("home.index"))
+            return redirect(url_for("setup.step8_mgmt_adj"))
+
         return redirect(url_for("setup.step9_reports"))
 
     # Pre-format saved overlays (decimals) back to percentages for the form.
