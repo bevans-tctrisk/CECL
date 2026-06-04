@@ -164,6 +164,7 @@ def _default_state() -> dict[str, Any]:
             "loan_suffix": "",
             "current_balance": "BALANCE",
             "original_fico_score": "FICO_SCORE",
+            "current_fico_score": "",
             "loan_pool_code": "LOAN_TYPE",
             "days_delinquent": "DQ_DAYS",
             "interest_rate": "INT_RATE",
@@ -8312,6 +8313,7 @@ def step3_columns():
         required = ["member_number", "current_balance",
                     "days_delinquent"]
         optional = ("loan_suffix", "loan_pool_code", "original_fico_score",
+                    "current_fico_score",
                     "interest_rate", "open_date",
                     "original_loan_amount", "total_available_credit")
 

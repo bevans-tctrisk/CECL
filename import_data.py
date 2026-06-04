@@ -743,6 +743,21 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
     else:
         original_fico = pd.Series([0] * len(df), index=df.index, dtype=int)
 
+    # Optional: current FICO read directly from the loan-data extract.
+    # When the wizard's column-mapping step assigns ``current_fico_score``
+    # to a column in the extract, those values are the authoritative
+    # current scores and take priority over WARM/credit-pull lookups.
+    extract_current_fico: pd.Series | None = None
+    if col_map.get('current_fico_score') or 'current_fico_score' in col_map:
+        try:
+            extract_current_fico = (
+                pd.to_numeric(col('current_fico_score'), errors='coerce')
+                .fillna(0)
+                .astype(int)
+            )
+        except KeyError:
+            extract_current_fico = None
+
     # Extract member-only & full-account identifiers honoring the wizard's
     # member/account format selection (fixed-suffix / delimiter / split).
     member_only_str, full_account_str = derive_member_account(df, config, has_header)
@@ -844,13 +859,46 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
                     )
 
     # Current FICO priority:
+    #   0. Extract column mapped to ``current_fico_score`` (when present)
     #   1. WARM "All Loans" per-loan scores (authoritative source matching WARM's final scores)
     #   2. Credit pull (member-level) for loans not in WARM
     #   3. Previous snapshot per-loan carry-forward
     #   4. Original FICO
     # raw_acct_str is set above (alias of full_account_str)
 
-    if warm_acct_scores:
+    if extract_current_fico is not None:
+        # Extract column wins. Treat 0/blank as missing and fall back to
+        # WARM/credit-pull/previous-snapshot/original in that order so a
+        # CU whose extract has current FICO on most-but-not-all loans
+        # still benefits from the other sources for the gaps.
+        current_fico = extract_current_fico.where(extract_current_fico > 0)
+        ext_matched = int(current_fico.notna().sum())
+        unmatched = int(current_fico.isna().sum())
+
+        if unmatched > 0 and warm_acct_scores:
+            warm_mapped = raw_acct_str.map(warm_acct_scores)
+            current_fico = current_fico.fillna(warm_mapped)
+            unmatched = int(current_fico.isna().sum())
+
+        cp_filled = 0
+        if unmatched > 0 and credit_pull_scores:
+            cp_mapped = member_numbers.map(credit_pull_scores)
+            before = int(current_fico.notna().sum())
+            current_fico = current_fico.fillna(cp_mapped)
+            cp_filled = int(current_fico.notna().sum()) - before
+            unmatched = int(current_fico.isna().sum())
+
+        parts = [f"Extract current-FICO matched: {ext_matched}"]
+        if cp_filled > 0:
+            parts.append(f"credit pull: {cp_filled}")
+        if unmatched > 0:
+            parts.append(f"fallback to original: {unmatched}")
+        print(f"    {', '.join(parts)}")
+
+        # Final fallback to original score
+        current_fico = current_fico.fillna(original_fico).astype(int)
+
+    elif warm_acct_scores:
         # Primary: WARM per-loan scores (exactly matches WARM's computed current scores)
         current_fico = raw_acct_str.map(warm_acct_scores)
         warm_matched = current_fico.notna().sum()

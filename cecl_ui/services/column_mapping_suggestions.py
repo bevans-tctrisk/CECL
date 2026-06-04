@@ -47,6 +47,7 @@ KNOWN_FIELDS: tuple[str, ...] = (
     "loan_suffix",
     "current_balance",
     "original_fico_score",
+    "current_fico_score",
     "loan_pool_code",
     "days_delinquent",
     "interest_rate",
