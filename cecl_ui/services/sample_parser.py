@@ -518,7 +518,44 @@ def analyse_sample_file(
             raw = pd.read_excel(path, header=None, dtype=object)
         elif suffix == ".csv":
             import pandas as pd  # deferred: pandas cold-import is slow on network drives
-            raw = pd.read_csv(path, header=None, dtype=object, keep_default_na=False)
+            # Sniff a few bytes for BOM / common Windows credit-union CSV encodings.
+            # AIRES-style exports are sometimes UTF-16 LE (BOM ff fe) or Windows-1252.
+            try:
+                with open(path, "rb") as fh:
+                    head = fh.read(4)
+            except Exception:
+                head = b""
+            encodings_to_try: list[str | None] = []
+            if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
+                encodings_to_try = ["utf-16", "utf-8-sig", "cp1252", "latin-1"]
+            elif head.startswith(b"\xef\xbb\xbf"):
+                encodings_to_try = ["utf-8-sig", "cp1252", "latin-1"]
+            else:
+                encodings_to_try = [None, "utf-8-sig", "cp1252", "latin-1"]
+            # Auto-detect separator (handles tab-delimited .csv exports too).
+            last_exc: Exception | None = None
+            raw = None
+            for enc in encodings_to_try:
+                for sep in (None, ",", "\t", ";", "|"):
+                    try:
+                        raw = pd.read_csv(
+                            path,
+                            header=None,
+                            dtype=object,
+                            keep_default_na=False,
+                            encoding=enc,
+                            sep=sep,
+                            engine="python" if sep is None else "c",
+                        )
+                        last_exc = None
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_exc = exc
+                        continue
+                if raw is not None:
+                    break
+            if raw is None:
+                raise last_exc if last_exc else RuntimeError("Could not parse CSV")
         else:
             return {"ok": False, "error": f"Unsupported file type: {suffix}"}
     except Exception as exc:  # noqa: BLE001
