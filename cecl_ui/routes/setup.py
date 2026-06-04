@@ -895,6 +895,53 @@ def _apply_warm_to_state(state: dict[str, Any], analysis: dict[str, Any]) -> Non
 @setup_bp.route("/step/warm", methods=["GET", "POST"])
 def step2_warm():
     state = _state()
+    # Passive re-parse for existing drafts: if the saved WARM file is
+    # still on disk but the cached analysis is missing fields the
+    # current parser version produces (most commonly ``balance_titles``
+    # / ``bs_loan_type_map`` from the BS Data tab — added/extended in
+    # later commits), re-run ``analyse_warm_file`` and merge the new
+    # fields in WITHOUT clobbering anything else (no flash, no
+    # state["pool_map"] reseed). This lets users who started a draft
+    # before the new BS-Data column detection pick up the richer
+    # mappings on their next page load instead of re-uploading.
+    _w_existing = state.get("warm") or {}
+    _w_path = _w_existing.get("saved_path")
+    if request.method == "GET" and _w_path:
+        try:
+            from pathlib import Path as _P
+            _wp = _P(_w_path)
+            _stale = not (_w_existing.get("balance_titles")
+                          and _w_existing.get("bs_loan_type_map"))
+            if _stale and _wp.exists():
+                _fresh = warm_parser.analyse_warm_file(
+                    _wp,
+                    original_filename=_w_existing.get("filename")
+                    or _wp.name,
+                )
+                if _fresh.get("ok"):
+                    # Merge only the BS-Data-derived fields (and any other
+                    # fields where the current cache is empty/falsy).
+                    _changed = False
+                    for _k in ("balance_titles", "bs_loan_type_map",
+                               "loan_code_pool_map", "pool_monthly_balances",
+                               "pool_settings", "pools", "grades",
+                               "co_pools_with_data", "recov_pools_with_data",
+                               "history_start", "history_end",
+                               "history_months", "as_of_date", "cu_name",
+                               "sheets_found", "sheets_missing",
+                               "baseline_identity", "acl_balance"):
+                        _new = _fresh.get(_k)
+                        _old = _w_existing.get(_k)
+                        if _new and not _old:
+                            _w_existing[_k] = _new
+                            _changed = True
+                    if _changed:
+                        state["warm"] = _w_existing
+                        _save_state(state)
+        except Exception:  # noqa: BLE001
+            # Re-parse must never block GET — fall through to render.
+            pass
+
     if request.method == "POST":
         action = request.form.get("action", "")
 
@@ -1773,6 +1820,18 @@ def step5_monthly_bal():
         for _k, _v in (_hpm0.get("mapping") or {}).items():
             if _k and _k not in _combined:
                 _combined[_k] = (_v or "")
+        # Also pull the WARM-derived BS-Data loan-type→pool map directly,
+        # so users who haven't yet visited Step 3 (Balance Titles) still
+        # get pool_map suggestions out-of-the-box from the WARM workbook.
+        _warm0 = state.get("warm") or {}
+        for _k, _v in (_warm0.get("bs_loan_type_map") or {}).items():
+            if _k and _k not in _combined:
+                _combined[_k] = (_v or "")
+        for _bt in (_warm0.get("balance_titles") or []):
+            _t = (_bt.get("title") or "").strip() if isinstance(_bt, dict) else ""
+            _p = (_bt.get("suggested_pool") or "").strip() if isinstance(_bt, dict) else ""
+            if _t and _t not in _combined:
+                _combined[_t] = _p
         if _combined:
             _seeded0, _status0 = monthly_bal_parser.seed_pool_map(
                 _parsed_labels, _combined,
@@ -1846,6 +1905,16 @@ def step5_monthly_bal():
                 for _k, _v in (_hpm_pm.get("mapping") or {}).items():
                     if _k and _k not in _combined_pm:
                         _combined_pm[_k] = (_v or "")
+                # WARM BS Data direct sources (loan_type→pool + balance_titles).
+                _warm_pm = state.get("warm") or {}
+                for _k, _v in (_warm_pm.get("bs_loan_type_map") or {}).items():
+                    if _k and _k not in _combined_pm:
+                        _combined_pm[_k] = (_v or "")
+                for _bt in (_warm_pm.get("balance_titles") or []):
+                    _t = (_bt.get("title") or "").strip() if isinstance(_bt, dict) else ""
+                    _p = (_bt.get("suggested_pool") or "").strip() if isinstance(_bt, dict) else ""
+                    if _t and _t not in _combined_pm:
+                        _combined_pm[_t] = _p
                 if _combined_pm:
                     _seeded_pm, _status_pm = monthly_bal_parser.seed_pool_map(
                         _seen_labels, _combined_pm,

@@ -265,6 +265,56 @@ def _is_real_pool_label(name: str) -> bool:
     return not any(low.startswith(p) for p in _POOL_BLOCKLIST_PREFIXES)
 
 
+def _detect_bs_data_columns(ws) -> tuple[int, int]:
+    """Inspect row 1 of ``BS Data`` to find which columns hold the
+    *title* (CU-supplied loan-type / line-item label that appears in the
+    monthly balance feed) and the *pool* (which configured loan pool the
+    title rolls up into).
+
+    Returns a ``(title_col, pool_col)`` 1-based tuple. Falls back to the
+    historical layout ``(1, 2)`` (col A = Loan Type, col B = Loan Pool)
+    when no header row is recognisable.
+
+    Recognised header phrasings:
+      * title : "loan type", "type", "title", "balance title",
+                "balance sheet line", "line item", "description"
+      * pool  : "loan pool", "pool", "loan pools", "pool name"
+
+    Skips the canonical anchor headers ``Pool Order`` / ``Loan Pools``
+    when those happen to sit on row 1 of the sheet -- those mark the
+    *bottom* canonical pool list on every WARM template, not the title
+    block at the top.
+    """
+    title_keys = (
+        "loan type", "type", "title", "balance title",
+        "balance sheet line", "line item", "description",
+    )
+    pool_keys = ("loan pool", "pool", "loan pools", "pool name")
+    title_col = 0
+    pool_col = 0
+    for c in range(1, 8):
+        v = ws.cell(row=1, column=c).value
+        if not isinstance(v, str):
+            continue
+        s = v.strip().lower()
+        if not s:
+            continue
+        # Skip the canonical pool-order anchor row when it lands on row 1.
+        if s == "pool order":
+            continue
+        if not title_col and s in title_keys:
+            title_col = c
+            continue
+        if not pool_col and s in pool_keys:
+            pool_col = c
+            continue
+    if not title_col:
+        title_col = 1
+    if not pool_col:
+        pool_col = title_col + 1
+    return title_col, pool_col
+
+
 def _pool_names_from_bs(ws) -> list[str]:
     """Read the canonical loan-pool list from ``BS Data``.
 
@@ -506,52 +556,57 @@ def _balance_titles_above_pool_order(ws) -> list[dict[str, Any]]:
     """Read the credit-union-supplied balance titles from ``BS Data``,
     above the ``Pool Order`` / ``Loan Pools`` anchor.
 
-    Layout::
+    Two layouts are supported (auto-detected from the row-1 header):
 
-        Row 1: Pools | Types | Pool | <dates>...
-        Row 2: New Autos          | 1,3,7,15 | Collateralized Loans | <bal>
-        Row 3: Used Autos         | 2,4,...  | Collateralized Loans | <bal>
-        ...
-        Row 17: Sub-Total Loans   |          | Blank                  (skipped)
-        Row 19: 3 Dealers         |          | Dealer Loans
-        Row 21: Total Loans       |          | Blank                  (skipped)
-        ...
-        Row N: Pool Order         | Loan Pools | <dates>              (anchor)
+      * Legacy::
+
+            Row 1: Loan Type    | Loan Pool            | <dates>...
+            Row 2: New Autos    | Collateralized Loans | <bal>
+            Row 3: Used Autos   | Collateralized Loans | <bal>
+
+      * GL-prefixed::
+
+            Row 1: GL    | Loan Type             | Pool            | <dates>...
+            Row 2: 70102 | CNS-NEW AUTO-FIXED    | Direct Auto     | <bal>
+            Row 3: 70105 | CNS-RV-FIXED          | Direct Auto     | <bal>
 
     Each accepted row becomes ``{title, note, suggested_pool}`` where
-    ``title`` is col A (the CU-supplied raw label that appears in the
-    monthly data), ``note`` is col B (loan-code list, free-form), and
-    ``suggested_pool`` is col C (the workbook's hint at which loan pool
-    the row belongs in -- empty / 'Blank' rows are dropped).
+    ``title`` is the CU-supplied raw label that appears in the monthly
+    data, ``note`` is whatever sits in any column LEFT of the title
+    column (loan-code list, GL number, etc.), and ``suggested_pool`` is
+    the workbook's hint at which loan pool the row belongs in. Empty /
+    'Blank' rows are dropped.
     """
+    title_col, pool_col = _detect_bs_data_columns(ws)
     anchor = _find_pool_order_anchor(ws)
     end_row = (anchor[0] - 1) if anchor else 60
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for row in ws.iter_rows(min_row=2, max_row=end_row, values_only=True):
-        if not row:
-            continue
-        a = row[0]
-        b = row[1] if len(row) > 1 else None
-        c = row[2] if len(row) > 2 else None
+    for r in range(2, end_row + 1):
+        a = ws.cell(row=r, column=title_col).value
+        b = ws.cell(row=r, column=pool_col).value
+        # "note" column: prefer the column LEFT of title (legacy "Loan Type
+        # codes" or GL numbers); else col-A free-form.
+        note_col = title_col - 1 if title_col > 1 else 0
+        n = ws.cell(row=r, column=note_col).value if note_col else None
         title = a.strip() if isinstance(a, str) else ""
         if not title:
             continue
         if not _is_real_pool_label(title):
             continue
-        suggested = c.strip() if isinstance(c, str) else ""
-        # Skip the ALLOWANCE row and any row whose suggested-pool cell is
-        # literally "Blank" (totals/spacers).
+        suggested = b.strip() if isinstance(b, str) else ""
+        # Skip rows whose suggested-pool cell is literally "Blank"
+        # (totals/spacers).
         if suggested.lower() == "blank":
             continue
         low = title.lower()
         if low in seen:
             continue
         seen.add(low)
-        if isinstance(b, float) and b.is_integer():
-            note = str(int(b))
+        if isinstance(n, float) and n.is_integer():
+            note = str(int(n))
         else:
-            note = str(b).strip() if b is not None else ""
+            note = str(n).strip() if n is not None else ""
         out.append({
             "title": title,
             "note": note,
@@ -561,29 +616,22 @@ def _balance_titles_above_pool_order(ws) -> list[dict[str, Any]]:
 
 
 def _bs_loan_type_to_pool_map(ws) -> dict[str, str]:
-    """From ``BS Data``, build a mapping of *loan-type label* (col A, row 2+)
-    to *pool name* (col B).
+    """From ``BS Data``, build a mapping of *loan-type label* to *pool name*.
 
-    The BS Data tab has the layout::
+    Auto-detects the title and pool columns from the row-1 header (see
+    ``_detect_bs_data_columns``) so layouts like
+    ``GL | Loan Type | Pool | dates`` work in addition to the legacy
+    ``Loan Type | Loan Pool | dates`` layout.
 
-        Row 1: Loan Type | Loan Pool | <date> | <date> | ...
-        Row 2: NEW VEHICLE 22-26 | New Vehicle | ...
-        Row 3: USED VEHICLE 27-31 | Used Vehicle | ...
-        ...
-        Row N: Total Loans | (blank)
-        Row N+1: (blank rows)
-        Row M: Pool Order | Loan Pools | <date> | ...   (canonical pool list)
-
-    We stop reading at the first row whose col A label is a blocklist prefix
-    (e.g. "Total Loans", "Pool Order") or after a stretch of blanks.
+    We stop reading at the first row whose title cell is a blocklist
+    prefix (e.g. "Total Loans", "Pool Order") or after a stretch of blanks.
     """
+    title_col, pool_col = _detect_bs_data_columns(ws)
     mapping: dict[str, str] = {}
     blanks = 0
-    for row in ws.iter_rows(min_row=2, max_row=80, values_only=True):
-        if not row:
-            continue
-        a = row[0]
-        b = row[1] if len(row) > 1 else None
+    for r in range(2, 81):
+        a = ws.cell(row=r, column=title_col).value
+        b = ws.cell(row=r, column=pool_col).value
         a_s = a.strip() if isinstance(a, str) else ""
         b_s = b.strip() if isinstance(b, str) else ""
         if not a_s and not b_s:
