@@ -375,6 +375,35 @@ def _resolve_mgmt_adj_total(pool, pool_use_default, mgmt_adj_by_pool,
     return 0.0
 
 
+def _other_allowance_considerations(config):
+    """Return the list of optional Other Allowance Considerations.
+
+    Each entry is normalised to ``{'title': str, 'balance': float,
+    'percentage': float, 'amount': float}``. ``amount`` is recomputed
+    from balance * percentage when missing/stale so we never trust a
+    stale cached value. Empty list when none are configured.
+    """
+    raw = config.get('other_allowance_considerations') or []
+    out = []
+    for r in raw:
+        try:
+            bal = float(r.get('balance') or 0)
+            pct = float(r.get('percentage') or 0)
+        except (TypeError, ValueError):
+            continue
+        amt_raw = r.get('amount')
+        try:
+            amt = float(amt_raw) if amt_raw is not None else round(bal * pct / 100.0, 2)
+        except (TypeError, ValueError):
+            amt = round(bal * pct / 100.0, 2)
+        title = (str(r.get('title') or '').strip()) or '(untitled)'
+        out.append({
+            'title': title, 'balance': bal,
+            'percentage': pct, 'amount': amt,
+        })
+    return out
+
+
 def _snap_display(snap):
     """Format snap date for display like '12/31/2025'."""
     try:
@@ -3094,7 +3123,9 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
         ws.cell(row=r, column=1, value=lbl).font = FNT_A12
         ws.cell(row=r, column=11, value=imp_val).number_format = ACCT
     total_spec_allow = acl_summary.get('total_spec_allow', sum(acl_impaired.values()))
-    total_allow_needed = pooled_total_allow + total_spec_allow
+    oac_rows = _other_allowance_considerations(config)
+    oac_total = sum(o['amount'] for o in oac_rows)
+    total_allow_needed = pooled_total_allow + total_spec_allow + oac_total
     acl_bal = acl_summary.get('acl_balance', config.get('acl_balance', 0))
     adjustment = total_allow_needed - acl_bal
 
@@ -3102,6 +3133,19 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     ws.cell(row=r, column=1, value="Total Specifically Identified Allowance").font = FNT_A12B
     ws.cell(row=r, column=11, value=total_spec_allow).number_format = ACCT
     ws.cell(row=r, column=11).font = FNT_A12B
+    if oac_rows:
+        r += 2
+        ws.cell(row=r, column=1, value="Other Allowance Considerations").font = FNT_A12B
+        ws.cell(row=r, column=10, value="Allowance").font = FNT_A12B
+        for o in oac_rows:
+            r += 1
+            ws.cell(row=r, column=1, value=o['title']).font = FNT_A12
+            ws.cell(row=r, column=11, value=o['amount']).number_format = ACCT
+        r += 1
+        ws.cell(row=r, column=1,
+                value="Total Other Allowance Considerations").font = FNT_A12B
+        ws.cell(row=r, column=11, value=oac_total).number_format = ACCT
+        ws.cell(row=r, column=11).font = FNT_A12B
     r += 1
     ws.cell(row=r, column=1, value="Total Allowance Needed").font = FNT_A12B
     ws.cell(row=r, column=11, value=total_allow_needed).number_format = ACCT

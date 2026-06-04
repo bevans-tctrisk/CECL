@@ -314,6 +314,33 @@ def _resolve_mgmt_adj_total(pool, pool_use_default, mgmt_adj_by_pool,
     return 0.0
 
 
+def _other_allowance_considerations(config):
+    """Return normalised Other Allowance Considerations rows.
+
+    Each entry is ``{'title', 'balance', 'percentage', 'amount'}``.
+    Recomputes ``amount`` from balance * percentage when missing/stale.
+    """
+    raw = config.get('other_allowance_considerations') or []
+    out = []
+    for r in raw:
+        try:
+            bal = float(r.get('balance') or 0)
+            pct = float(r.get('percentage') or 0)
+        except (TypeError, ValueError):
+            continue
+        amt_raw = r.get('amount')
+        try:
+            amt = float(amt_raw) if amt_raw is not None else round(bal * pct / 100.0, 2)
+        except (TypeError, ValueError):
+            amt = round(bal * pct / 100.0, 2)
+        title = (str(r.get('title') or '').strip()) or '(untitled)'
+        out.append({
+            'title': title, 'balance': bal,
+            'percentage': pct, 'amount': amt,
+        })
+    return out
+
+
 def _snap_display(snap):
     try:
         dt = pd.to_datetime(snap)
@@ -533,6 +560,12 @@ def _compute_acl_totals(df, grades, config, hist, snap=''):
             grand_allowance += pool_allow_before + env_allow
 
     total_needed = grand_allowance + spec_id
+
+    # Optional Other Allowance Considerations contribute to Total Allowance
+    # Needed (and therefore the CECL Adjustment) when configured.
+    oac_rows = _other_allowance_considerations(config)
+    oac_total = sum(o['amount'] for o in oac_rows)
+    total_needed += oac_total
 
     # ACL Balance (from ACL Env by Pool Mgmt Adj tab, or config fallback)
     acl_balance = imp.get('acl_balance', config.get('acl_balance', 0))
@@ -2428,7 +2461,9 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
         ws.cell(row=r, column=1, value=lbl).font = V12
         ws.cell(row=r, column=11, value=imp_val).number_format = ACCT
     total_spec_allow = acl_summary.get('total_spec_allow', sum(acl_impaired.values()))
-    total_allow_needed = pooled_total_allow + total_spec_allow
+    oac_rows = _other_allowance_considerations(config)
+    oac_total = sum(o['amount'] for o in oac_rows)
+    total_allow_needed = pooled_total_allow + total_spec_allow + oac_total
     acl_bal = acl_summary.get('acl_balance', config.get('acl_balance', 0))
     adjustment = total_allow_needed - acl_bal
 
@@ -2436,6 +2471,19 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     ws.cell(row=r, column=1, value="Total Specifically Identified Allowance").font = V12B
     ws.cell(row=r, column=11, value=total_spec_allow).number_format = ACCT
     ws.cell(row=r, column=11).font = V12B
+    if oac_rows:
+        r += 2
+        ws.cell(row=r, column=1, value="Other Allowance Considerations").font = V12B
+        ws.cell(row=r, column=10, value="Allowance").font = V12B
+        for o in oac_rows:
+            r += 1
+            ws.cell(row=r, column=1, value=o['title']).font = V12
+            ws.cell(row=r, column=11, value=o['amount']).number_format = ACCT
+        r += 1
+        ws.cell(row=r, column=1,
+                value="Total Other Allowance Considerations").font = V12B
+        ws.cell(row=r, column=11, value=oac_total).number_format = ACCT
+        ws.cell(row=r, column=11).font = V12B
     r += 1
     ws.cell(row=r, column=1, value="Total Allowance Needed").font = V12B
     ws.cell(row=r, column=11, value=total_allow_needed).number_format = ACCT
