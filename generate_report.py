@@ -124,6 +124,30 @@ def load_config(client):
         }
     if cfg.get('default_pool') == 'Ignore':
         cfg['default_pool'] = 'Exclude'
+    # Also strip any pool literally named "Ignore" or "Exclude" from the
+    # pool registries (pools/pool_order/not_risk_rated/risk_rated). The
+    # wizard's Loan Pools step lets users define a sentinel pool called
+    # "Ignore" meaning "drop these loan codes"; downstream pool enumerators
+    # iterate cfg['pools']/cfg['pool_order'] directly and would render an
+    # empty "Ignore" row/column on every per-pool sheet without this.
+    _SENTINELS = {'ignore', 'exclude'}
+    pools_list = cfg.get('pools')
+    if isinstance(pools_list, list):
+        cfg['pools'] = [
+            p for p in pools_list
+            if not (
+                (isinstance(p, dict)
+                 and str(p.get('name', '')).strip().lower() in _SENTINELS)
+                or (isinstance(p, str) and p.strip().lower() in _SENTINELS)
+            )
+        ]
+    for _key in ('risk_rated', 'not_risk_rated', 'pool_order'):
+        _val = cfg.get(_key)
+        if isinstance(_val, list):
+            cfg[_key] = [
+                p for p in _val
+                if not (isinstance(p, str) and p.strip().lower() in _SENTINELS)
+            ]
     # Honor excluded_pools by remapping any pool_map value matching an
     # excluded pool name to the existing 'Exclude' sentinel. All downstream
     # filters (HIDE/Exclude prefix checks throughout report_tct/generate_report)
@@ -916,12 +940,18 @@ def _load_monthly_balances_manual(mb_cfg):
     return pd.DataFrame(records, columns=['pool', 'date', 'balance']), {}
 
 
-def _load_monthly_balances_per_month(mb_cfg):
+def _load_monthly_balances_per_month(mb_cfg, acl_cfg=None):
     """Read one balance-sheet style file per month and emit (pool, date, bal)
     rows. Each file is opened on ``layout.sheet`` (or the first sheet) and
     the label/balance columns are pulled from the configured letters,
     skipping ``header_row`` rows. Labels are mapped to wizard pool names via
     ``pool_map`` (case-insensitive, falls back to the raw label).
+
+    When ``acl_cfg`` is provided and has ``source == 'monthly_file'`` with an
+    ``acl.row`` (1-based) set, the same balance column is also read at that
+    row from each per-month file and returned as the ``alll_by_date`` dict
+    so the report engine's ACL Balance lookup picks it up. An optional
+    ``acl.col`` letter override is honored when present.
 
     Supported file types: .xlsx / .xls / .csv (via pandas) and .pdf (via
     pdfplumber's table extraction). For PDFs the ``sheet`` field is
@@ -936,6 +966,24 @@ def _load_monthly_balances_per_month(mb_cfg):
     raw_map = mb_cfg.get('pool_map') or {}
     pool_map = {str(k).strip().lower(): str(v).strip()
                 for k, v in raw_map.items() if str(k).strip() and str(v).strip()}
+
+    # Resolve ACL extraction settings. Only active when the wizard's ACL
+    # source is "monthly_file" and a row number was captured.
+    acl_cfg = acl_cfg or {}
+    acl_src = (acl_cfg.get('source') or '').strip().lower()
+    acl_row_1b = acl_cfg.get('row')
+    try:
+        acl_row_1b = int(acl_row_1b) if acl_row_1b not in (None, '') else 0
+    except (TypeError, ValueError):
+        acl_row_1b = 0
+    acl_col_override = acl_cfg.get('col') or ''
+    acl_col_idx = balance_idx
+    if isinstance(acl_col_override, str) and acl_col_override.strip():
+        _ovr = _col_letter_to_idx(acl_col_override)
+        if _ovr is not None:
+            acl_col_idx = _ovr
+    extract_acl = bool(acl_src == 'monthly_file' and acl_row_1b > 0)
+    alll_by_date: dict = {}
 
     records = []
     for entry in (mb_cfg.get('files') or []):
@@ -974,6 +1022,15 @@ def _load_monthly_balances_per_month(mb_cfg):
             continue
         if df is None or df.empty or df.shape[1] <= max(label_idx, balance_idx):
             continue
+        # Pull the ACL value for this period from the configured row+col
+        # (defaults to balance_col). The wizard's "monthly_file" source
+        # captures one row number that applies across every period file.
+        if extract_acl:
+            _ridx0 = acl_row_1b - 1
+            if 0 <= _ridx0 < df.shape[0] and acl_col_idx < df.shape[1]:
+                _av = _coerce_balance(df.iat[_ridx0, acl_col_idx])
+                if _av is not None:
+                    alll_by_date[dt] = abs(_av)
         for i in range(header_row, df.shape[0]):
             label = df.iat[i, label_idx]
             bal = df.iat[i, balance_idx]
@@ -989,7 +1046,9 @@ def _load_monthly_balances_per_month(mb_cfg):
             if not pool:
                 continue
             records.append({'pool': pool, 'date': dt, 'balance': bal_f})
-    return pd.DataFrame(records, columns=['pool', 'date', 'balance']), {}
+    if extract_acl and alll_by_date:
+        print(f"    ACL Balance extracted from per_month files (row {acl_row_1b}): {len(alll_by_date)} period(s)")
+    return pd.DataFrame(records, columns=['pool', 'date', 'balance']), alll_by_date
 
 
 def _load_monthly_balances_per_year(mb_cfg):
@@ -1344,7 +1403,7 @@ def load_monthly_balances(config):
     if mb_source == 'manual':
         return _load_monthly_balances_manual(mb_cfg)
     if mb_source == 'per_month':
-        df, alll = _load_monthly_balances_per_month(mb_cfg)
+        df, alll = _load_monthly_balances_per_month(mb_cfg, acl_cfg=config.get('acl'))
         if not df.empty:
             return df, _merge_acl_history(alll, config)
         # If per_month failed (no files / unreadable), fall through to the
