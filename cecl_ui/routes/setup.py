@@ -892,55 +892,63 @@ def _apply_warm_to_state(state: dict[str, Any], analysis: dict[str, Any]) -> Non
     state["warm"] = analysis
 
 
+def _refresh_stale_warm_analysis(state: dict[str, Any]) -> bool:
+    """Passive re-parse of the cached WARM workbook.
+
+    If the saved WARM file is still on disk but the cached analysis is
+    missing fields the current parser version produces (most commonly
+    ``balance_titles`` / ``bs_loan_type_map`` from the BS Data tab —
+    added/extended in later commits), re-run ``analyse_warm_file`` and
+    merge any populated-now-but-empty-before fields in. Never clobbers
+    user edits. Returns ``True`` if state was updated.
+
+    Called from wizard steps that consume WARM-derived BS-Data mappings
+    (Step 2, Step 7) so existing drafts pick up the richer parser
+    output without forcing a re-upload.
+    """
+    w = state.get("warm") or {}
+    path = w.get("saved_path")
+    if not path:
+        return False
+    if w.get("balance_titles") and w.get("bs_loan_type_map"):
+        return False
+    try:
+        from pathlib import Path as _P
+        wp = _P(path)
+        if not wp.exists():
+            return False
+        fresh = warm_parser.analyse_warm_file(
+            wp, original_filename=w.get("filename") or wp.name,
+        )
+        if not fresh.get("ok"):
+            return False
+        changed = False
+        for _k in ("balance_titles", "bs_loan_type_map",
+                   "loan_code_pool_map", "pool_monthly_balances",
+                   "pool_settings", "pools", "grades",
+                   "co_pools_with_data", "recov_pools_with_data",
+                   "history_start", "history_end",
+                   "history_months", "as_of_date", "cu_name",
+                   "sheets_found", "sheets_missing",
+                   "baseline_identity", "acl_balance"):
+            _new = fresh.get(_k)
+            _old = w.get(_k)
+            if _new and not _old:
+                w[_k] = _new
+                changed = True
+        if changed:
+            state["warm"] = w
+            _save_state(state)
+        return changed
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @setup_bp.route("/step/warm", methods=["GET", "POST"])
 def step2_warm():
     state = _state()
-    # Passive re-parse for existing drafts: if the saved WARM file is
-    # still on disk but the cached analysis is missing fields the
-    # current parser version produces (most commonly ``balance_titles``
-    # / ``bs_loan_type_map`` from the BS Data tab — added/extended in
-    # later commits), re-run ``analyse_warm_file`` and merge the new
-    # fields in WITHOUT clobbering anything else (no flash, no
-    # state["pool_map"] reseed). This lets users who started a draft
-    # before the new BS-Data column detection pick up the richer
-    # mappings on their next page load instead of re-uploading.
-    _w_existing = state.get("warm") or {}
-    _w_path = _w_existing.get("saved_path")
-    if request.method == "GET" and _w_path:
-        try:
-            from pathlib import Path as _P
-            _wp = _P(_w_path)
-            _stale = not (_w_existing.get("balance_titles")
-                          and _w_existing.get("bs_loan_type_map"))
-            if _stale and _wp.exists():
-                _fresh = warm_parser.analyse_warm_file(
-                    _wp,
-                    original_filename=_w_existing.get("filename")
-                    or _wp.name,
-                )
-                if _fresh.get("ok"):
-                    # Merge only the BS-Data-derived fields (and any other
-                    # fields where the current cache is empty/falsy).
-                    _changed = False
-                    for _k in ("balance_titles", "bs_loan_type_map",
-                               "loan_code_pool_map", "pool_monthly_balances",
-                               "pool_settings", "pools", "grades",
-                               "co_pools_with_data", "recov_pools_with_data",
-                               "history_start", "history_end",
-                               "history_months", "as_of_date", "cu_name",
-                               "sheets_found", "sheets_missing",
-                               "baseline_identity", "acl_balance"):
-                        _new = _fresh.get(_k)
-                        _old = _w_existing.get(_k)
-                        if _new and not _old:
-                            _w_existing[_k] = _new
-                            _changed = True
-                    if _changed:
-                        state["warm"] = _w_existing
-                        _save_state(state)
-        except Exception:  # noqa: BLE001
-            # Re-parse must never block GET — fall through to render.
-            pass
+    if request.method == "GET":
+        _refresh_stale_warm_analysis(state)
 
     if request.method == "POST":
         action = request.form.get("action", "")
@@ -1795,6 +1803,11 @@ def step5_monthly_bal():
     the full historical balance series as well.
     """
     state = _state()
+    # Backfill WARM-derived BS-Data fields for drafts that uploaded the
+    # WARM workbook before the column-detection fix landed.  Safe no-op
+    # when the cached analysis is already complete.
+    if request.method == "GET":
+        _refresh_stale_warm_analysis(state)
     has_warm = state.get("has_warm_files") == "yes"
     mb = state.setdefault("monthly_bal", {
         "filename": "", "saved_path": "", "sheet": "",
