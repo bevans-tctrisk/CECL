@@ -140,6 +140,16 @@ def extract_snapshot_date(source_text, config):
         elif date_fmt == 'YYYYMMDD':
             year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
             return date(year, month, day).isoformat()
+        elif date_fmt == 'YYYYQ':
+            year, quarter = int(match.group(1)), int(match.group(2))
+            month = quarter * 3
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+        elif date_fmt == 'QYYYY':
+            quarter, year = int(match.group(1)), int(match.group(2))
+            month = quarter * 3
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
         else:
             year, month = int(match.group(1)), int(match.group(2))
             last_day = calendar.monthrange(year, month)[1]
@@ -174,6 +184,11 @@ _FALLBACK_DATE_LAYOUTS: list[tuple[str, str]] = [
     (r"(20\d{2})[-_./ ](\d{2})(?!\d)",         "YM"),
     (r"(20\d{2})(\d{2})(?!\d)",                "YM"),
     (r"(\d{2})[-_./ ](20\d{2})",               "MY"),
+    # Quarter-end forms: "2025Q4", "2026-Q1", "2026_Q1".
+    # Q1->Mar 31, Q2->Jun 30, Q3->Sep 30, Q4->Dec 31.
+    (r"(20\d{2})[-_ ]?[Qq]([1-4])(?!\d)",       "YQ"),
+    # "Q4 2025" / "Q1-2026" / "Q1_2026".
+    (r"(?<![A-Za-z])[Qq]([1-4])[-_ ]?(20\d{2})(?!\d)", "QY"),
     # Two-digit-year fallback: anchored to 19-30 to keep ambiguity low.
     # Used for AIRES-style filenames like "25-12 AIRES LOANS v2.xlsx"
     # where the wizard's auto-derived date_pattern (which expects a
@@ -211,6 +226,16 @@ def _try_common_date_layouts(text: str) -> str | None:
                 if yy < 19 or yy > 30 or mo < 1 or mo > 12:
                     continue
                 y = 2000 + yy
+                last = calendar.monthrange(y, mo)[1]
+                return date(y, mo, last).isoformat()
+            if kind == "YQ":
+                y, q = int(m.group(1)), int(m.group(2))
+                mo = q * 3
+                last = calendar.monthrange(y, mo)[1]
+                return date(y, mo, last).isoformat()
+            if kind == "QY":
+                q, y = int(m.group(1)), int(m.group(2))
+                mo = q * 3
                 last = calendar.monthrange(y, mo)[1]
                 return date(y, mo, last).isoformat()
         except (ValueError, calendar.IllegalMonthError):

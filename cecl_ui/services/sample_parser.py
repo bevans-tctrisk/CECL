@@ -113,6 +113,9 @@ _DATE_RX_CANDIDATES: list[tuple[str, str]] = [
     ("YYYYMM",        r"(20\d{2})(\d{2})(?!\d)"),
     ("MM-YYYY",       r"(\d{2})-(20\d{2})"),
     ("MMDDYY",        r"(\d{2})(\d{2})(\d{2})(?!\d)"),
+    # Quarter-end forms: "2025Q4", "2026-Q1", "2026_Q1".
+    ("YYYYQ",         r"(20\d{2})[-_ ]?[Qq]([1-4])(?!\d)"),
+    ("QYYYY",         r"(?<![A-Za-z])[Qq]([1-4])[-_ ]?(20\d{2})(?!\d)"),
     # Month-name forms — the import engine knows how to translate these.
     ("Mon_YYYY",      r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[-_ \.]+(20\d{2})"),
     ("YYYY_Mon",      r"(?i)(20\d{2})[-_ \.]+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"),
@@ -165,6 +168,18 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
                     continue
             except (ValueError, IndexError):
                 continue
+        elif desc == "YYYYQ":
+            try:
+                if not 1 <= int(m.group(2)) <= 4:
+                    continue
+            except (ValueError, IndexError):
+                continue
+        elif desc == "QYYYY":
+            try:
+                if not 1 <= int(m.group(1)) <= 4:
+                    continue
+            except (ValueError, IndexError):
+                continue
         date_pattern = rx
         # Pick the date_format extract_snapshot_date expects. Month-first
         # 3-group patterns use 'MMDDYY' (it handles 2- or 4-digit years).
@@ -174,6 +189,10 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
             date_format = "YYYYMMDD"
         elif desc == "MM-YYYY":
             date_format = "MMYYYY"
+        elif desc == "YYYYQ":
+            date_format = "YYYYQ"
+        elif desc == "QYYYY":
+            date_format = "QYYYY"
         else:
             date_format = "YYYY-MM"
         break
