@@ -6967,6 +6967,40 @@ def step_co_recov():
             _save_state(state)
             return redirect(url_for("setup.step_co_recov"))
 
+        elif action in ("remove_sample_co_file", "remove_sample_recov_file"):
+            list_key = (
+                "co_files" if action == "remove_sample_co_file"
+                else "recov_files"
+            )
+            target_name = (request.form.get("filename") or "").strip()
+            uploads = state.setdefault("sample_uploads", {})
+            current = uploads.get(list_key) or []
+            kept: list[dict[str, Any]] = []
+            removed_path: str | None = None
+            for entry in current:
+                if entry.get("name") == target_name:
+                    removed_path = entry.get("path") or removed_path
+                    continue
+                kept.append(entry)
+            if len(kept) == len(current):
+                flash(f"{target_name}: not found in upload list.", "info")
+            else:
+                uploads[list_key] = kept
+                # Best-effort: delete the staged copy from %TEMP% so the
+                # working area stays tidy. Never fail the request on a
+                # filesystem hiccup.
+                if removed_path:
+                    try:
+                        from pathlib import Path as _P
+                        _p = _P(removed_path)
+                        if _p.exists() and _SAMPLE_DIR in _p.parents:
+                            _p.unlink()
+                    except Exception:  # noqa: BLE001
+                        pass
+                flash(f"Removed {target_name}.", "success")
+            _save_state(state)
+            return redirect(url_for("setup.step_co_recov"))
+
         elif action in ("next", "skip"):
             uploads = state.setdefault("sample_uploads", {})
             uploads["no_recoveries"] = (request.form.get("no_sample_recoveries") == "on")

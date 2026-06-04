@@ -479,9 +479,17 @@
   {% if su.get('co_files') %}
     <div class="upload-status-list">
       {% for f in su['co_files'] %}
-        <div class="upload-status-item">
+        <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
           <span class="upload-status-icon">&#10003;</span>
-          <code>{{ f.name }}</code>
+          <code style="flex:1;">{{ f.name }}</code>
+          <form method="post" style="margin:0;"
+                onsubmit="return confirm('Remove {{ f.name|e }} from this list?');">
+            <input type="hidden" name="action" value="remove_sample_co_file">
+            <input type="hidden" name="filename" value="{{ f.name }}">
+            <button class="btn btn-link" type="submit"
+                    style="padding:0 4px; color:#a33; font-size:12px;"
+                    title="Remove from list">Remove</button>
+          </form>
         </div>
       {% endfor %}
     </div>
@@ -547,9 +555,17 @@
     {% if su.get('recov_files') %}
       <div class="upload-status-list">
         {% for f in su['recov_files'] %}
-          <div class="upload-status-item">
+          <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
             <span class="upload-status-icon">&#10003;</span>
-            <code>{{ f.name }}</code>
+            <code style="flex:1;">{{ f.name }}</code>
+            <form method="post" style="margin:0;"
+                  onsubmit="return confirm('Remove {{ f.name|e }} from this list?');">
+              <input type="hidden" name="action" value="remove_sample_recov_file">
+              <input type="hidden" name="filename" value="{{ f.name }}">
+              <button class="btn btn-link" type="submit"
+                      style="padding:0 4px; color:#a33; font-size:12px;"
+                      title="Remove from list">Remove</button>
+            </form>
           </div>
         {% endfor %}
       </div>
