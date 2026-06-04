@@ -692,6 +692,10 @@
       pools. Leave blank to ignore a label. Rows are pre-populated from
       labels auto-detected on the uploads above &mdash; add or edit as
       needed.
+      {% if label_balance_period %}
+        Balance column shows the value from
+        <strong>{{ label_balance_period }}</strong>.
+      {% endif %}
     </p>
     {# Build label list: union of auto-detected parsed_pool_labels and any
        labels already present in the saved pool_map. Keeps user-typed
@@ -713,15 +717,24 @@
       <thead>
         <tr>
           <th style="text-align:left; padding:4px 10px;">Label in file</th>
+          <th style="text-align:right; padding:4px 10px;">Latest balance</th>
           <th style="text-align:left; padding:4px 10px;">Wizard pool</th>
         </tr>
       </thead>
       <tbody>
         {% for label in pm_labels %}
+          {% set _bal = (label_balances or {}).get(label|lower) %}
           <tr>
             <td style="padding:4px 10px;">
               <input type="text" name="map_label" value="{{ label }}"
                      style="width:280px;">
+            </td>
+            <td style="padding:4px 10px; text-align:right; font-variant-numeric: tabular-nums; color:#444;">
+              {% if _bal is not none %}
+                ${{ '{:,.0f}'.format(_bal) }}
+              {% else %}
+                <span class="muted">&mdash;</span>
+              {% endif %}
             </td>
             <td style="padding:4px 10px;">
               <select name="map_pool" style="width:240px;">
@@ -740,6 +753,9 @@
         <tr>
           <td style="padding:4px 10px;">
             <input type="text" name="map_label" value="" style="width:280px;">
+          </td>
+          <td style="padding:4px 10px; text-align:right;">
+            <span class="muted">&mdash;</span>
           </td>
           <td style="padding:4px 10px;">
             <select name="map_pool" style="width:240px;">
@@ -1022,6 +1038,10 @@
     <p class="muted">
       Map each pool/type label found in the annual files to one of this
       CU&rsquo;s pools. Leave blank to ignore a label.
+      {% if label_balance_period %}
+        Balance column shows the value from
+        <strong>{{ label_balance_period }}</strong>.
+      {% endif %}
     </p>
     {% set _parsed = mb.parsed_pool_labels or [] %}
     {% set _mapped = mb.pool_map.keys()|list %}
@@ -1040,15 +1060,24 @@
       <thead>
         <tr>
           <th style="text-align:left; padding:4px 10px;">Label in file</th>
+          <th style="text-align:right; padding:4px 10px;">Latest balance</th>
           <th style="text-align:left; padding:4px 10px;">Wizard pool</th>
         </tr>
       </thead>
       <tbody>
         {% for label in py_labels %}
+          {% set _bal = (label_balances or {}).get(label|lower) %}
           <tr>
             <td style="padding:4px 10px;">
               <input type="text" name="map_label" value="{{ label }}"
                      style="width:280px;">
+            </td>
+            <td style="padding:4px 10px; text-align:right; font-variant-numeric: tabular-nums; color:#444;">
+              {% if _bal is not none %}
+                ${{ '{:,.0f}'.format(_bal) }}
+              {% else %}
+                <span class="muted">&mdash;</span>
+              {% endif %}
             </td>
             <td style="padding:4px 10px;">
               <select name="map_pool" style="width:240px;">
@@ -1066,6 +1095,9 @@
         <tr>
           <td style="padding:4px 10px;">
             <input type="text" name="map_label" value="" style="width:280px;">
+          </td>
+          <td style="padding:4px 10px; text-align:right;">
+            <span class="muted">&mdash;</span>
           </td>
           <td style="padding:4px 10px;">
             <select name="map_pool" style="width:240px;">

@@ -2805,11 +2805,58 @@ def step5_monthly_bal():
     if not pool_choices:
         pool_choices = sorted({v for v in (state.get("pool_map") or {}).values() if v})
 
+    # Compute latest balance per parsed label for the Pool Label Mapping
+    # table (helps users decide which pool to map each label to).  Same
+    # data the runtime aggregator uses, just with no label_to_pool so we
+    # can read raw_rows directly. Always wrapped in try/except — never
+    # break the page render on a parser hiccup.
+    label_balances: dict[str, float] = {}
+    label_balance_period: str = ""
+    try:
+        src = (mb.get("source") or "").strip()
+        if src == "per_month":
+            files = mb.get("monthly_files") or []
+            layout = mb.get("per_month_layout") or {}
+            if files and layout:
+                res = monthly_bal_parser.pool_balances_for_per_month_files(
+                    files, layout, label_to_pool=None,
+                )
+                by_period = (res or {}).get("by_period") or {}
+                if by_period:
+                    latest = max(by_period.keys())
+                    label_balance_period = latest
+                    for row in (by_period[latest].get("raw_rows") or []):
+                        lab = (row.get("label") or "").strip()
+                        bal = row.get("balance")
+                        if lab and isinstance(bal, (int, float)):
+                            label_balances[lab.lower()] = float(bal)
+        elif src == "per_year":
+            files = mb.get("year_files") or []
+            layout = mb.get("per_year_layout") or {}
+            if files and layout:
+                res = monthly_bal_parser.pool_balances_for_per_year_files(
+                    files, layout, label_to_pool=None,
+                )
+                by_period = (res or {}).get("by_period") or {}
+                if by_period:
+                    latest = max(by_period.keys())
+                    label_balance_period = latest
+                    for row in (by_period[latest].get("raw_rows") or []):
+                        lab = (row.get("label") or "").strip()
+                        bal = row.get("balance")
+                        if lab and isinstance(bal, (int, float)):
+                            label_balances[lab.lower()] = float(bal)
+    except Exception:  # noqa: BLE001
+        label_balances = {}
+        label_balance_period = ""
+
     return render_template(
         "setup/step5_monthly_bal.html",
         mb=mb,
         pool_choices=pool_choices,
         has_warm=has_warm,
+        label_balances=label_balances,
+        label_balance_period=label_balance_period,
         **_wizard_ctx("monthly_bal"),
     )
 
