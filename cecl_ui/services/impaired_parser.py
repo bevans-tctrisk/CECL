@@ -518,7 +518,16 @@ def _build_loan_index(loan_path: str | Path,
         return index
 
     mode = (ma.get("mode") or "fixed_suffix").lower()
-    suffix_len = int(ma.get("suffix_length") or 3)
+    # Honour an explicit suffix_length=0 (combined-fixed mode where the
+    # member-number column already holds the full account, no suffix).
+    # Plain ``int(... or 3)`` would silently override 0 -> 3 because 0 is
+    # falsy in Python; that produced phantom mismatches against impaired
+    # files for CUs configured with combined-fixed/no-suffix accounts.
+    _sl_raw = ma.get("suffix_length")
+    try:
+        suffix_len = int(_sl_raw) if _sl_raw is not None else 3
+    except (TypeError, ValueError):
+        suffix_len = 3
     delim = ma.get("delimiter") or "-"
 
     def _grade_for(score: Any) -> str:

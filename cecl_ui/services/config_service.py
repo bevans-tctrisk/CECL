@@ -417,9 +417,16 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             block["member_col"] = int(src["member_col"])
         ma_src = src.get("member_account") or {}
         if ma_src:
+            # Honour explicit suffix_length=0 (CUs whose member-number
+            # column already holds the full account, no separate suffix).
+            _sl_src = ma_src.get("suffix_length")
+            try:
+                _sl_int = int(_sl_src) if _sl_src is not None else 3
+            except (TypeError, ValueError):
+                _sl_int = 3
             block["member_account"] = {
                 "mode": ma_src.get("mode") or "split",
-                "suffix_length": int(ma_src.get("suffix_length") or 3),
+                "suffix_length": _sl_int,
                 "delimiter": ma_src.get("delimiter") or "-",
             }
         hff[dst_key] = block

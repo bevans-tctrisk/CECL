@@ -527,7 +527,14 @@ def derive_member_account(df, config, has_header):
     if mode == 'split' and col_map.get('loan_suffix'):
         suffix_raw = _clean_id_series(_col('loan_suffix'))
         # Pad suffix to 3 chars by default (match historical convention).
-        pad_len = int(ma.get('suffix_length') or 3)
+        # Honour explicit suffix_length=0 (caller wants the suffix used
+        # verbatim with no zero-pad). Plain ``or 3`` would silently flip
+        # 0 back to 3 because 0 is falsy in Python.
+        _sl_raw = ma.get('suffix_length')
+        try:
+            pad_len = int(_sl_raw) if _sl_raw is not None else 3
+        except (TypeError, ValueError):
+            pad_len = 3
         suffix_padded = suffix_raw.str.zfill(pad_len) if pad_len > 0 else suffix_raw
         full = member_raw + suffix_padded
         return member_raw, full

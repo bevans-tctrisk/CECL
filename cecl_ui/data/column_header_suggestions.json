@@ -2,7 +2,7 @@
   "field_to_header_counts": {
     "current_balance": {
       "bal": 2,
-      "book_balance": 2,
+      "book_balance": 3,
       "cc last stmt bal": 10,
       "current bal": 3,
       "current balance": 2,
@@ -15,7 +15,7 @@
       "days delinquent": 6,
       "days dq": 3,
       "days past due": 2,
-      "days_past_due": 2,
+      "days_past_due": 3,
       "delinquent days count": 8,
       "dlq_days": 2,
       "inv": 8,
@@ -29,12 +29,12 @@
       "interest rate": 2,
       "interest rate (apr)": 6,
       "interest rate code": 3,
-      "noteintrate": 2,
+      "noteintrate": 3,
       "rate": 8
     },
     "loan_pool_code": {
       "col_cd": 2,
-      "currmiaccttypcd": 2,
+      "currmiaccttypcd": 3,
       "loan collateral code": 5,
       "loan purpose": 8,
       "loan type": 32,
@@ -53,7 +53,7 @@
       "account #": 3,
       "account number": 18,
       "acct nbr": 10,
-      "acctnbr": 2,
+      "acctnbr": 3,
       "acn": 2,
       "loan#": 8,
       "member name": 16,
@@ -62,7 +62,7 @@
     },
     "open_date": {
       "card open date": 8,
-      "contractdate": 2,
+      "contractdate": 3,
       "date of loan": 6,
       "loan original date": 29,
       "orig_ln_dt": 2,
@@ -70,14 +70,14 @@
       "origination date": 2
     },
     "original_fico_score": {
-      "application_creditscore": 2,
+      "application_creditscore": 3,
       "credit score": 43,
       "fico": 3,
       "inv": 8,
       "user_defined_field_7": 2
     },
     "original_loan_amount": {
-      "finalloanamount": 2,
+      "finalloanamount": 3,
       "loan original amnt": 16,
       "loan#": 8,
       "orig nbr pymts": 13,
@@ -88,7 +88,7 @@
     "total_available_credit": {
       "credit limit": 45,
       "credit line amount": 8,
-      "creditlimitamt": 2,
+      "creditlimitamt": 3,
       "limit": 3,
       "ln_limit": 2
     }
@@ -164,6 +164,6 @@
     "type of mortgage": "Type of Mortgage",
     "user_defined_field_7": "User_Defined_Field_7"
   },
-  "updated_at": "2026-06-04T18:46:30",
+  "updated_at": "2026-06-04T20:23:08",
   "version": 1
 }
