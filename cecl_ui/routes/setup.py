@@ -1799,6 +1799,69 @@ def step5_monthly_bal():
     mb.setdefault("source", "single")
     # Per-month-file mode: each entry is {filename, saved_path, period}.
     mb.setdefault("monthly_files", [])
+    # Passive re-analyse for per_month mode: if the user uploaded files
+    # before the parser knew about their balance-sheet flavour (e.g. a
+    # GL-style sheet with "LOANS TO MEMBERS" instead of just "LOANS"),
+    # ``parsed_pool_labels`` may still be empty even though files exist.
+    # Re-run analysis on each saved file once and merge its labels in.
+    # Never overwrites an existing pool_map entry the user has set.
+    if (mb.get("source") or "single") == "per_month":
+        _pm_files = [e for e in (mb.get("monthly_files") or [])
+                     if e.get("saved_path")]
+        if _pm_files and not (mb.get("parsed_pool_labels") or []):
+            _seen_labels: list[str] = []
+            _seen_set: set[str] = set()
+            _pm_layout = mb.get("per_month_layout") or {}
+            for _e in _pm_files:
+                try:
+                    _r = monthly_bal_parser.analyse_per_month_file(
+                        _e.get("saved_path") or "")
+                except Exception:  # noqa: BLE001
+                    continue
+                if not _r.get("ok"):
+                    continue
+                # Adopt layout defaults from first successful analyse if
+                # the user-saved layout has blanks.
+                if not _pm_layout.get("sheet") and _r.get("sheet"):
+                    _pm_layout["sheet"] = _r.get("sheet") or ""
+                if not _pm_layout.get("label_col") and _r.get("pool_name_col"):
+                    _pm_layout["label_col"] = _r.get("pool_name_col") or ""
+                if not _pm_layout.get("balance_col") and _r.get("balance_col"):
+                    _pm_layout["balance_col"] = _r.get("balance_col") or ""
+                if not _pm_layout.get("header_row") and _r.get("header_row"):
+                    _pm_layout["header_row"] = int(_r.get("header_row") or 0)
+                for _lbl in (_r.get("parsed_pool_labels") or []):
+                    if _lbl and _lbl not in _seen_set:
+                        _seen_set.add(_lbl)
+                        _seen_labels.append(_lbl)
+            if _seen_labels:
+                mb["parsed_pool_labels"] = _seen_labels
+                mb["per_month_layout"] = _pm_layout
+                # Seed pool_map suggestions from any existing WARM mapping.
+                _combined_pm: dict[str, str] = {}
+                for _k, _v in (state.get("balance_title_map") or {}).items():
+                    if _k:
+                        _combined_pm[_k] = (_v or "")
+                _hpm_pm = state.get("hist_pool_map") or {}
+                for _k, _v in (_hpm_pm.get("mapping") or {}).items():
+                    if _k and _k not in _combined_pm:
+                        _combined_pm[_k] = (_v or "")
+                if _combined_pm:
+                    _seeded_pm, _status_pm = monthly_bal_parser.seed_pool_map(
+                        _seen_labels, _combined_pm,
+                    )
+                    _existing_pm = mb.get("pool_map") or {}
+                    for _lbl, _pool in _seeded_pm.items():
+                        if not _existing_pm.get(_lbl) and _pool:
+                            _existing_pm[_lbl] = _pool
+                    mb["pool_map"] = _existing_pm
+                    _cur_status_pm = mb.get("label_status") or {}
+                    for _lbl, _st in _status_pm.items():
+                        if (mb.get("pool_map") or {}).get(_lbl) and \
+                                _cur_status_pm.get(_lbl) != "matched":
+                            _cur_status_pm[_lbl] = _st
+                    mb["label_status"] = _cur_status_pm
+                _save_state(state)
     # Common layout across all per-month files (so the user only specifies
     # sheet / label-col / balance-col / header-row once). Leave values
     # empty so the upload_per_month auto-detect can fill them; the

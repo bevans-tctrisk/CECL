@@ -664,7 +664,33 @@ def pool_balances_for_latest_period(
 # pool_name_col / parsed_pool_labels) plus a couple of per-month extras
 # (``balance_col`` and ``detected_period``).
 
-_LOAN_SECTION_PATTERNS = ("loans", "loan portfolio", "loan balances")
+_LOAN_SECTION_PATTERNS = (
+    "loans",
+    "loan portfolio",
+    "loan balances",
+    "loans to members",
+    "loans to member",
+    "member loans",
+    "member loan accounts",
+    "loans receivable",
+    "loan receivable",
+    "loan accounts",
+    "total loans to members",
+    "loans and leases",
+    "loans & leases",
+)
+# Substring fallback when no exact match was found. We only trip on
+# strings that START WITH one of these phrases so detail rows like
+# "Auto Loans" / "Used Auto Loans" don't accidentally anchor the
+# section.
+_LOAN_SECTION_START_PREFIXES = (
+    "loans to ",
+    "loans receivable",
+    "loan accounts",
+    "member loans",
+    "loans and leases",
+    "loans & leases",
+)
 # Exact-match section-end phrases (lower-cased, stripped).
 _LOAN_SECTION_END = (
     "total loans", "net loans", "total loan", "accounts receivable",
@@ -788,16 +814,26 @@ def _looks_like_money(v: Any) -> bool:
 def _find_loan_section(rows: list[list[Any]]) -> int | None:
     """Return 0-based row index where a 'LOANS' section header sits, or
     ``None``. Match cell strings exactly equal to a known phrase (after
-    lower/strip) to avoid grabbing 'Auto Loans' detail rows.
+    lower/strip) to avoid grabbing 'Auto Loans' detail rows. Falls back
+    to a starts-with match against ``_LOAN_SECTION_START_PREFIXES`` when
+    no exact match is found, which catches phrasings like ``LOANS TO
+    MEMBERS`` (common on credit-union GL-style balance sheets).
     """
+    fallback: int | None = None
     for r, row in enumerate(rows):
         for v in row:
             if not isinstance(v, str):
                 continue
             s = v.strip().lower()
+            if not s:
+                continue
             if s in _LOAN_SECTION_PATTERNS:
                 return r
-    return None
+            if fallback is None and any(
+                s.startswith(p) for p in _LOAN_SECTION_START_PREFIXES
+            ):
+                fallback = r
+    return fallback
 
 
 def _detect_period_from_rows(rows: list[list[Any]]) -> date | None:

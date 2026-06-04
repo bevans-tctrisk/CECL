@@ -2,6 +2,7 @@
   "field_to_header_counts": {
     "current_balance": {
       "bal": 2,
+      "book_balance": 1,
       "cc last stmt bal": 10,
       "current bal": 3,
       "current balance": 2,
@@ -14,6 +15,7 @@
       "days delinquent": 6,
       "days dq": 3,
       "days past due": 2,
+      "days_past_due": 1,
       "delinquent days count": 8,
       "dlq_days": 2,
       "inv": 8,
@@ -27,10 +29,12 @@
       "interest rate": 2,
       "interest rate (apr)": 6,
       "interest rate code": 3,
+      "noteintrate": 1,
       "rate": 8
     },
     "loan_pool_code": {
       "col_cd": 2,
+      "currmiaccttypcd": 1,
       "loan collateral code": 5,
       "loan purpose": 8,
       "loan type": 32,
@@ -49,6 +53,7 @@
       "account #": 3,
       "account number": 18,
       "acct nbr": 10,
+      "acctnbr": 1,
       "acn": 2,
       "loan#": 8,
       "member name": 16,
@@ -57,6 +62,7 @@
     },
     "open_date": {
       "card open date": 8,
+      "contractdate": 1,
       "date of loan": 6,
       "loan original date": 29,
       "orig_ln_dt": 2,
@@ -64,12 +70,14 @@
       "origination date": 2
     },
     "original_fico_score": {
+      "application_creditscore": 1,
       "credit score": 43,
       "fico": 3,
       "inv": 8,
       "user_defined_field_7": 2
     },
     "original_loan_amount": {
+      "finalloanamount": 1,
       "loan original amnt": 16,
       "loan#": 8,
       "orig nbr pymts": 13,
@@ -80,6 +88,7 @@
     "total_available_credit": {
       "credit limit": 45,
       "credit line amount": 8,
+      "creditlimitamt": 1,
       "limit": 3,
       "ln_limit": 2
     }
@@ -88,30 +97,38 @@
     "account #": "Account #",
     "account number": "Account Number",
     "acct nbr": "ACCT NBR",
+    "acctnbr": "ACCTNBR",
     "acn": "acn",
     "annual rate 1": "Annual Rate 1",
+    "application_creditscore": "APPLICATION_CREDITSCORE",
     "bal": "bal",
+    "book_balance": "BOOK_BALANCE",
     "card account number": "Card Account Number",
     "card open date": "Card Open Date",
     "cash annual interest rate": "Cash Annual Interest Rate",
     "cc last stmt bal": "CC LAST STMT BAL",
     "cc note last 4": "CC Note Last 4",
     "col_cd": "col_cd",
+    "contractdate": "CONTRACTDATE",
     "credit limit": "CREDIT LIMIT",
     "credit line amount": "Credit Line Amount",
     "credit score": "CREDIT SCORE",
+    "creditlimitamt": "CREDITLIMITAMT",
     "current bal": "Current Bal",
     "current balance": "Current Balance",
     "current balance amount": "Current Balance Amount",
     "current loan balance": "Current Loan Balance",
+    "currmiaccttypcd": "CURRMIACCTTYPCD",
     "currupb": "CURRUPB",
     "date of loan": "Date of Loan",
     "days delinquent": "Days Delinquent",
     "days dq": "Days DQ",
     "days past due": "Days past due",
+    "days_past_due": "DAYS_PAST_DUE",
     "delinquent days count": "Delinquent Days Count",
     "dlq_days": "dlq_days",
     "fico": "FICO",
+    "finalloanamount": "FinalLoanAmount",
     "int_rate": "int_rate",
     "interest rate": "Interest Rate",
     "interest rate (apr)": "Interest Rate (APR)",
@@ -132,6 +149,7 @@
     "member close date": "Member Close Date",
     "member name": "Member Name",
     "member's name (last, first, middle initial)": "Member's Name (Last, First, Middle Initial)",
+    "noteintrate": "NOTEINTRATE",
     "om sys - prin number": "OM SYS - PRIN Number",
     "orig nbr pymts": "ORIG NBR PYMTS",
     "orig_ln_amt": "orig_ln_amt",
@@ -146,6 +164,6 @@
     "type of mortgage": "Type of Mortgage",
     "user_defined_field_7": "User_Defined_Field_7"
   },
-  "updated_at": "2026-06-03T20:21:36",
+  "updated_at": "2026-06-04T17:55:27",
   "version": 1
 }
