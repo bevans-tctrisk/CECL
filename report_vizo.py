@@ -220,6 +220,46 @@ def _all_grades(grades, no_score):
     return [g['label'] for g in grades] + hidden[:n_hidden] + [no_score]
 
 
+def _brr_grade_labels(config, no_score):
+    """Return ordered Business Risk Rating labels (with no_score appended).
+
+    Returns ``None`` when the CU has no BRR config so callers can fall
+    through to the FICO-grade list. Mirrors the helper in report_tct.py.
+    """
+    rows = config.get('business_risk_ratings') or []
+    out: list[str] = []
+    seen: set[str] = set()
+    for r in rows:
+        lbl = str((r or {}).get('label') or '').strip()
+        if not lbl:
+            continue
+        key = lbl.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(lbl)
+    if not out:
+        return None
+    if no_score not in out:
+        out.append(no_score)
+    return out
+
+
+def _brr_pools_set(config):
+    """Set of pool names (lower-cased) flagged ``brr: true`` in config."""
+    return {
+        str((p or {}).get('name', '')).strip().lower()
+        for p in (config.get('pools') or [])
+        if (p or {}).get('brr') and (p or {}).get('name')
+    }
+
+
+def _is_brr_pool(pool, brr_pool_lcs):
+    if not brr_pool_lcs:
+        return False
+    return str(pool or '').strip().lower() in brr_pool_lcs
+
+
 def _is_hidden(label):
     return label.lower().startswith('hide') if label else False
 
@@ -1437,9 +1477,24 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
 def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hist=None):
     """Risk Change matrix sheet – used for both total and per-pool."""
     no_score = config.get('no_score_label', 'Not Reported')
-    gl = [g for g in _all_grades(grades, no_score) if not _is_hidden(g)]
-    matrix = risk_change_matrix(data_df, grades, no_score)
-    rng = _grade_ranges(grades, no_score)
+    # BRR detection: when this per-pool sheet is for a BRR-flagged pool,
+    # replace the FICO labels with the analyst-defined Business Risk Rating
+    # labels so rows/columns reflect the rating bands instead of FICO bands.
+    _brr_labels_full = _brr_grade_labels(config, no_score)
+    _brr_pool_lcs = _brr_pools_set(config) if _brr_labels_full else set()
+    _is_brr = (
+        pool_name is not None
+        and _brr_labels_full
+        and _is_brr_pool(pool_name, _brr_pool_lcs)
+    )
+    if _is_brr:
+        gl = [g for g in _brr_labels_full if not _is_hidden(g)]
+        matrix = risk_change_matrix(data_df, grades, no_score, labels=_brr_labels_full)
+        rng = {}
+    else:
+        gl = [g for g in _all_grades(grades, no_score) if not _is_hidden(g)]
+        matrix = risk_change_matrix(data_df, grades, no_score)
+        rng = _grade_ranges(grades, no_score)
     total = data_df['current_balance'].sum()
 
     # Resolve per-pool or grand-total DQ/CO data
@@ -2058,6 +2113,12 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     gl = _all_grades(grades, no_score)
     # Filter out hidden grades for display
     visible_gl = [g for g in gl if not _is_hidden(g)]
+    # Business Risk Rating support: pools flagged ``brr: true`` in config
+    # render with BRR labels (Pass / Special Mention / ...) instead of
+    # the firm-wide FICO grades. ``brr_labels`` is None when the CU has
+    # no BRR rules — every pool then uses ``visible_gl`` (legacy path).
+    brr_labels = _brr_grade_labels(config, no_score)
+    brr_pool_lcs = _brr_pools_set(config) if brr_labels else set()
 
     # WARM-sourced ACL data (if available)
     _imp = hist.get('impaired', {}) if hist else {}
@@ -2245,8 +2306,23 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
 
         if is_rr:
             # ── Risk-rated pool: show per-grade detail ──
+            # BRR-flagged pools render their analyst-defined rating
+            # labels; non-BRR pools render the firm-wide FICO grades.
+            # ``df['current_grade']`` is BRR-graded by ``calculate_cecl``
+            # for BRR pool loans so per-grade balance aggregation Just
+            # Works below via ``pdf['current_grade'] == g``.
+            pool_grade_labels = (
+                brr_labels if _is_brr_pool(pool, brr_pool_lcs)
+                else visible_gl
+            )
             pool_allow_before = 0
-            for gi, g in enumerate(visible_gl):
+            # Track per-grade sums so BRR pools can derive the Total row
+            # from rendered per-grade values. _bal_detail's Total entry
+            # is keyed off FICO grades and would only capture the
+            # unmapped portion of a BRR pool.
+            pool_grade_balance_sum = 0
+            pool_grade_spec_id_sum = 0
+            for gi, g in enumerate(pool_grade_labels):
                 fnt = _grade_font(g)
 
                 # Try WARM data first
@@ -2323,10 +2399,18 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
                 ws.cell(row=r, column=8, value=allow_before).number_format = ACCT
                 ws.cell(row=r, column=8).font = fnt
                 r += 1
+                pool_grade_balance_sum += balance or 0
+                pool_grade_spec_id_sum += specific_id or 0
 
             # Pool total row – use sum of per-grade allowances we computed above
+            _is_brr = _is_brr_pool(pool, brr_pool_lcs)
             _ptd = _bal_detail.get(pool, {}).get('Total', {})
-            if _ptd and _ptd.get('balance_sheet_total'):
+            if _is_brr:
+                # BRR pool: sum the per-grade balances we just rendered.
+                # The _bal_detail Total entry is built around FICO grades
+                # and would only capture the Not Reported portion.
+                total_balance = pool_grade_balance_sum
+            elif _ptd and _ptd.get('balance_sheet_total'):
                 total_balance = _ptd['balance_sheet_total']
             elif warm_total:
                 total_balance = warm_total.get('balance', pool_total)
@@ -2339,10 +2423,13 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             grand_allow_before += pool_allow_before_out
             grand_env_allow += env_allow
 
-            total_spec_id = warm_total.get('spec_id', 0) if warm_total else 0
-            # Override from Impaired Loans detail if WARM had 0
-            if total_spec_id == 0 and pool in spec_id_by_pool:
-                total_spec_id = sum(spec_id_by_pool[pool].values())
+            if _is_brr:
+                total_spec_id = pool_grade_spec_id_sum
+            else:
+                total_spec_id = warm_total.get('spec_id', 0) if warm_total else 0
+                # Override from Impaired Loans detail if WARM had 0
+                if total_spec_id == 0 and pool in spec_id_by_pool:
+                    total_spec_id = sum(spec_id_by_pool[pool].values())
             total_calc_bal = total_balance - total_spec_id
 
             ws.cell(row=r, column=1, value="Total").font = V12B
@@ -2708,6 +2795,12 @@ def _sheet_loss_factor(wb, cu, snap, df, grades, config, hist):
     no_score = config.get('no_score_label', 'Not Reported')
     gl = [g for g in _all_grades(grades, no_score) if not _is_hidden(g)]
 
+    # BRR support: pools flagged with brr=True render their analyst-defined
+    # business-risk-rating labels (Pass/Special Mention/...) instead of
+    # FICO grades for their per-grade rows.
+    brr_labels = _brr_grade_labels(config, no_score)
+    brr_pool_lcs = _brr_pools_set(config) if brr_labels else set()
+
     pools = _ordered_pools(df, hist)
 
     co_data = hist.get('chargeoffs', {}) if hist else {}
@@ -2901,7 +2994,13 @@ def _sheet_loss_factor(wb, cu, snap, df, grades, config, hist):
             ws.row_dimensions[r].height = 6.0
             continue
 
-        for gi, g in enumerate(gl):
+        # BRR-flagged pools render BRR labels (Highest-Excellent / Good / ...);
+        # non-BRR pools use the firm-wide FICO list.
+        pool_grade_labels = (
+            brr_labels if (brr_labels and _is_brr_pool(pool, brr_pool_lcs))
+            else gl
+        )
+        for gi, g in enumerate(pool_grade_labels):
             r += 1
             fnt = _grade_font(g)
             g_df = pdf[pdf['current_grade'] == g]
@@ -3819,6 +3918,12 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
     no_score = config.get('no_score_label', 'Not Reported')
     all_gl = [g for g in _all_grades(grades, no_score) if not _is_hidden(g)]
 
+    # BRR support: pools flagged with brr=True render their analyst-defined
+    # business-risk-rating labels (Highest-Excellent / Good / ...) under a
+    # "Current Risk Rating" header instead of FICO grades.
+    brr_labels = _brr_grade_labels(config, no_score)
+    brr_pool_lcs = _brr_pools_set(config) if brr_labels else set()
+
     # 8pt fonts for compact layout (12 months per printed page)
     F8B = V8B
     F8  = V8
@@ -3970,8 +4075,14 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
             continue
 
         # ── Risk-rated pool: full grade breakdown ──
-        # Date header row: "Current Grade" + date values + summary headers
-        ws.cell(row=r, column=1, value="Current Grade").font = F8B
+        # BRR pools render under "Current Risk Rating" with BRR labels;
+        # non-BRR pools use "Current Grade" with FICO labels.
+        _is_brr = bool(brr_labels) and _is_brr_pool(pool, brr_pool_lcs)
+        pool_grade_labels = brr_labels if _is_brr else all_gl
+        header_label = "Current Risk Rating" if _is_brr else "Current Grade"
+
+        # Date header row
+        ws.cell(row=r, column=1, value=header_label).font = F8B
         for di, dt in enumerate(pdates):
             c = ws.cell(row=r, column=DATE_COL_START + di, value=dt)
             c.number_format = 'mmm\\-yy'
@@ -3987,7 +4098,7 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
 
         # Grade rows with alternating fill
         grade_start = r
-        for gi, g in enumerate(all_gl):
+        for gi, g in enumerate(pool_grade_labels):
             fnt = _grade_font8(g)
             ws.cell(row=r, column=1, value=g).font = fnt
             # Alternating row fill
@@ -4017,10 +4128,10 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
         ws.cell(row=grade_start, column=warm_col, value=pool_acl_val).font = F8
         ws.cell(row=grade_start, column=warm_col).alignment = Alignment(
             horizontal='center', vertical='center')
-        if len(all_gl) > 0:
+        if len(pool_grade_labels) > 0:
             ws.merge_cells(
                 start_row=grade_start, start_column=warm_col,
-                end_row=grade_start + len(all_gl), end_column=warm_col)
+                end_row=grade_start + len(pool_grade_labels), end_column=warm_col)
 
         # Total row (always shaded – darker)
         ws.cell(row=r, column=1, value="Total").font = F8B

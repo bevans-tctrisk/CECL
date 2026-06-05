@@ -215,6 +215,23 @@
         {{ field('total_available_credit', 'Total available credit') }}
       </div>
 
+      <div class="form-row">
+        {{ field('business_risk_rating',
+                 'Business Risk Rating') }}
+        <div>
+          <p class="help" style="margin:6px 0 0;">
+            Required only when this CU has one or more pools marked
+            <strong>&ldquo;Yes &mdash; broken out by Business RR&rdquo;</strong>
+            on the <a href="{{ url_for('setup.step4_pools') }}">Loan
+            Pools</a> step. Each loan in a business-risk-rated pool is
+            bucketed using this column's value, matched against the
+            criteria defined on the <a href="{{ url_for('setup.step5_grades') }}">Credit
+            Grades and Business Risk Ratings</a> step. Loans in
+            credit-grade pools ignore this column.
+          </p>
+        </div>
+      </div>
+
       {% if fv.sample_rows %}
         <details style="margin-top:12px;">
           <summary><strong>Sample preview &mdash;

@@ -1018,6 +1018,23 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
         'loan_pool': map_pool_codes(col('loan_pool_code'), config),
     })
 
+    # Optional Business Risk Rating value (raw column content). The
+    # report engine routes this through ``cecl_engine.assign_business_risk_grade``
+    # when the loan's pool is flagged ``brr: true`` in the CU's YAML.
+    # Stored as text so analyst-defined rating labels (e.g. "Pass",
+    # "Special Mention") survive intact alongside numeric ratings.
+    if col_map.get('business_risk_rating') or 'business_risk_rating' in col_map:
+        try:
+            brr_series = col('business_risk_rating').astype(str).str.strip()
+            brr_series = brr_series.where(
+                ~brr_series.isin(('', 'nan', 'NaN', 'None')), None
+            )
+            clean_data['business_risk_rating'] = brr_series
+        except KeyError:
+            clean_data['business_risk_rating'] = None
+    else:
+        clean_data['business_risk_rating'] = None
+
     # When original FICO is 0 but current is known, treat as unchanged (WARM convention)
     mask = (clean_data['original_fico_score'] == 0) & (clean_data['current_fico_score'] > 0)
     if mask.any():
@@ -1031,6 +1048,25 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
         return 0
 
     with engine.begin() as conn:
+        # Make sure the optional ``business_risk_rating`` column exists on
+        # the table. The schema was originally created implicitly by
+        # ``to_sql(if_exists='append')`` on the first import; adding the
+        # column here as an idempotent ALTER lets pre-existing CECL
+        # databases pick up BRR support without a manual migration step.
+        # Postgres ``ADD COLUMN IF NOT EXISTS`` is a no-op when present.
+        try:
+            conn.execute(text(
+                "ALTER TABLE monthly_loan_data "
+                "ADD COLUMN IF NOT EXISTS business_risk_rating TEXT"
+            ))
+        except Exception as alter_err:  # pragma: no cover - safety net
+            # If the dialect doesn't speak IF NOT EXISTS (rare; e.g.
+            # SQLite < 3.35) we'd rather log + drop the BRR column from
+            # the DataFrame than block the whole import.
+            print(f"    [warn] could not ensure business_risk_rating column: {alter_err}")
+            if 'business_risk_rating' in clean_data.columns:
+                clean_data = clean_data.drop(columns=['business_risk_rating'])
+
         # Scope the pre-insert delete to only the pools represented in this
         # file. With multi-file imports (e.g. AIRES extract + a separate
         # VISA/credit-card extract for the same snapshot), an unconditional

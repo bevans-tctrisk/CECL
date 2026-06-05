@@ -193,6 +193,11 @@ def load_loans(cu, snap=None, config=None):
                          engine, params={"c": cu, "s": snap})
     else:
         df = pd.read_sql(text("SELECT * FROM monthly_loan_data WHERE credit_union=:c"), engine, params={"c": cu})
+    # Older databases may predate the Business Risk Rating column. Surface
+    # it as an all-None column so downstream BRR-aware code can rely on
+    # the field existing without doing its own column-check.
+    if 'business_risk_rating' not in df.columns:
+        df['business_risk_rating'] = None
     return _apply_excluded_pools(df, config)
 
 
@@ -215,6 +220,60 @@ def _apply_excluded_pools(df, config):
     if not mask.any():
         return df
     return df.loc[~mask].copy()
+
+def _load_prior_brr_lookup(cu, snap, brr_pools):
+    """Return ``{member_number_str: prior_business_risk_rating}`` for
+    BRR-flagged pool loans at the most recent snapshot strictly before
+    ``snap`` for ``cu``. Empty dict on the very first report (no prior
+    snapshot) or when no BRR pools are configured.
+
+    Used by the per-loan BRR migration logic so the Risk Change tab can
+    show quarter-over-quarter rating movement for business pools.
+    """
+    if not brr_pools or snap is None:
+        return {}
+    try:
+        with engine.connect() as c:
+            row = c.execute(
+                text(
+                    "SELECT MAX(snapshot_date) FROM monthly_loan_data "
+                    "WHERE credit_union=:cu AND snapshot_date < :snap"
+                ),
+                {"cu": cu, "snap": snap},
+            ).fetchone()
+            prior = row[0] if row and row[0] else None
+            if not prior:
+                return {}
+            rows = c.execute(
+                text(
+                    "SELECT member_number, business_risk_rating "
+                    "FROM monthly_loan_data "
+                    "WHERE credit_union=:cu AND snapshot_date=:prior "
+                    "AND loan_pool = ANY(:pools) "
+                    "AND business_risk_rating IS NOT NULL"
+                ),
+                {
+                    "cu": cu,
+                    "prior": str(prior),
+                    "pools": list(brr_pools),
+                },
+            ).fetchall()
+            print(f"    Prior BRR snapshot: {prior} ({len(rows)} loan(s))")
+    except Exception as exc:
+        print(f"    [warn] prior-BRR lookup failed: {exc}")
+        return {}
+    lookup = {}
+    for member, brr in rows:
+        if member is None:
+            continue
+        key = str(member).strip()
+        if not key:
+            continue
+        # Last write wins on duplicate member_number — should be rare
+        # since member_number is the full account string.
+        lookup[key] = brr
+    return lookup
+
 
 def latest_date(cu):
     with engine.connect() as c:
@@ -1851,10 +1910,15 @@ def _warm_parse_hist_bal(rows):
 
     Returns (hist_bal_data, pool_order, risk_rated). Each pool block is:
         Row N:   pool name in col A
-        Row N+1: 'Current Grade' in col A; dates in cols C..  (col B blank)
+        Row N+1: 'Current Grade' OR 'Current Risk Rating' in col A;
+                 dates in cols C..  (col B blank)
         Row N+2..: grade label in col A, balance values in same cols as dates
         Row M:   'Total' in col A, balance values
         Row M+1: blank spacer
+
+    Pools with a 'Current Risk Rating' header use BRR labels
+    (Highest-Excellent / Good / Acceptable / Minimum / Watch /
+    Substandard-Loss / Not Reported) instead of FICO grades.
     """
     hist_bal_data = {}
     pool_order = []
@@ -1871,8 +1935,8 @@ def _warm_parse_hist_bal(rows):
         a_s = str(a).strip()
         # Skip header / metadata rows
         low = a_s.lower()
-        if low in ('current grade', 'total', 'balance', 'grand total',
-                   'excluded', 'exclude') \
+        if low in ('current grade', 'current risk rating', 'total',
+                   'balance', 'grand total', 'excluded', 'exclude') \
            or low.startswith(('for period', 'loss factor', 'allowance',
                               'charge off', 'tongass', 'siskiyou')) \
            or any(low.startswith(p) for p in ('hide', 'minimum', 'maximum',
@@ -1880,11 +1944,14 @@ def _warm_parse_hist_bal(rows):
             r += 1
             continue
 
-        # Need a 'Current Grade' row immediately below to qualify as a pool
+        # Need a 'Current Grade' or 'Current Risk Rating' row immediately
+        # below to qualify as a pool. BRR-flagged pools (e.g. Commercial)
+        # use the Risk Rating header with BRR labels in the rows below.
         if r + 1 >= n:
             break
         next_a = (rows[r + 1] or [None])[0]
-        if not next_a or str(next_a).strip() != 'Current Grade':
+        next_a_s = str(next_a).strip() if next_a is not None else ''
+        if next_a_s not in ('Current Grade', 'Current Risk Rating'):
             r += 1
             continue
 
@@ -2259,7 +2326,7 @@ def load_prior_tct_hist_bal(config, snap):
                 e_val = row[4] if len(row) > 4 else None
                 f_val = row[5] if len(row) > 5 else None
                 i_val = row[8] if len(row) > 8 else None
-                if label == 'Current Grade':
+                if label in ('Current Grade', 'Current Risk Rating'):
                     continue
                 if label == 'Total':
                     if current_pool and i_val is not None:
@@ -2277,7 +2344,8 @@ def load_prior_tct_hist_bal(config, snap):
                     if mgmt != 0:
                         prior_mgmt_adj.setdefault(current_pool, {})[label] = mgmt
                     continue
-                if label not in ('Current Grade', 'Total') and e_val is None:
+                if label not in ('Current Grade', 'Current Risk Rating',
+                                 'Total') and e_val is None:
                     current_pool = label
             if prior_mgmt_adj or prior_env_factor:
                 result['prior_mgmt_adj'] = prior_mgmt_adj
@@ -2353,7 +2421,8 @@ def load_prior_tct_hist_bal(config, snap):
             continue
 
         pool_name = str(a_val).strip()
-        if pool_name in ('Current Grade', 'Total', 'Balance', '% of Loans',
+        if pool_name in ('Current Grade', 'Current Risk Rating', 'Total',
+                         'Balance', '% of Loans',
                          'WARM\nMonths', 'Loss Factor Historical Detail'):
             r += 1
             continue
@@ -2368,12 +2437,15 @@ def load_prior_tct_hist_bal(config, snap):
         next_a = rows_data[r + 1][0] if rows_data[r + 1] else None
         next_label = str(next_a).strip() if next_a else ''
 
-        if next_label not in ('Current Grade', 'Balance'):
+        # 'Current Risk Rating' header is used for BRR-flagged pools in
+        # both manual WARM workbooks and our generated TCT reports.
+        if next_label not in ('Current Grade', 'Current Risk Rating',
+                               'Balance'):
             r += 1
             continue
 
         pool_order.append(pool_name)
-        is_rr = (next_label == 'Current Grade')
+        is_rr = (next_label in ('Current Grade', 'Current Risk Rating'))
         risk_rated[pool_name] = is_rr
 
         # Read dates from the header row (row r+1)
@@ -2701,7 +2773,7 @@ def load_prior_tct_hist_bal(config, snap):
             e_val = row[4] if len(row) > 4 else None
             f_val = row[5] if len(row) > 5 else None
             i_val = row[8] if len(row) > 8 else None
-            if label == 'Current Grade':
+            if label in ('Current Grade', 'Current Risk Rating'):
                 continue
             if label == 'Total':
                 # Pool total row — read env factor (col I, index 8)
@@ -2723,7 +2795,8 @@ def load_prior_tct_hist_bal(config, snap):
                     prior_mgmt_adj.setdefault(current_pool, {})[label] = mgmt
                 continue
             # Otherwise this might be a pool header
-            if label not in ('Current Grade', 'Total') and e_val is None:
+            if label not in ('Current Grade', 'Current Risk Rating',
+                             'Total') and e_val is None:
                 current_pool = label
 
         if prior_mgmt_adj or prior_env_factor:
@@ -3270,7 +3343,8 @@ def _load_acl_months_from_tct(filepath):
             r += 1
             continue
         pool_name = str(a).strip()
-        if pool_name in ('Current Grade', 'Total', 'Balance', '% of Loans',
+        if pool_name in ('Current Grade', 'Current Risk Rating', 'Total',
+                         'Balance', '% of Loans',
                          'WARM\nMonths', 'Loss Factor Historical Detail'):
             r += 1
             continue
@@ -3278,7 +3352,8 @@ def _load_acl_months_from_tct(filepath):
             break
         next_a = rows[r + 1][0] if rows[r + 1] else None
         next_label = str(next_a).strip() if next_a else ''
-        if next_label not in ('Current Grade', 'Balance'):
+        if next_label not in ('Current Grade', 'Current Risk Rating',
+                              'Balance'):
             r += 1
             continue
         # Find WARM column in header row r+1
@@ -3579,13 +3654,36 @@ def load_impaired_data(config, snap):
     snap_prefix = snap[:7] if snap else ''
 
     # Search for the file in data_dir, then fallback_report_folder
+    # NOTE: fallback_report_folder is often a SHARED temp dir holding WARM
+    # uploads for multiple credit unions (e.g. cecl_ui_warm). All match paths
+    # below MUST verify the filename contains *this* CU's name so we don't
+    # accidentally load another CU's WARM workbook. Without this guard,
+    # `2025-12 CECL-Migration-WARM - Bridgeton Onized FCU.xlsx` would be
+    # loaded as Utah Community FCU's WARM (alphabetical first-match win).
     target_name = f"{snap_prefix} CECL-Migration-WARM - {cu}.xlsx"
+    # Accept both space- and underscore-separated filenames (the wizard
+    # rewrites spaces to underscores on save).
+    target_name_alt = target_name.replace(' ', '_')
     search_dirs = [data_dir]
     fb_folder = config.get('credit_pull', {}).get('fallback_report_folder', '')
     if fb_folder and fb_folder != data_dir:
         if not os.path.isabs(fb_folder):
             fb_folder = os.path.join(BASE, fb_folder)
         search_dirs.append(fb_folder)
+
+    def _cu_in_filename(fname: str) -> bool:
+        """Return True iff *fname* references this CU (space/underscore tolerant)."""
+        if not cu:
+            return True
+        norm_f = fname.lower().replace(' ', '_')
+        # Full CU name with underscores
+        if safe_cu.lower() in norm_f:
+            return True
+        # Allow first-token fallback (e.g. "Utah" matches "Utah_Community_FCU")
+        first = cu.lower().split()[0] if cu.strip() else ''
+        if first and len(first) >= 4 and first in norm_f:
+            return True
+        return False
 
     found = None
     for sdir in search_dirs:
@@ -3595,7 +3693,7 @@ def load_impaired_data(config, snap):
             for f in files:
                 if f.startswith('~$') or f.upper().startswith('DNU'):
                     continue
-                if f == target_name:
+                if f == target_name or f == target_name_alt:
                     found = os.path.join(root, f)
                     break
             if found:
@@ -3603,7 +3701,8 @@ def load_impaired_data(config, snap):
         if found:
             break
 
-    # Fallback: search by pattern
+    # Fallback: search by pattern, but REQUIRE this CU's name in the filename
+    # so a shared fallback_report_folder doesn't pull in another CU's WARM.
     if not found:
         pattern = re.compile(rf'^{re.escape(snap_prefix)}.*CECL-Migration-WARM.*\.xlsx$', re.IGNORECASE)
         for sdir in search_dirs:
@@ -3613,7 +3712,7 @@ def load_impaired_data(config, snap):
                 for f in files:
                     if f.startswith('~$') or f.upper().startswith('DNU'):
                         continue
-                    if pattern.match(f):
+                    if pattern.match(f) and _cu_in_filename(f):
                         found = os.path.join(root, f)
                         break
                 if found:
@@ -3782,10 +3881,12 @@ def load_impaired_data(config, snap):
             continue
         label = str(a_val).strip()
 
-        # Pool header row: next row has "Current Grade" header
+        # Pool header row: next row has "Current Grade" or "Current Risk Rating" header
         if idx + 1 < len(acl_df):
             next_a = acl_df.iloc[idx + 1, 0]
-            if pd.notna(next_a) and str(next_a).strip() == 'Current Grade':
+            if pd.notna(next_a) and str(next_a).strip() in (
+                'Current Grade', 'Current Risk Rating'
+            ):
                 # Save previous pool
                 if current_pool and current_grades:
                     acl_pools[current_pool]['grades'] = current_grades
@@ -3795,7 +3896,8 @@ def load_impaired_data(config, snap):
                 continue
 
         # Grade data row (inside a pool block): A=grade, B=balance, ...
-        if current_pool and label not in ('Current Grade', 'Total'):
+        if current_pool and label not in ('Current Grade',
+                                           'Current Risk Rating', 'Total'):
             b = acl_df.iloc[idx, 1] if acl_df.shape[1] > 1 else 0
             c = acl_df.iloc[idx, 2] if acl_df.shape[1] > 2 else 0
             d = acl_df.iloc[idx, 3] if acl_df.shape[1] > 3 else 0
@@ -4175,13 +4277,17 @@ def load_impaired_data(config, snap):
                 idx += 1
                 continue
             pool_name = str(a_val).strip()
-            if pool_name in ('', 'Current Grade', 'Total'):
+            if pool_name in ('', 'Current Grade', 'Current Risk Rating',
+                             'Total'):
                 idx += 1
                 continue
-            # Check next row is "Current Grade"
+            # Check next row is "Current Grade" or "Current Risk Rating"
+            # (BRR-flagged pools use Risk Rating with BRR labels)
             if idx + 1 < len(hb_df):
                 next_a = hb_df.iloc[idx + 1, 0]
-                if pd.notna(next_a) and str(next_a).strip() == 'Current Grade':
+                if pd.notna(next_a) and str(next_a).strip() in (
+                    'Current Grade', 'Current Risk Rating'
+                ):
                     # This is a pool header; read grade rows
                     pool_grades = {}
                     pool_total = []
@@ -4191,6 +4297,11 @@ def load_impaired_data(config, snap):
                         if pd.isna(ga) or str(ga).strip() == '':
                             break
                         glabel = str(ga).strip()
+                        # Skip Hide-* rows (FICO Hide-F/G/H/I AND BRR
+                        # Hide-RF/RG/RH/RI)
+                        if glabel.lower().startswith('hide'):
+                            gr_idx += 1
+                            continue
                         vals = []
                         for c in range(2, 2 + len(hist_dates)):
                             v = hb_df.iloc[gr_idx, c] if c < hb_df.shape[1] else 0
@@ -4692,6 +4803,170 @@ def _resolve_pool_with_ncua(code, pool_map_ci, ncua_lookup, default_pool):
     if not pool or pool.lower() in ('ignore', 'exclude'):
         return None
     return pool
+
+
+def _overlay_warm_history_into_hist(hist, snap):
+    """Fold WARM-template historical CO / Recoveries / DQ% / hist balances
+    from ``hist['impaired']`` into the top-level ``hist`` keys (chargeoffs,
+    recoveries, co_monthly, rc_monthly, dq_pct, avg_balances, years).
+
+    The WARM workbook is the analyst's authoritative source for historical
+    data — when present, its multi-year history should drive the Display
+    HIst Bal / Display CO-Recov-DQ year axes even when there are no
+    file-based or DB-backfilled rows for the CU.
+
+    Precedence: WARM cells WIN for any (year, pool) cell they cover.
+    File / DB cells outside that coverage (e.g. fresh current-quarter CO
+    data parsed from a file) are preserved. This mirrors the prior-TCT
+    fallback path in :func:`generate_report` which fully replaces the
+    historical year axis with the prior report's WARM totals while
+    splicing in the current snapshot year from raw-file parsing.
+
+    Years beyond ``snap`` are dropped (same clamp behaviour as the
+    report-period trim a few blocks earlier).
+    """
+    imp = hist.get('impaired') if hist else None
+    if not imp:
+        return
+
+    snap_year = None
+    snap_month = None
+    try:
+        snap_year = int(str(snap)[:4])
+        snap_month = int(str(snap)[5:7])
+    except (TypeError, ValueError):
+        pass
+
+    def _yr_ok(y):
+        try:
+            yi = int(y)
+        except (TypeError, ValueError):
+            return False
+        return snap_year is None or yi <= snap_year
+
+    overlay_co = 0
+    overlay_rc = 0
+    overlay_dq = 0
+    overlay_bal_cells = 0
+
+    warm_co = imp.get('warm_co') or {}
+    if warm_co:
+        co = hist.setdefault('chargeoffs', {})
+        for yr, by_pool in warm_co.items():
+            if not _yr_ok(yr):
+                continue
+            target = co.setdefault(int(yr), {})
+            for pool, amt in (by_pool or {}).items():
+                target[pool] = amt
+                overlay_co += 1
+
+    warm_rc = imp.get('warm_rc') or {}
+    if warm_rc:
+        rc = hist.setdefault('recoveries', {})
+        for yr, by_pool in warm_rc.items():
+            if not _yr_ok(yr):
+                continue
+            target = rc.setdefault(int(yr), {})
+            for pool, amt in (by_pool or {}).items():
+                target[pool] = amt
+                overlay_rc += 1
+
+    warm_dq = imp.get('warm_dq_pct') or {}
+    if warm_dq:
+        dq_pct = hist.setdefault('dq_pct', {})
+        for yr, by_pool in warm_dq.items():
+            if not _yr_ok(yr):
+                continue
+            target = dq_pct.setdefault(int(yr), {})
+            for pool, pct in (by_pool or {}).items():
+                target[pool] = pct
+                overlay_dq += 1
+
+    warm_co_m = imp.get('warm_co_monthly') or {}
+    if warm_co_m:
+        com = hist.setdefault('co_monthly', {})
+        for ym, by_pool in warm_co_m.items():
+            try:
+                yy = int(ym[0])
+                mm = int(ym[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if snap_year is not None and (
+                yy > snap_year
+                or (yy == snap_year and snap_month is not None and mm > snap_month)
+            ):
+                continue
+            com.setdefault((yy, mm), {}).update(by_pool or {})
+
+    warm_rc_m = imp.get('warm_rc_monthly') or {}
+    if warm_rc_m:
+        rcm = hist.setdefault('rc_monthly', {})
+        for ym, by_pool in warm_rc_m.items():
+            try:
+                yy = int(ym[0])
+                mm = int(ym[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if snap_year is not None and (
+                yy > snap_year
+                or (yy == snap_year and snap_month is not None and mm > snap_month)
+            ):
+                continue
+            rcm.setdefault((yy, mm), {}).update(by_pool or {})
+
+    # Annual average balances per pool from WARM hist_bal_data.
+    # WARM cells fill (year, pool) slots not already populated by the
+    # per_month / monthly_balances file path, so live monthly data
+    # uploaded by the analyst remains authoritative for any year it
+    # covers.
+    hbd = imp.get('hist_bal_data') or {}
+    if hbd:
+        avg = hist.setdefault('avg_balances', {})
+        for pool, pdata in hbd.items():
+            dates = (pdata or {}).get('dates') or []
+            totals = (pdata or {}).get('total') or []
+            if not dates:
+                continue
+            yr_sums, yr_cnts = {}, {}
+            for i, d in enumerate(dates):
+                if i >= len(totals):
+                    continue
+                v = totals[i]
+                if not v:
+                    continue
+                try:
+                    yr = int(d.year)
+                except AttributeError:
+                    try:
+                        yr = int(str(d)[:4])
+                    except (TypeError, ValueError):
+                        continue
+                if snap_year is not None and yr > snap_year:
+                    continue
+                yr_sums[yr] = yr_sums.get(yr, 0) + v
+                yr_cnts[yr] = yr_cnts.get(yr, 0) + 1
+            for yr, ssum in yr_sums.items():
+                ya = avg.setdefault(yr, {})
+                if not ya.get(pool):
+                    ya[pool] = ssum / yr_cnts[yr]
+                    overlay_bal_cells += 1
+
+    # Recompute years union (drop any > snap_year).
+    yrs = set()
+    for k in ('chargeoffs', 'recoveries', 'avg_balances', 'dq_pct'):
+        d = hist.get(k) or {}
+        for y in d.keys():
+            if isinstance(y, int) and _yr_ok(y):
+                yrs.add(y)
+    if yrs:
+        hist['years'] = sorted(yrs)
+
+    if overlay_co or overlay_rc or overlay_dq or overlay_bal_cells:
+        n_yrs = len(hist.get('years') or [])
+        print(f"    Overlay from WARM file: {overlay_co} CO cell(s), "
+              f"{overlay_rc} Rc cell(s), {overlay_dq} DQ cell(s), "
+              f"{overlay_bal_cells} avg-balance cell(s); "
+              f"hist['years'] now covers {n_yrs} year(s)")
 
 
 def _load_co_rc_history_from_db(config):
@@ -9631,7 +9906,45 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         print(f"  No loan data for {snapshot_date}")
         return []
 
-    df = calculate_cecl(df, grades, no_score)
+    # Business Risk Rating overrides (per-pool). When the CU's config
+    # marks any pool ``brr: true`` and provides ``business_risk_ratings``
+    # rules, loans in those pools are bucketed by their analyst-assigned
+    # rating instead of a FICO score. Empty / missing config falls back
+    # to pure-FICO behavior for every loan.
+    brr_pools = {
+        (p or {}).get('name') for p in (config.get('pools') or [])
+        if (p or {}).get('brr') and (p or {}).get('name')
+    }
+    brr_rules = config.get('business_risk_ratings') or []
+    if brr_pools and brr_rules:
+        print(
+            f"  BRR pools active: {sorted(brr_pools)} "
+            f"({len(brr_rules)} rule(s))"
+        )
+    # Prior-snapshot BRR lookup for quarter-over-quarter rating
+    # migration. The engine's BRR override sets current_grade from the
+    # active snapshot's business_risk_rating; without a prior snapshot
+    # to compare against, it would also write that same value into
+    # original_grade (== Unchanged for every BRR loan). Looking up the
+    # same loan's BRR at the most recent strictly-earlier snapshot in
+    # ``monthly_loan_data`` lets us populate original_grade with the
+    # *prior* rating so the Risk Change tab shows real migration.
+    # First-report baselines (no prior snapshot) get an empty lookup and
+    # fall back to current==original (Unchanged), which matches the
+    # established baseline-then-track pattern requested by analysts.
+    prior_brr_lookup = {}
+    if brr_pools and brr_rules:
+        prior_brr_lookup = _load_prior_brr_lookup(cu, snapshot_date, brr_pools)
+        if prior_brr_lookup:
+            print(
+                f"  Prior-period BRR lookup: {len(prior_brr_lookup):,} "
+                f"loan(s) from prior snapshot"
+            )
+        else:
+            print("  Prior-period BRR lookup: none (baseline run — no prior snapshot)")
+    df = calculate_cecl(df, grades, no_score,
+                        brr_rules=brr_rules, brr_pools=brr_pools,
+                        prior_brr_lookup=prior_brr_lookup)
 
     # Load historical data
     hist = load_historical_data(config)
@@ -9694,6 +10007,12 @@ def generate_report(client_name, snapshot_date=None, reports=None):
     impaired = load_impaired_data(config, snapshot_date)
     if impaired:
         hist['impaired'] = impaired
+        # WARM workbooks ship with multi-year CO / Recoveries / DQ% +
+        # per-pool per-grade hist balance time series. Fold those into
+        # the top-level hist[] keys so the Display HIst Bal and Display
+        # CO-Recov-DQ tabs render the full WARM history even when the
+        # CU has no DB backfill / file history populated.
+        _overlay_warm_history_into_hist(hist, snapshot_date)
     else:
         # No WARM file — try loading hist_bal_data from the prior TCT report
         prior = load_prior_tct_hist_bal(config, snapshot_date)

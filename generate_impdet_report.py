@@ -24,7 +24,11 @@ from openpyxl.styles import (
 from openpyxl.utils import get_column_letter
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from cecl_engine import assign_credit_grade, build_grade_order
+from cecl_engine import (
+    assign_credit_grade,
+    assign_business_risk_grade,
+    build_grade_order,
+)
 from import_data import derive_member_account, _normalize_col_map_for_no_header
 
 load_dotenv()
@@ -85,6 +89,9 @@ def load_loans(cu, snap, config=None):
     )
     if df is None or df.empty or 'loan_pool' not in df.columns:
         return df
+    # Older databases may predate the Business Risk Rating column.
+    if 'business_risk_rating' not in df.columns:
+        df['business_risk_rating'] = None
     excl = set((config.get('excluded_pools') or [])) if config else set()
     excl.add('Exclude')
     mask = df['loan_pool'].isin(excl)
@@ -106,6 +113,44 @@ def snap_display(snap):
     """Format '2025-12-31' → '12/31/2025'."""
     d = datetime.strptime(snap, '%Y-%m-%d')
     return d.strftime('%m/%d/%Y')
+
+
+def _apply_brr_overrides(df, config, no_score):
+    """In-place BRR override of ``original_grade``/``current_grade``.
+
+    Loans whose pool is flagged ``brr: true`` in the CU config are
+    re-graded from their stored ``business_risk_rating`` value through
+    :func:`assign_business_risk_grade`. Without active BRR config, this
+    is a no-op so non-BRR CUs are unaffected. The Improved/Deteriorated
+    report keeps a single rating per BRR loan (the wizard only captures
+    one BRR snapshot), so current_grade == original_grade → ``ncc_status``
+    naturally falls through to "Unchanged" for those rows.
+    """
+    if df is None or df.empty:
+        return df
+    if 'loan_pool' not in df.columns:
+        return df
+    brr_pools = {
+        (p or {}).get('name') for p in (config.get('pools') or [])
+        if (p or {}).get('brr') and (p or {}).get('name')
+    }
+    brr_rules = config.get('business_risk_ratings') or []
+    if not brr_pools or not brr_rules:
+        return df
+    mask = df['loan_pool'].isin(brr_pools)
+    if not mask.any():
+        return df
+    brr_col = (
+        df['business_risk_rating']
+        if 'business_risk_rating' in df.columns
+        else pd.Series([None] * len(df), index=df.index)
+    )
+    brr_labels = brr_col[mask].apply(
+        lambda v: assign_business_risk_grade(v, brr_rules, no_score)
+    )
+    df.loc[mask, 'original_grade'] = brr_labels
+    df.loc[mask, 'current_grade'] = brr_labels
+    return df
 
 
 def loan_ncc_status(orig_grade, cur_grade, grade_labels, n_top=3, no_score='Not Reported'):
@@ -1000,6 +1045,8 @@ def generate_report(client, snap=None):
         df['current_grade'] = df['current_fico_score'].apply(
             lambda s: assign_credit_grade(int(s) if pd.notna(s) else 0, grades, no_score)
         )
+        # Business Risk Rating override for flagged pools.
+        _apply_brr_overrides(df, config, no_score)
 
         # Per-loan NCC status using our top_grades_double_drop logic
         not_risk_rated = set(config.get('not_risk_rated', []))
@@ -1038,6 +1085,8 @@ def generate_report(client, snap=None):
         df['current_grade'] = df['current_fico_score'].apply(
             lambda s: assign_credit_grade(s, grades, no_score)
         )
+        # Business Risk Rating override for flagged pools.
+        _apply_brr_overrides(df, config, no_score)
 
         # Per-loan NCC status
         not_risk_rated = set(config.get('not_risk_rated', []))

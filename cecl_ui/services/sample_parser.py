@@ -57,6 +57,9 @@ COLUMN_HEURISTICS: list[tuple[str, list[str]]] = [
                                  "limit"]),
     ("days_delinquent",      ["lnddel", "days_delinquent", "dq_days",
                               "delinquent", "delinq", "dq"]),
+    ("business_risk_rating", ["business_risk_rating", "business_risk",
+                              "risk_rating", "risk_rate", "rr_grade",
+                              "brr"]),
 ]
 
 

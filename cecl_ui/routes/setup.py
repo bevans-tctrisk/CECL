@@ -8315,7 +8315,8 @@ def step3_columns():
         optional = ("loan_suffix", "loan_pool_code", "original_fico_score",
                     "current_fico_score",
                     "interest_rate", "open_date",
-                    "original_loan_amount", "total_available_credit")
+                    "original_loan_amount", "total_available_credit",
+                    "business_risk_rating")
 
         all_errors: list[str] = []
         new_entries: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -9390,7 +9391,62 @@ def step5_grades():
                 )
             return redirect(url_for("setup.step5_grades"))
 
+        # Save-progress hijacks: the stepper submits THIS form (via
+        # ``form="step-form"``) so any in-DOM edits to the BRR table or
+        # the no-score label persist. We DON'T re-validate / overwrite
+        # the credit-grade bands here \u2014 partial edits to a row would
+        # raise spurious errors and refuse to save the BRR changes.
+        if action in ("save_progress_stay", "save_progress_exit"):
+            state["no_score_label"] = request.form.get(
+                "no_score_label",
+                state.get("no_score_label") or "Not Reported",
+            ).strip() or "Not Reported"
+            state["uses_brr"] = request.form.get("uses_brr") == "on"
+            brr_rows: list[dict[str, Any]] = []
+            if state["uses_brr"]:
+                brr_labels = request.form.getlist("brr_label")
+                brr_criteria = request.form.getlist("brr_criteria")
+                for lbl, crit in zip(brr_labels, brr_criteria):
+                    lbl = (lbl or "").strip()
+                    crit = (crit or "").strip()
+                    if not lbl and not crit:
+                        continue
+                    brr_rows.append({"label": lbl, "criteria": crit})
+            state["business_risk_ratings"] = brr_rows
+            _save_state(state)
+            label = (
+                state.get("credit_union")
+                or state.get("short_name")
+                or "draft"
+            )
+            flash(f"Saved progress for {label}.", "success")
+            if action == "save_progress_exit":
+                session.pop(STATE_KEY, None)
+                return redirect(url_for("home.index"))
+            return redirect(url_for("setup.step5_grades"))
+
         # Default action = save: parse rows, validate, store.
+        # Capture BRR + no_score_label up-front so an unrelated grade
+        # validation error doesn't silently drop those edits.
+        state["no_score_label"] = request.form.get(
+            "no_score_label",
+            state.get("no_score_label") or "Not Reported",
+        ).strip() or "Not Reported"
+        state["uses_brr"] = request.form.get("uses_brr") == "on"
+        _brr_rows: list[dict[str, Any]] = []
+        if state["uses_brr"]:
+            for _lbl, _crit in zip(
+                request.form.getlist("brr_label"),
+                request.form.getlist("brr_criteria"),
+            ):
+                _lbl = (_lbl or "").strip()
+                _crit = (_crit or "").strip()
+                if not _lbl and not _crit:
+                    continue
+                _brr_rows.append({"label": _lbl, "criteria": _crit})
+        state["business_risk_ratings"] = _brr_rows
+        _save_state(state)
+
         labels = request.form.getlist("grade_label")
         mins = request.form.getlist("grade_min")
         # Max is derived from admin bounds + adjacent mins; the form no
@@ -9504,23 +9560,9 @@ def step5_grades():
             )
 
         state["credit_grades"] = grades
-        state["no_score_label"] = request.form.get(
-            "no_score_label", "Not Reported"
-        ).strip() or "Not Reported"
-
-        # Business Risk Ratings (optional).
-        state["uses_brr"] = request.form.get("uses_brr") == "on"
-        brr_rows: list[dict[str, Any]] = []
-        if state["uses_brr"]:
-            brr_labels = request.form.getlist("brr_label")
-            brr_criteria = request.form.getlist("brr_criteria")
-            for lbl, crit in zip(brr_labels, brr_criteria):
-                lbl = (lbl or "").strip()
-                crit = (crit or "").strip()
-                if not lbl and not crit:
-                    continue
-                brr_rows.append({"label": lbl, "criteria": crit})
-        state["business_risk_ratings"] = brr_rows
+        # ``no_score_label`` / ``uses_brr`` / ``business_risk_ratings``
+        # were captured at the top of this branch so partial grade-row
+        # edits can't silently drop them. Re-save now that grades pass.
 
         _save_state(state)
         # Both flows: grades → credit_pull → sample.

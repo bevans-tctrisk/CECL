@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Credit Grades and Business Risk Ratings{% endblock %}
 {% block content %}
+{# Hijack the stepper's Save-progress buttons so they submit THIS
+   form (carrying the credit-grade rows AND the BRR table) instead
+   of going to /save-progress with no payload — without this, BRR
+   edits silently revert on save. #}
+{% set step_form_id = 'step-form' %}
 {% include "setup/_stepper.html" %}
 <div class="card">
   <h2>Credit Grades and Business Risk Ratings</h2>
@@ -34,7 +39,7 @@
   {# Sort highest-min first so the table reads top-down by range. #}
   {% set rows = (rows or []) | sort(attribute='min_score', reverse=True) %}
 
-  <form method="post">
+  <form method="post" id="step-form">
     <div class="grade-row" style="font-weight:700;">
       <div>Label</div>
       <div>Min Credit Score</div>

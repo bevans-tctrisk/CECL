@@ -131,6 +131,7 @@ def get_pools(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             "acl_months": int(acl_map[n]) if n in acl_map else None,
             "excluded": n in excl,
             "use_default_mgmt_adj": False,
+            "brr": False,
         })
     return out
 
@@ -148,6 +149,12 @@ def _normalize_pool(p: dict[str, Any]) -> dict[str, Any]:
         "acl_months": acl_int,
         "excluded": bool(p.get("excluded", False)),
         "use_default_mgmt_adj": bool(p.get("use_default_mgmt_adj", False)),
+        # ``brr`` is True when the pool is broken out by Business Risk
+        # Ratings instead of Credit Grade bands. Only meaningful when
+        # ``risk_rated`` is True. Defaults to False so legacy configs
+        # (which don't carry this field) keep using credit grades.
+        "brr": bool(p.get("brr", False)) and bool(p.get("risk_rated", True))
+                 and not bool(p.get("excluded", False)),
     }
 
 
@@ -295,9 +302,31 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             "acl_months": int(p["acl_months"]) if p.get("acl_months") else None,
             "excluded": bool(p.get("excluded")),
             "use_default_mgmt_adj": bool(p.get("use_default_mgmt_adj")),
+            "brr": bool(p.get("brr")),
         })
     if pools_block:
         set_pools(cfg, pools_block)
+
+    # Business Risk Ratings (optional CU-wide registry — only emitted
+    # when the user enabled BRR on the Credit Grades step). Mirrors the
+    # wizard's ``state.uses_brr`` flag plus the ``business_risk_ratings``
+    # list of {label, criteria} rows. Downstream the report engine looks
+    # at each pool's ``brr`` flag to decide whether to bucket loans by
+    # credit grade or BRR label; the loan-extract column that carries
+    # the raw rating value rides in ``column_mappings.business_risk_rating``
+    # (per extract) as already mapped on the Column Mappings step.
+    brr_rows_raw = state.get("business_risk_ratings") or []
+    brr_rows: list[dict[str, Any]] = []
+    for r in brr_rows_raw:
+        lbl = str((r or {}).get("label") or "").strip()
+        crit = str((r or {}).get("criteria") or "").strip()
+        if not lbl and not crit:
+            continue
+        brr_rows.append({"label": lbl, "criteria": crit})
+    if state.get("uses_brr") or brr_rows:
+        cfg["uses_brr"] = bool(state.get("uses_brr"))
+        if brr_rows:
+            cfg["business_risk_ratings"] = brr_rows
 
     try:
         acl_bal = float(state.get("acl_balance") or 0)
