@@ -103,10 +103,11 @@ WIZARD_STEPS_SCALE = [
     ("scale_solr",     "2. Solr & Period"),
     ("scale_template", "3. Template & Map"),
     ("scale_qfactors", "4. Q-Factors"),
-    ("scale_mgmt_adj", "5. Mgmt Adjustments"),
-    ("scale_impaired", "6. Impaired Loans"),
-    ("scale_review",   "7. Review"),
-    ("scale_run",      "8. Run"),
+    ("scale_lol",      "5. Life of Loan Months"),
+    ("scale_mgmt_adj", "6. Mgmt Adjustments"),
+    ("scale_impaired", "7. Impaired Loans"),
+    ("scale_review",   "8. Review"),
+    ("scale_run",      "9. Run"),
 ]
 
 # Default (identity not yet answered)
@@ -461,6 +462,7 @@ STEP_ENDPOINTS: dict[str, str] = {
     "scale_solr":     "scale_setup.step_solr",
     "scale_template": "scale_setup.step_template_map",
     "scale_qfactors": "scale_setup.step_qfactors",
+    "scale_lol":      "scale_setup.step_lol",
     "scale_mgmt_adj": "scale_setup.step_mgmt_adj",
     "scale_impaired": "scale_setup.step_impaired",
     "scale_review":   "scale_setup.step_review",
@@ -1705,10 +1707,23 @@ def _save_acl_form(mb: dict, form) -> None:
             if raw == "":
                 manual[f"{key}_value"] = None
             else:
+                # Strip currency symbols, thousands separators, and any
+                # surrounding whitespace. Accept accounting-style
+                # parentheses notation for negatives, e.g. "(896,484.48)".
+                cleaned = (
+                    raw.replace("$", "")
+                    .replace(",", "")
+                    .replace(" ", "")
+                )
+                negate = False
+                if cleaned.startswith("(") and cleaned.endswith(")"):
+                    cleaned = cleaned[1:-1]
+                    negate = True
                 try:
-                    manual[f"{key}_value"] = float(
-                        raw.replace("$", "").replace(",", "")
-                    )
+                    val = float(cleaned)
+                    if negate:
+                        val = -val
+                    manual[f"{key}_value"] = val
                 except ValueError:
                     pass
 
@@ -1918,7 +1933,7 @@ def step5_monthly_bal():
                 _hpm_pm = state.get("hist_pool_map") or {}
                 for _k, _v in (_hpm_pm.get("mapping") or {}).items():
                     if _k and _k not in _combined_pm:
-                        _combined_pm[_k] = (_v or "")
+                        _combined_pm[_k] = _hpm_value_for_seed(_v)
                 # WARM BS Data direct sources (loan_type→pool + balance_titles).
                 _warm_pm = state.get("warm") or {}
                 for _k, _v in (_warm_pm.get("bs_loan_type_map") or {}).items():
@@ -2083,7 +2098,7 @@ def step5_monthly_bal():
                         _hpm = state.get("hist_pool_map") or {}
                         for _k, _v in (_hpm.get("mapping") or {}).items():
                             if _k and _k not in combined_map:
-                                combined_map[_k] = (_v or "")
+                                combined_map[_k] = _hpm_value_for_seed(_v)
                         seeded, status = monthly_bal_parser.seed_pool_map(
                             mb["parsed_pool_labels"],
                             combined_map,
@@ -3473,18 +3488,24 @@ def _read_co_recov_column_form(kind: str) -> dict[str, Any]:
 def _refresh_co_recov_inspect(
     state: dict[str, Any], kind: str, *, force: bool = False
 ) -> None:
-    """Re-run the column inspector against the first monthly CO/Recov file
-    and seed default column mappings.  Called after each upload so the
-    column-mapping UI always reflects the most recently-uploaded file.
+    """Re-run the column inspector against the first uploaded CO/Recov
+    file and seed default column mappings.  Called after each upload so
+    the column-mapping UI always reflects the most recently-uploaded
+    file.  Looks at the per-month list first (``monthly_co_files`` /
+    ``monthly_recov_files``) and falls back to the single-workbook list
+    (``co_files`` / ``recov_files``), so the same inspect/mapping UI
+    works for both upload modes.
 
     User-edited column mappings are preserved unless ``force=True``.
     """
-    list_key = "monthly_co_files" if kind == "co" else "monthly_recov_files"
+    monthly_key = "monthly_co_files" if kind == "co" else "monthly_recov_files"
+    workbook_key = "co_files" if kind == "co" else "recov_files"
     inspect_key = "co_inspect" if kind == "co" else "recov_inspect"
     columns_key = "co_columns" if kind == "co" else "recov_columns"
     suggested_field = "co_amount" if kind == "co" else "recov_amount"
 
-    files = (state.get("hist_scan") or {}).get(list_key) or []
+    hist_scan = state.get("hist_scan") or {}
+    files = hist_scan.get(monthly_key) or hist_scan.get(workbook_key) or []
     if not files:
         state.pop(inspect_key, None)
         _save_state(state)
@@ -3503,8 +3524,8 @@ def _refresh_co_recov_inspect(
     have_user_edit = bool(
         existing.get("loan_code") or existing.get("amount")
     )
+    suggested = (res.get("suggested") or {})
     if (not have_user_edit) or force:
-        suggested = (res.get("suggested") or {})
         # Preserve any previously-saved member/account block + the user's
         # mode choice; just refresh the auto-detectable header pickers.
         ma = existing.get("member_account") or {
@@ -3520,6 +3541,27 @@ def _refresh_co_recov_inspect(
                               or suggested.get("account") or ""),
             "member_account": ma,
         }
+    else:
+        # Backfill any individual fields that are still blank from the
+        # fresh suggestions. This catches the case where a prior
+        # inspect's whitespace-laden header values never round-tripped
+        # through the form, leaving amount/date blank while loan_code
+        # was filled.  Updating in place preserves the user's edits.
+        cols = dict(existing)
+        if not cols.get("loan_code"):
+            cols["loan_code"] = suggested.get("code") or ""
+        if not cols.get("amount"):
+            cols["amount"] = suggested.get(suggested_field) or ""
+        if not cols.get("date"):
+            cols["date"] = suggested.get("date") or ""
+        if not cols.get("member_number"):
+            cols["member_number"] = suggested.get("member") or ""
+        if not cols.get("loan_suffix"):
+            cols["loan_suffix"] = suggested.get("account") or ""
+        cols.setdefault("member_account", {
+            "mode": "fixed_suffix", "suffix_length": 3, "delimiter": "-",
+        })
+        state[columns_key] = cols
     _save_state(state)
 
 
@@ -3730,7 +3772,14 @@ def _seed_hist_pool_map(state: dict[str, Any], analysis: dict[str, Any]) -> None
 
 
 def _save_hist_pool_map_from_form(state: dict[str, Any], form) -> None:
-    """Persist user edits to the loan-type -> pool mapping table."""
+    """Persist user edits to the loan-type -> pool mapping table.
+
+    The "__ignore__" sentinel is preserved in the saved mapping so the
+    template can distinguish "user explicitly chose to ignore this row"
+    from "auto-seed left it blank and the user hasn't reviewed it yet."
+    Downstream consumers that fold mapping values into other pool maps
+    treat the sentinel as empty (see ``_hpm_value_for_seed`` below).
+    """
     existing = state.get("hist_pool_map") or {}
     labels = list(existing.get("labels") or [])
     mapping: dict[str, str] = {}
@@ -3740,16 +3789,54 @@ def _save_hist_pool_map_from_form(state: dict[str, Any], form) -> None:
         echoed = (form.get(f"label_{idx}") or "").strip()
         key = echoed or label
         pool = (form.get(f"pool_for_{idx}") or "").strip()
-        # "__ignore__" is the sentinel for "intentionally excluded".
-        # Store it as empty string so downstream code treats it as unmapped.
-        if pool == "__ignore__":
-            pool = ""
+        # Keep "__ignore__" as the stored sentinel so the completion check
+        # can tell an explicit "ignore" apart from an unreviewed blank.
         mapping[key] = pool
     existing["labels"] = labels
     existing["mapping"] = mapping
     existing["source"] = "manual"
     state["hist_pool_map"] = existing
+    # Propagate explicit user edits to the Monthly Balance File pool_map
+    # (Step 8), which Step 14 (Balance Adjustment) and the report runtime
+    # both read from. We only touch labels that ALSO appear in the
+    # monthly_bal parsed labels and only when the new value is non-empty
+    # and different from what is already there. The "__ignore__" sentinel
+    # is normalised away via _hpm_value_for_seed so it doesn't blank out
+    # an already-good Step 8 mapping.
+    try:
+        mb = state.get("monthly_bal") or {}
+        mb_labels = {str(l) for l in (mb.get("parsed_pool_labels") or []) if l}
+        if mb_labels:
+            mb_map = dict(mb.get("pool_map") or {})
+            changed = False
+            for lbl, val in mapping.items():
+                if not lbl or lbl not in mb_labels:
+                    continue
+                new_val = _hpm_value_for_seed(val)
+                if not new_val:
+                    continue
+                if mb_map.get(lbl) != new_val:
+                    mb_map[lbl] = new_val
+                    changed = True
+            if changed:
+                mb["pool_map"] = mb_map
+                state["monthly_bal"] = mb
+    except Exception:
+        # Propagation is best-effort; never block the Step 4 save.
+        pass
     _save_state(state)
+
+
+def _hpm_value_for_seed(value: Any) -> str:
+    """Normalize a hist_pool_map.mapping value for downstream seeding.
+
+    Returns an empty string for the "__ignore__" sentinel so it doesn't
+    leak into other pool maps (Step 5 monthly balance pool_map, etc.).
+    """
+    v = (value or "")
+    if isinstance(v, str) and v.strip() == "__ignore__":
+        return ""
+    return v
 
 
 # ---------------------------------------------------------------------------
@@ -5634,6 +5721,15 @@ def step3_historical():
                 try:
                     saved_name = _add_hist_file(state, "co_files", f, "co")
                     flash(f"Saved historical charge-off file: {saved_name}", "success")
+                    # Inspect the workbook so the column-mapping UI can
+                    # appear if the auto-detector misses any required
+                    # column. Non-fatal if inspection fails — the user
+                    # can still try Aggregate, which surfaces its own
+                    # per-file error.
+                    try:
+                        _refresh_co_recov_inspect(state, "co")
+                    except Exception:  # noqa: BLE001
+                        pass
                 except Exception as exc:  # noqa: BLE001
                     flash(f"Upload failed: {exc}", "error")
             else:
@@ -5645,6 +5741,10 @@ def step3_historical():
                 try:
                     saved_name = _add_hist_file(state, "recov_files", f, "recov")
                     flash(f"Saved historical recoveries file: {saved_name}", "success")
+                    try:
+                        _refresh_co_recov_inspect(state, "recov")
+                    except Exception:  # noqa: BLE001
+                        pass
                 except Exception as exc:  # noqa: BLE001
                     flash(f"Upload failed: {exc}", "error")
             else:
@@ -6206,9 +6306,11 @@ def step3_historical():
     # populating from the OLD inspection until the user clicks
     # "Re-inspect" manually.
     for _kind in ("co", "recov"):
-        _list_key = "monthly_co_files" if _kind == "co" else "monthly_recov_files"
+        _monthly_key = "monthly_co_files" if _kind == "co" else "monthly_recov_files"
+        _workbook_key = "co_files" if _kind == "co" else "recov_files"
         _ins_key = "co_inspect" if _kind == "co" else "recov_inspect"
-        _files = (state.get("hist_scan") or {}).get(_list_key) or []
+        _hs = state.get("hist_scan") or {}
+        _files = _hs.get(_monthly_key) or _hs.get(_workbook_key) or []
         _ins = state.get(_ins_key) or {}
         if not _files:
             if _ins:
@@ -6217,7 +6319,16 @@ def step3_historical():
             continue
         _first_name = (_files[0].get("name") or "").strip()
         _ins_name = (_ins.get("filename") or "").strip()
-        if _first_name and _first_name != _ins_name:
+        # Detect cached inspects from before the whitespace-normalisation
+        # fix: any header still containing ``\n`` / ``\t`` / runs of
+        # spaces means the saved column mapping (which the browser
+        # collapsed) can never round-trip, so force a fresh inspect.
+        _stale_ws = any(
+            isinstance(h, str) and ("\n" in h or "\t" in h
+                                    or "  " in h)
+            for h in (_ins.get("headers") or [])
+        )
+        if _first_name and (_first_name != _ins_name or _stale_ws):
             # Preserve any saved per-layout mapping for the file now at
             # files[0]: only force a fresh seed when no saved mapping
             # exists for that layout.
@@ -6234,13 +6345,32 @@ def step3_historical():
                 _path = Path(_files[0].get("path") or "")
                 _sig, _ = _file_layout_signature(_path) if _path else ("", [])
                 _saved = (state.get(_layout_cols_key) or {}).get(_sig)
+                _existing = state.get(_cols_key) or {}
                 if _sig:
                     state[_sig_key] = _sig
                 _force = True
                 if _saved:
                     state[_cols_key] = dict(_saved)
                     _force = False
+                elif _existing.get("loan_code") or _existing.get("amount") \
+                        or _existing.get("date"):
+                    # User saved a column mapping but no per-layout
+                    # signature was active at save time (typical when
+                    # there's only one uploaded file and the user never
+                    # clicked the explicit layout picker). Treat the
+                    # top-level mapping as authoritative for the current
+                    # file too, so the staleness re-inspect doesn't
+                    # clobber their picks with auto-suggestions on the
+                    # very next page render.
+                    _force = False
                 _refresh_co_recov_inspect(state, _kind, force=_force)
+                # Mirror any backfilled column values into the per-
+                # layout map so the staleness round-trip persists.
+                if _sig:
+                    _layout_map = dict(state.get(_layout_cols_key) or {})
+                    _layout_map[_sig] = dict(state.get(_cols_key) or {})
+                    state[_layout_cols_key] = _layout_map
+                    _save_state(state)
             except Exception:  # noqa: BLE001
                 # Non-fatal — fall back to whatever inspect is cached.
                 pass
@@ -8582,6 +8712,117 @@ def step3_columns():
     # GET
     _hydrate_legacy_entries()
     files = _files_list()
+    # Self-heal: drafts saved before sample_parser._clean_header normalised
+    # internal whitespace may carry headers like "Current \nLoan Bal" or
+    # "Credit\nScore" inside `analysis.headers` AND in column_mappings.
+    # Browsers normalise whitespace inside <option value="..."> on form
+    # submit, so saved values won't match the rendered options after
+    # POST → dropdown appears to reset on every save. Rewrite both lists
+    # in-place to the normalised shape.
+    #
+    # Additionally: drafts predating the ``col_<LETTER>`` placeholder for
+    # blank header cells stored the literal string ``nan`` (or pandas'
+    # ``Unnamed: N``) for every unlabelled column. All blanks collapsing
+    # to the same option made the dropdown unable to distinguish between
+    # them — every pick snapped to the leftmost blank. Rewrite blanks to
+    # ``col_A``/``col_B``/... using the column index and clear any saved
+    # mapping value that is ambiguous (literal ``nan`` / ``Unnamed: N``).
+    _ws_re = re.compile(r"\s+")
+    _unnamed_rx = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$", re.IGNORECASE)
+
+    def _norm(s: object) -> str:
+        return _ws_re.sub(" ", str(s)).strip()
+
+    def _is_blank_header_value(s: str) -> bool:
+        if not s:
+            return True
+        low = s.lower()
+        return low == "nan" or bool(_unnamed_rx.match(s))
+
+    def _col_letter(i: int) -> str:
+        if i < 0:
+            return ""
+        out = ""
+        n = i
+        while True:
+            out = chr(ord("A") + (n % 26)) + out
+            n = n // 26 - 1
+            if n < 0:
+                break
+        return out
+
+    healed = False
+    for entry in files:
+        analysis = entry.get("analysis") or {}
+        old_headers = list(analysis.get("headers") or [])
+        new_headers: list[str] = []
+        for i, h in enumerate(old_headers):
+            n = _norm(h) if h else ""
+            if _is_blank_header_value(n):
+                new_headers.append(f"col_{_col_letter(i)}")
+            else:
+                new_headers.append(n)
+        if new_headers != old_headers:
+            analysis["headers"] = new_headers
+            entry["analysis"] = analysis
+            healed = True
+        # Normalise per-file column_mappings values. Clear any saved value
+        # that is ambiguous (literal nan / Unnamed: N) — the user will
+        # re-pick from the now-disambiguated dropdown.
+        cm = entry.get("column_mappings") or {}
+        for fld, val in list(cm.items()):
+            if not val or fld == "loan_pool_code_static":
+                continue
+            n = _norm(val)
+            if _is_blank_header_value(n):
+                cm[fld] = ""
+                healed = True
+            elif n != val:
+                cm[fld] = n
+                healed = True
+        # Also normalise column_suggestions values so seeding stays in sync.
+        sug = analysis.get("column_suggestions") or {}
+        for fld, val in list(sug.items()):
+            if not val:
+                continue
+            n = _norm(val)
+            if _is_blank_header_value(n):
+                sug[fld] = ""
+                healed = True
+            elif n != val:
+                sug[fld] = n
+                healed = True
+    # Mirror the heal into top-level state.column_mappings (used by
+    # downstream services / YAML emitters / Step-4 lookups).
+    top_map = state.get("column_mappings") or {}
+    for fld, val in list(top_map.items()):
+        if not val or fld == "loan_pool_code_static":
+            continue
+        n = _norm(val)
+        if _is_blank_header_value(n):
+            top_map[fld] = ""
+            healed = True
+        elif n != val:
+            top_map[fld] = n
+            healed = True
+    # Also heal state.sample.headers (Step 2 upload snapshot) so any
+    # later code that reads it sees the disambiguated shape.
+    samp = state.get("sample") or {}
+    samp_headers = list(samp.get("headers") or [])
+    if samp_headers:
+        new_samp: list[str] = []
+        for i, h in enumerate(samp_headers):
+            n = _norm(h) if h else ""
+            if _is_blank_header_value(n):
+                new_samp.append(f"col_{_col_letter(i)}")
+            else:
+                new_samp.append(n)
+        if new_samp != samp_headers:
+            samp["headers"] = new_samp
+            state["sample"] = samp
+            healed = True
+    if healed:
+        _save_state(state)
     return render_template(
         "setup/step3_columns.html",
         files_view=[_file_view(e, i) for i, e in enumerate(files)],
@@ -9580,9 +9821,17 @@ def step5_grades():
 # =================================================================
 def _read_credit_pull_headers(path: Path) -> list[str]:
     """Return the column-header strings from the first row of a credit-pull
-    file. Empty list on failure or empty file.
+    file. Empty list on failure or empty file. Embedded whitespace (newlines,
+    tabs, multiple spaces) inside a header cell is normalised to a single
+    space — browsers do the same when round-tripping `<option value="...">`
+    on form submit, so we must store the same shape to keep the dropdown
+    selection sticky across saves.
     """
     headers: list[str] = []
+
+    def _norm(cell: object) -> str:
+        return re.sub(r"\s+", " ", str(cell)).strip()
+
     try:
         suffix = path.suffix.lower()
         if suffix in (".xlsx", ".xlsm", ".xls"):
@@ -9591,14 +9840,16 @@ def _read_credit_pull_headers(path: Path) -> list[str]:
             try:
                 ws = wb[wb.sheetnames[0]]
                 first = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
-                headers = [str(c).strip() for c in first if c not in (None, "")]
+                headers = [_norm(c) for c in first if c not in (None, "")]
+                headers = [h for h in headers if h]
             finally:
                 wb.close()
         elif suffix == ".csv":
             import csv
             with open(path, "r", encoding="utf-8-sig", newline="") as fh:
                 reader = csv.reader(fh)
-                headers = [h.strip() for h in next(reader, []) if h and h.strip()]
+                row = next(reader, [])
+                headers = [_norm(h) for h in row if h and _norm(h)]
     except Exception:  # noqa: BLE001
         return []
     return headers
@@ -9658,7 +9909,11 @@ def _auto_seed_credit_pull_from_sample(state: dict[str, Any]) -> bool:
     if not fpath.exists():
         return False
     cp["source_folder"] = str(fpath.parent)
-    cp["file_pattern"] = "^" + re.escape(fpath.name) + "$"
+    # Generalized pattern wildcards month / year tokens so next quarter's
+    # drop of the same file matches without re-running the wizard.
+    cp["file_pattern"] = sample_parser.guess_filename_patterns(
+        fpath.name
+    )["file_pattern"]
     cp["uploaded_filename"] = fpath.name
     member, score = _detect_credit_pull_columns(fpath)
     if member:
@@ -9709,7 +9964,9 @@ def step6_credit_pull():
             if up and up.filename:
                 saved = _save_sample_upload(up)
                 cp["source_folder"] = str(saved.parent)
-                cp["file_pattern"] = "^" + re.escape(saved.name) + "$"
+                cp["file_pattern"] = sample_parser.guess_filename_patterns(
+                    saved.name
+                )["file_pattern"]
                 cp["uploaded_filename"] = saved.name
                 cp["use_standalone_file"] = True
                 # Option 1 wins — turn off Option 2 / Option 3.
@@ -9860,6 +10117,17 @@ def step6_credit_pull():
             )
 
         _save_state(state)
+        # Save-progress buttons in the stepper hijack the cp-main form via
+        # the HTML5 form= attribute and submit with action=save_progress_*.
+        # Honour those by redirecting to home / back-to-self instead of
+        # advancing to the next wizard step — without this branch the user's
+        # column-mapping selections still save, but they never get to see
+        # the persisted page.
+        if action == "save_progress_exit":
+            session.pop(STATE_KEY, None)
+            return redirect(url_for("home.index"))
+        if action == "save_progress_stay":
+            return redirect(url_for("setup.step6_credit_pull"))
         return redirect(url_for("setup.step_orig_score"))
     # GET — gather column headers from the uploaded credit-pull file (if any)
     # so the Member#/Score selects can be populated.
@@ -9871,6 +10139,23 @@ def step6_credit_pull():
         if candidate.exists():
             cp_path = candidate
             cp_headers = _read_credit_pull_headers(candidate)
+    # Self-heal: existing drafts may have stored a header containing embedded
+    # whitespace ('Credit\r\nScore'). Browsers normalise that on form submit,
+    # so the dropdown's selected value would never match — making the picker
+    # appear to reset. Re-map the saved column to the normalised header.
+    if cp_headers:
+        norm_lookup = {re.sub(r"\s+", " ", h).strip().lower(): h for h in cp_headers}
+        changed = False
+        for fld in ("member_column", "score_column"):
+            saved = cp.get(fld) or ""
+            if saved and saved not in cp_headers:
+                key = re.sub(r"\s+", " ", str(saved)).strip().lower()
+                fixed = norm_lookup.get(key)
+                if fixed and fixed != saved:
+                    cp[fld] = fixed
+                    changed = True
+        if changed:
+            _save_state(state)
     return render_template(
         "setup/step6_credit_pull.html",
         cp_headers=cp_headers,

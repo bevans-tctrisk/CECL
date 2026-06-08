@@ -338,7 +338,25 @@ def load_credit_pull_scores(config):
                     member_col = cp_config.get('member_column', 'Member Number')
                     score_col = cp_config.get('score_column', 'FICO')
                     df = pd.read_excel(fpath)
-                    df.columns = [str(c).strip() for c in df.columns]
+                    # Normalise headers to match the wizard-saved column
+                    # name shape (collapse wrap-text CR/LF inside header
+                    # cells to a single space; rewrite blank/'nan'/
+                    # 'Unnamed: N' to col_<LETTER>). Same shape that
+                    # ``cecl_ui/services/sample_parser._clean_header``
+                    # produces, so a credit-pull file with a wrap-text
+                    # ``Credit\nScore`` header still resolves against the
+                    # YAML's ``score_column: Credit Score`` mapping.
+                    _ucp_rx = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$",
+                                          re.IGNORECASE)
+                    _ncols = []
+                    for _i, _c in enumerate(df.columns):
+                        _s = re.sub(r"\s+", " ", str(_c)).strip() if _c is not None else ""
+                        _low = _s.lower()
+                        if (not _s) or _low == "nan" or _ucp_rx.match(_s):
+                            _ncols.append(f"col_{_excel_idx_to_letter(_i)}")
+                        else:
+                            _ncols.append(_s)
+                    df.columns = _ncols
                     if member_col in df.columns and score_col in df.columns:
                         # Strip the same suffix the Aires file uses so the
                         # member-number key matches what import_file builds.
@@ -638,6 +656,20 @@ def _excel_letter_to_index(letter: str) -> int:
     return n - 1
 
 
+def _excel_idx_to_letter(idx: int) -> str:
+    """0 -> 'A', 25 -> 'Z', 26 -> 'AA', etc. Inverse of _excel_letter_to_index."""
+    if idx < 0:
+        return ""
+    s = ""
+    n = idx
+    while True:
+        s = chr(ord("A") + (n % 26)) + s
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return s
+
+
 def _normalize_col_map_for_no_header(col_map):
     """When the loan extracts have no header row, the wizard stores mapping
     values like ``"col_A"`` (or already-integer positions on legacy configs).
@@ -694,7 +726,24 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
             df = pd.read_csv(file_path, header=pd_header)
         else:
             df = pd.read_excel(file_path, header=pd_header)
-        df.columns = [str(c).strip() for c in df.columns]
+        # Normalise header cells to match what the wizard's sample_parser
+        # emits: collapse internal whitespace (wrap-text Excel cells often
+        # contain CR/LF inside a single header cell), and replace any
+        # blank / 'nan' / pandas 'Unnamed: N' placeholder with the
+        # ``col_<LETTER>`` form so the user's saved column_mappings —
+        # which may reference e.g. ``col_H`` for an unlabelled column —
+        # resolves to the right pandas column.
+        _unnamed_rx_runtime = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$",
+                                         re.IGNORECASE)
+        _normed_cols = []
+        for _i, _c in enumerate(df.columns):
+            _s = re.sub(r"\s+", " ", str(_c)).strip() if _c is not None else ""
+            _low = _s.lower()
+            if (not _s) or _low == "nan" or _unnamed_rx_runtime.match(_s):
+                _normed_cols.append(f"col_{_excel_idx_to_letter(_i)}")
+            else:
+                _normed_cols.append(_s)
+        df.columns = _normed_cols
 
         required = ['member_number', 'current_balance']
         if not static_pool_code:
@@ -747,8 +796,21 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
     # When the wizard's column-mapping step assigns ``current_fico_score``
     # to a column in the extract, those values are the authoritative
     # current scores and take priority over WARM/credit-pull lookups.
+    # EXCEPTION: when ``current_fico_score`` and ``original_fico_score``
+    # both map to the SAME source column, that column holds only the
+    # origination score (the wizard auto-suggest landed on a single
+    # ``Credit Score`` column for both fields). Treating it as the
+    # current score would force original==current and silently disable
+    # the credit-pull join. In that case, leave current FICO unmapped
+    # from the extract and let the priority chain fall through to the
+    # credit-pull / WARM / previous-snapshot sources.
     extract_current_fico: pd.Series | None = None
-    if col_map.get('current_fico_score') or 'current_fico_score' in col_map:
+    cur_col = col_map.get('current_fico_score') or ''
+    orig_col = col_map.get('original_fico_score') or ''
+    same_col = bool(cur_col) and bool(orig_col) and \
+        str(cur_col).strip().lower() == str(orig_col).strip().lower()
+    if (col_map.get('current_fico_score') or 'current_fico_score' in col_map) \
+            and not same_col:
         try:
             extract_current_fico = (
                 pd.to_numeric(col('current_fico_score'), errors='coerce')
@@ -757,6 +819,10 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
             )
         except KeyError:
             extract_current_fico = None
+    elif same_col:
+        print("    Note: current_fico_score and original_fico_score map to "
+              "the same column — falling through to credit-pull/WARM for "
+              "current scores.")
 
     # Extract member-only & full-account identifiers honoring the wizard's
     # member/account format selection (fixed-suffix / delimiter / split).

@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Credit Pull{% endblock %}
 {% block content %}
+{# Opt the Save-progress buttons in the stepper into hijacking this page's
+   main form (id="cp-main"), so any in-DOM column-mapping picks are POSTed
+   alongside the save action. Without this, Save-progress submits a separate
+   form that drops the user's score_column / member_column selections. #}
+{% set step_form_id = 'cp-main' %}
 {% include "setup/_stepper.html" %}
 <div class="card">
   <h2>Credit Pull (Current Score Source)</h2>

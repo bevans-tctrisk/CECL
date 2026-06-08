@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}SCALE — Life of Loan Months{% endblock %}
+{% block content %}
+{% include "setup/_stepper.html" %}
+
+<div class="card">
+  <h2>Life of Loan Months</h2>
+  <p class="muted">
+    The Life of Loan (Weighted Average Maturity) months drive the
+    <em>ACL Lifetime Loss Rate</em> calculation on the
+    <code>Calc tab</code> via <code>Industry Data!B3:B15</code>. Each
+    row below shows the months currently in the SCALE template; type
+    a different value in the <strong>Override</strong> column to use
+    a CU-specific number. Overrides are saved to this credit union's
+    wizard draft and are re-applied on every quarter's run.
+  </p>
+
+  {% if template_missing %}
+    <div class="info-block" style="padding:10px 14px; border:1px solid #c9d6e8; background:#fff4e6;">
+      <p style="margin:4px 0;"><strong>Template not resolved yet.</strong></p>
+      <p style="margin:4px 0;" class="muted">
+        Pick a target period on the Solr step and confirm the template
+        on the Template &amp; Map step. The pool list and default
+        Life-of-Loan months are read from that template's
+        <code>Industry Data</code> sheet.
+      </p>
+    </div>
+    <form method="post" style="margin-top:18px;">
+      <div class="btn-row" style="display:flex; gap:8px;">
+        <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_qfactors') }}">&larr; Back</a>
+        <button type="submit" name="action" value="next" class="btn">Skip &amp; continue &rarr;</button>
+      </div>
+    </form>
+  {% else %}
+    <form method="post">
+      <p class="muted" style="margin:0 0 8px 0;">
+        {% if override_count %}
+          <strong>{{ override_count }}</strong> pool(s) currently overridden for this credit union.
+        {% else %}
+          No overrides yet &mdash; every pool will use the template default on the next run.
+        {% endif %}
+        Leave a row blank (or set to 0) to fall back to the template default.
+      </p>
+
+      <table class="kv-table" style="width:100%; max-width:1100px; margin-top:8px;">
+        <thead>
+          <tr>
+            <th style="width:32px;">#</th>
+            <th>Loan Pool</th>
+            <th style="width:140px; text-align:center;">Template Default<br>(months)</th>
+            <th style="width:170px;">Override (months)</th>
+            <th style="width:140px; text-align:center;">Effective</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in pool_rows %}
+            <tr>
+              <td class="muted">{{ loop.index }}</td>
+              <td>{{ p.name }}</td>
+              <td style="text-align:center;">
+                {% if p.default_months is not none %}
+                  {{ p.default_months }}
+                {% else %}
+                  <span class="muted">&mdash;</span>
+                {% endif %}
+              </td>
+              <td>
+                <input type="number" min="0" step="1"
+                       name="lol_months__{{ p.idx }}"
+                       value="{% if p.override_months %}{{ p.override_months }}{% endif %}"
+                       placeholder="{{ p.default_months or '' }}"
+                       style="width:140px;">
+              </td>
+              <td style="text-align:center;">
+                {% if p.is_overridden %}
+                  <strong style="color:#0a5d2a;">{{ p.effective_months }}</strong>
+                {% else %}
+                  {{ p.effective_months }}
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          {% if not pool_rows %}
+            <tr><td colspan="5" class="muted">
+              No pool names found in template's
+              <code>Scale Calculation</code> sheet.
+            </td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+
+      <p class="muted" style="margin-top:14px;">
+        Months read from <code>{{ template_path }}</code>
+        (<code>Industry Data!B3:B15</code>).
+      </p>
+
+      <div class="btn-row" style="display:flex; gap:8px; margin-top:18px;">
+        <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_qfactors') }}">&larr; Back</a>
+        <button type="submit" name="action" value="save" class="btn btn-secondary">Save</button>
+        <button type="submit" name="action" value="reset" class="btn btn-secondary"
+          onclick="return confirm('Clear all Life of Loan overrides for this CU? Template defaults will be used.');">Reset to defaults</button>
+        <button type="submit" name="action" value="next" class="btn">Continue &rarr;</button>
+      </div>
+    </form>
+  {% endif %}
+</div>
+{% endblock %}

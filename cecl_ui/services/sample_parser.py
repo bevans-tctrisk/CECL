@@ -67,6 +67,47 @@ def _normalise(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower()).strip("_")
 
 
+_UNNAMED_RX = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$", re.IGNORECASE)
+
+
+def _is_blank_header(s: str) -> bool:
+    """True for cells that should be treated as missing headers — empty,
+    pandas' synthetic ``Unnamed: 0`` placeholder, or the literal string
+    ``nan`` (which is what ``str(float('nan'))`` produces when a raw
+    Excel cell is empty)."""
+    if not s:
+        return True
+    low = s.lower()
+    if low == "nan":
+        return True
+    if _UNNAMED_RX.match(s):
+        return True
+    return False
+
+
+def _clean_header(cell: object, idx: int | None = None) -> str:
+    """Normalise a spreadsheet header cell: collapse any internal whitespace
+    (CR/LF, tabs, multi-space — common with wrap-text Excel cells) into a
+    single space and strip ends. Browsers do the same when round-tripping
+    `<option value="...">` on form submit, so the dropdown's selected value
+    will match the rendered options across saves only if we store the
+    normalised shape.
+
+    When the cell is blank/NaN/``Unnamed: N`` and a column index is
+    provided, returns ``col_<LETTER>`` (e.g. ``col_H`` for the 8th
+    column). This guarantees every dropdown option is unique even when
+    the source spreadsheet has multiple unlabelled columns — without it,
+    every blank column collapses to the same value and the form would
+    silently snap the user's pick to the leftmost blank column on save.
+    """
+    s = "" if cell is None else re.sub(r"\s+", " ", str(cell)).strip()
+    if _is_blank_header(s):
+        if idx is not None:
+            return f"col_{_excel_col_letter(idx)}"
+        return ""
+    return s
+
+
 def _excel_col_letter(idx: int) -> str:
     """0 -> 'A', 25 -> 'Z', 26 -> 'AA', 27 -> 'AB', ..."""
     if idx < 0:
@@ -130,26 +171,117 @@ _DATE_RX_CANDIDATES: list[tuple[str, str]] = [
 ]
 
 
+# Tokens that should be wildcarded in a filename pattern so the same
+# regex matches files dropped in other months / years.
+_MONTH_NAME_RX_GROUP = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+    r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+    r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+
+# Match candidates inside the original sample filename. Each entry is
+# (regex-to-find, regex-to-emit-into-pattern). Order matters: the
+# longest / most specific patterns win when matches overlap.
+_FNAME_GENERALIZE_RULES: list[tuple[re.Pattern[str], str]] = [
+    # Month-name + 4-digit year: "December 2025", "Mar_2026", "Sept-2024"
+    (re.compile(
+        rf"(?i)\b{_MONTH_NAME_RX_GROUP}[\s_\-\.]+20\d{{2}}\b"),
+     rf"{_MONTH_NAME_RX_GROUP}[\s_\-\.]+20\d{{2}}"),
+    # Month-name + 2-digit year: "Mar 26", "March_26"
+    (re.compile(
+        rf"(?i)\b{_MONTH_NAME_RX_GROUP}[\s_\-\.]+\d{{2}}(?!\d)"),
+     rf"{_MONTH_NAME_RX_GROUP}[\s_\-\.]+\d{{2}}"),
+    # YYYYMMDD (8 digits): "20251130" — match BEFORE YYYYMM so the day
+    # part doesn't get truncated.
+    (re.compile(
+        r"(?<!\d)20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?!\d)"),
+     r"20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"),
+    # MMDDYYYY (8 digits): "03312026"
+    (re.compile(
+        r"(?<!\d)(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])20\d{2}(?!\d)"),
+     r"(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])20\d{2}"),
+    # YYYY-MM-DD / YYYY_MM_DD: "2026-03-31"
+    (re.compile(
+        r"(?<!\d)20\d{2}[-_](?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12]\d|3[01])(?!\d)"),
+     r"20\d{2}[-_](?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12]\d|3[01])"),
+    # MM-DD-YYYY: "03-31-2026"
+    (re.compile(
+        r"(?<!\d)(?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12]\d|3[01])[-_]20\d{2}(?!\d)"),
+     r"(?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12]\d|3[01])[-_]20\d{2}"),
+    # YYYY-MM / YYYY_MM / YYYYMM (any separator, optional)
+    (re.compile(r"(?<!\d)20\d{2}[-_]?(?:0[1-9]|1[0-2])(?!\d)"),
+     r"20\d{2}[-_]?(?:0[1-9]|1[0-2])"),
+    # MM-YYYY / MM_YYYY
+    (re.compile(r"(?<!\d)(?:0[1-9]|1[0-2])[-_]20\d{2}(?!\d)"),
+     r"(?:0[1-9]|1[0-2])[-_]20\d{2}"),
+    # MMYYYY (no separator): "092022"
+    (re.compile(r"(?<!\d)(?:0[1-9]|1[0-2])20\d{2}(?!\d)"),
+     r"(?:0[1-9]|1[0-2])20\d{2}"),
+    # YY-MM (e.g. "25-12 AIRES")
+    (re.compile(r"(?<!\d)\d{2}[-_](?:0[1-9]|1[0-2])(?!\d)"),
+     r"\d{2}[-_](?:0[1-9]|1[0-2])"),
+    # Bare 4-digit year (matched after the combined forms above)
+    (re.compile(r"(?<!\d)20\d{2}(?!\d)"), r"20\d{2}"),
+    # Bare month name (matched last so combined month+year wins first)
+    (re.compile(rf"(?i)\b{_MONTH_NAME_RX_GROUP}\b"),
+     _MONTH_NAME_RX_GROUP),
+]
+
+
+def _generalize_filename_pattern(stem: str, ext_part: str) -> str:
+    """Build a case-insensitive ``file_pattern`` regex for ``stem`` that
+    wildcards every month-name and year token so the same regex still
+    matches next month's drop of the same file.
+
+    Tokens stay literal otherwise. Matches anchored ``^…\\.<ext>$``.
+    """
+    spans: list[tuple[int, int, str]] = []  # (start, end, replacement)
+    for rx, repl in _FNAME_GENERALIZE_RULES:
+        for m in rx.finditer(stem):
+            spans.append((m.start(), m.end(), repl))
+    # Resolve overlaps: keep the earliest-starting match; on ties prefer
+    # the longer one. Drop anything that overlaps a chosen span.
+    spans.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+    chosen: list[tuple[int, int, str]] = []
+    cursor = 0
+    for s, e, r in spans:
+        if s < cursor:
+            continue
+        chosen.append((s, e, r))
+        cursor = e
+    parts: list[str] = []
+    last = 0
+    for s, e, r in chosen:
+        if s > last:
+            parts.append(re.escape(stem[last:s]))
+        parts.append(r)
+        last = e
+    if last < len(stem):
+        parts.append(re.escape(stem[last:]))
+    body = "".join(parts) if parts else re.escape(stem)
+    return f"(?i)^{body}\\.{ext_part}$"
+
+
 def guess_filename_patterns(filename: str) -> dict[str, str]:
     """Derive sensible defaults for file_pattern + date_pattern.
 
     Returns a dict with ``file_pattern``, ``date_pattern`` and ``date_format``
     (one of ``"YYYY-MM"``, ``"MMDDYY"`` — the formats ``import_data`` knows).
+
+    The emitted ``file_pattern`` wildcards month names, 4-digit years,
+    YYYY-MM and MM-YYYY tokens so that next month's drop of the same
+    file still matches without regenerating the YAML.
     """
     p = Path(filename)
     stem = p.stem
     ext = p.suffix.lower().lstrip(".")
-    # File pattern: keep the leading alphabetic prefix, allow .* in the middle,
-    # accept either xlsx/xls if Excel, otherwise the file's own extension.
-    prefix_match = re.match(r"^([A-Za-z][A-Za-z0-9]*)", stem)
-    prefix = prefix_match.group(1) if prefix_match else stem
     if ext in {"xlsx", "xls"}:
         ext_part = r"(xlsx|xls)"
     elif ext == "csv":
         ext_part = "csv"
     else:
         ext_part = ext or r"(xlsx|xls|csv)"
-    file_pattern = f"{re.escape(prefix)}.*\\.{ext_part}$"
+    file_pattern = _generalize_filename_pattern(stem, ext_part)
 
     # Date pattern: scan filename for the first candidate that matches AND
     # produces a sensible month (1-12). Default = YYYY-MM with YYYY-MM format.
@@ -288,8 +420,7 @@ def extract_pool_codes(
     if has_header:
         hdr_idx = max(0, (header_row or 1) - 1)
         headers = [
-            str(h).strip() if h is not None and str(h).strip()
-            else f"col_{_excel_col_letter(i)}"
+            _clean_header(h, i)
             for i, h in enumerate(raw.iloc[hdr_idx].tolist())
         ]
         body = raw.iloc[hdr_idx + 1:].reset_index(drop=True)
@@ -459,7 +590,7 @@ def parse_pool_map_file(
             "(loan code and pool name)."
         )
 
-    headers = [str(h).strip() for h in df.columns.tolist()]
+    headers = [_clean_header(h, i) for i, h in enumerate(df.columns.tolist())]
 
     # Pick columns
     if code_col and code_col in headers:
@@ -600,8 +731,7 @@ def analyse_sample_file(
             hdr_idx = min(header_row - 1, len(raw) - 1)
         header_row_used = hdr_idx + 1
         headers = [
-            str(h).strip() if h is not None and str(h).strip()
-            else f"col_{_excel_col_letter(i)}"
+            _clean_header(h, i)
             for i, h in enumerate(raw.iloc[hdr_idx].tolist())
         ]
         body = raw.iloc[hdr_idx + 1:].reset_index(drop=True)

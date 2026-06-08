@@ -33,7 +33,7 @@ from cecl_ui.routes.setup import (
 )
 from cecl_ui.services import admin_defaults, wizard_drafts
 from cecl_ui.services.scale import (
-    impaired_loader, mapping_loader, mgmt_adj_writer,
+    impaired_loader, lol_writer, mapping_loader, mgmt_adj_writer,
     qfactor_loader, runner as scale_runner, solr_fetcher,
     template_loader,
 )
@@ -65,15 +65,19 @@ WIZARD_STEPS_SCALE = [
     ("scale_solr",     "2. Solr & Period"),
     ("scale_template", "3. Template & Map"),
     ("scale_qfactors", "4. Q-Factors"),
-    ("scale_impaired", "5. Impaired Loans"),
-    ("scale_review",   "6. Review"),
-    ("scale_run",      "7. Run"),
+    ("scale_lol",      "5. Life of Loan Months"),
+    ("scale_mgmt_adj", "6. Mgmt Adjustments"),
+    ("scale_impaired", "7. Impaired Loans"),
+    ("scale_review",   "8. Review"),
+    ("scale_run",      "9. Run"),
 ]
 
 SCALE_STEP_ENDPOINTS: dict[str, str] = {
     "scale_solr":     "scale_setup.step_solr",
     "scale_template": "scale_setup.step_template_map",
     "scale_qfactors": "scale_setup.step_qfactors",
+    "scale_lol":      "scale_setup.step_lol",
+    "scale_mgmt_adj": "scale_setup.step_mgmt_adj",
     "scale_impaired": "scale_setup.step_impaired",
     "scale_review":   "scale_setup.step_review",
     "scale_run":      "scale_setup.step_run",
@@ -118,6 +122,12 @@ def _default_scale_block() -> dict[str, Any]:
             "pool_rows": {},
             "portfolio": {"hard_code_pct": 0.0, "use_default": False},
         },
+        # Per-pool Life-of-Loan month overrides written to the
+        # SCALE template's ``Industry Data`` tab. Keyed by pool name
+        # (matches ``Scale Calculation``!C9:C21) so the override
+        # survives a template-pool reorder. Values are positive ints;
+        # absence/0 means "keep template default".
+        "life_of_loan_overrides": {},   # {pool_name: months_int}
         "impaired_file": {},       # {saved_path, uploaded_filename, parsed:{...}}
         "report_variant": "both",  # 'tct' | 'vizo' | 'both'
         "last_test": {},   # {ok, status, message, ran_at}
@@ -383,7 +393,7 @@ def step_qfactors():
         sc["qfactor_overrides"] = overrides
         _save_state(state)
         if action == "next":
-            return redirect(url_for("scale_setup.step_mgmt_adj"))
+            return redirect(url_for("scale_setup.step_lol"))
         flash("Q-factor overrides saved.", "success")
         return redirect(url_for("scale_setup.step_qfactors"))
     entries = qfactor_loader.merge_with_overrides(
@@ -398,7 +408,104 @@ def step_qfactors():
 
 
 # -------------------------------------------------------------------
-# Step 5 — Management Adjustments
+# Step 5 — Life of Loan Months (per-pool ACL Lifetime Months / WAM)
+# -------------------------------------------------------------------
+
+def _coerce_months_form(value: str) -> int:
+    """Form value -> non-negative int; blank or invalid returns 0."""
+    if value is None:
+        return 0
+    s = str(value).strip()
+    if not s:
+        return 0
+    try:
+        n = int(round(float(s)))
+    except (TypeError, ValueError):
+        return 0
+    return max(n, 0)
+
+
+@scale_setup_bp.route("/step/lol", methods=["GET", "POST"])
+def step_lol():
+    state = _state()
+    _ensure_scale_mode(state)
+    sc = _scale(state)
+    overrides = sc.setdefault("life_of_loan_overrides", {})
+
+    tmpl_path = _resolved_template_path(sc)
+    template_rows: list[dict[str, Any]] = []
+    if tmpl_path:
+        try:
+            template_rows = lol_writer.read_lol_months(tmpl_path)
+        except Exception as exc:  # noqa: BLE001
+            current_app.logger.warning(
+                "lol: could not read months from %s: %s", tmpl_path, exc,
+            )
+
+    if request.method == "POST":
+        action = request.form.get("action", "save")
+
+        if action == "reset":
+            sc["life_of_loan_overrides"] = {}
+            _save_state(state)
+            flash(
+                "Life of Loan overrides cleared. Template defaults will "
+                "apply on the next run.", "info",
+            )
+            return redirect(url_for("scale_setup.step_lol"))
+
+        new_overrides: dict[str, int] = {}
+        for i, tr in enumerate(template_rows):
+            name = tr["name"]
+            raw = request.form.get(f"lol_months__{i}", "")
+            months = _coerce_months_form(raw)
+            template_default = tr.get("months") or 0
+            # Only persist values that differ from the template default.
+            # 0 / blank means "use template default" -> drop the entry.
+            if months > 0 and months != template_default:
+                new_overrides[name] = months
+        sc["life_of_loan_overrides"] = new_overrides
+        _save_state(state)
+
+        if action == "next":
+            return redirect(url_for("scale_setup.step_mgmt_adj"))
+        flash("Life of Loan overrides saved.", "success")
+        return redirect(url_for("scale_setup.step_lol"))
+
+    # Build display rows merging template defaults with any saved overrides.
+    saved = overrides if isinstance(overrides, dict) else {}
+    pool_display: list[dict[str, Any]] = []
+    for i, tr in enumerate(template_rows):
+        name = tr["name"]
+        default_months = tr.get("months")
+        override = saved.get(name)
+        try:
+            override_int = int(override) if override is not None else 0
+        except (TypeError, ValueError):
+            override_int = 0
+        pool_display.append({
+            "idx": i,
+            "name": name,
+            "default_months": default_months,
+            "override_months": override_int,
+            "effective_months": (
+                override_int if override_int > 0 else (default_months or 0)
+            ),
+            "is_overridden": override_int > 0 and override_int != (default_months or 0),
+        })
+
+    return render_template(
+        "setup/scale/step_lol.html",
+        pool_rows=pool_display,
+        template_path=tmpl_path,
+        template_missing=(not tmpl_path),
+        override_count=sum(1 for p in pool_display if p["is_overridden"]),
+        **_wizard_ctx("scale_lol"),
+    )
+
+
+# -------------------------------------------------------------------
+# Step 6 — Management Adjustments
 # -------------------------------------------------------------------
 
 def _resolved_template_path(sc: dict) -> str:
@@ -644,6 +751,11 @@ def step_review():
         1 for r in qf_entries
         if abs(r["effective_bps"] - r["default_bps"]) > 1e-9
     )
+    lol_overrides = sc.get("life_of_loan_overrides") or {}
+    lol_count = sum(
+        1 for v in lol_overrides.values()
+        if isinstance(v, (int, float)) and int(v) > 0
+    )
     imp = sc.get("impaired_file") or {}
     imp_parsed = imp.get("parsed") or {}
     return render_template(
@@ -653,6 +765,7 @@ def step_review():
         map_summary=map_summary,
         qf_total=len(qf_entries),
         qf_active=qf_active,
+        lol_count=lol_count,
         imp=imp,
         imp_parsed=imp_parsed,
         **_wizard_ctx("scale_review"),

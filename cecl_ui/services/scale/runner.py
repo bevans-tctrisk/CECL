@@ -26,9 +26,9 @@ import zipfile
 import openpyxl
 
 from . import (
-    env_factor_writer, excel_recalc, impaired_loader, mapping_loader,
-    mgmt_adj_writer, qfactor_loader, runs_service, solr_fetcher,
-    template_loader, vizo_explanation_formatter,
+    env_factor_writer, excel_recalc, impaired_loader, lol_writer,
+    mapping_loader, mgmt_adj_writer, qfactor_loader, runs_service,
+    solr_fetcher, template_loader, vizo_explanation_formatter,
 )
 
 
@@ -852,6 +852,14 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
                 "ran_at": "", "output_path": ""}
 
     out_path = _output_path(workspace_root, short, period)
+    # Defensive: remove a stale master left behind by a prior failed
+    # run. The fill_template/save path always rebuilds from the canonical
+    # template, so this file should never pre-exist before a single-run.
+    try:
+        if Path(out_path).exists():
+            Path(out_path).unlink()
+    except OSError:
+        pass
     fill = fill_template(tmpl["path"], out_path, rows, doc)
 
     qf_entries = _qfactor_entries_from_state(state)
@@ -860,6 +868,9 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
     mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
     mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
     mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
+
+    lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
+    lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
 
     imp_rows = _impaired_rows_from_state(state)
     imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
@@ -913,6 +924,10 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         "mgmt_adj_default_written": mgmt_result["default_written"],
         "mgmt_adj_portfolio_written": mgmt_result["portfolio_written"],
         "mgmt_adj_error": mgmt_result["error"],
+        "lol_ok": lol_result["ok"],
+        "lol_pools_written": lol_result["pools_written"],
+        "lol_skipped": lol_result["skipped"],
+        "lol_error": lol_result["error"],
         "impaired_applied": imp_result["applied"],
         "impaired_cleared": imp_result["cleared"],
         "impaired_error": imp_result["error"],
@@ -995,6 +1010,15 @@ def run_multi_quarter(
         }
 
     out_path = _output_path(workspace_root, short, start_period)
+    # Defensive: remove a stale master left behind by a prior failed
+    # run. Multi-quarter accumulates by reusing out_path as the template
+    # for subsequent iterations, so a corrupt pre-existing file would
+    # propagate into iteration 2+ as a BadZipFile load failure.
+    try:
+        if Path(out_path).exists():
+            Path(out_path).unlink()
+    except OSError:
+        pass
     iterations: list[dict] = []
     skipped: list[dict] = []
     successes = 0
@@ -1057,6 +1081,7 @@ def run_multi_quarter(
     imp_result = {"applied": 0, "cleared": 0, "error": ""}
     mgmt_result = {"ok": False, "pools_written": 0, "default_written": False,
                    "portfolio_written": False, "error": ""}
+    lol_result = {"ok": False, "pools_written": 0, "skipped": [], "error": ""}
     variant_result: dict = {
         "variant": "both", "hidden": [], "kept": [], "outputs": [],
     }
@@ -1068,6 +1093,8 @@ def run_multi_quarter(
         mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
         mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
         mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
+        lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
+        lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
         imp_rows = _impaired_rows_from_state(state)
         imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
         env_result = env_factor_writer.apply_env_factor_ranges(out_path)
@@ -1120,6 +1147,10 @@ def run_multi_quarter(
         "mgmt_adj_default_written": mgmt_result["default_written"],
         "mgmt_adj_portfolio_written": mgmt_result["portfolio_written"],
         "mgmt_adj_error": mgmt_result["error"],
+        "lol_ok": lol_result["ok"],
+        "lol_pools_written": lol_result["pools_written"],
+        "lol_skipped": lol_result["skipped"],
+        "lol_error": lol_result["error"],
         "impaired_applied": imp_result["applied"],
         "impaired_cleared": imp_result["cleared"],
         "impaired_error": imp_result["error"],
@@ -1381,6 +1412,9 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
     mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, str(out_path))
     mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
 
+    lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
+    lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
+
     imp_rows = _impaired_rows_from_state(state)
     imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
 
@@ -1452,6 +1486,10 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "mgmt_adj_default_written": mgmt_result["default_written"],
         "mgmt_adj_portfolio_written": mgmt_result["portfolio_written"],
         "mgmt_adj_error": mgmt_result["error"],
+        "lol_ok": lol_result["ok"],
+        "lol_pools_written": lol_result["pools_written"],
+        "lol_skipped": lol_result["skipped"],
+        "lol_error": lol_result["error"],
         "impaired_applied": imp_result["applied"],
         "impaired_cleared": imp_result["cleared"],
         "impaired_error": imp_result["error"],

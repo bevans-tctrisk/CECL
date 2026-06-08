@@ -7,11 +7,16 @@
       "current bal": 3,
       "current balance": 2,
       "current balance amount": 8,
+      "current loan bal": 4,
       "current loan balance": 6,
       "currupb": 8,
       "loan balance": 29
     },
+    "current_fico_score": {
+      "credit score": 4
+    },
     "days_delinquent": {
+      "col_x": 4,
       "days delinquent": 6,
       "days dq": 3,
       "days past due": 2,
@@ -25,6 +30,7 @@
     "interest_rate": {
       "annual rate 1": 29,
       "cash annual interest rate": 8,
+      "int rate": 4,
       "int_rate": 2,
       "interest rate": 2,
       "interest rate (apr)": 6,
@@ -37,10 +43,10 @@
       "currmiaccttypcd": 5,
       "loan collateral code": 5,
       "loan purpose": 8,
-      "loan type": 32,
+      "loan type": 33,
       "loan type code": 1,
       "mbr state code": 6,
-      "type": 8,
+      "type": 11,
       "type of mortgage": 1
     },
     "loan_suffix": {
@@ -50,7 +56,7 @@
       "pool": 8
     },
     "member_number": {
-      "account #": 3,
+      "account #": 7,
       "account number": 18,
       "acct nbr": 10,
       "acctnbr": 5,
@@ -67,11 +73,12 @@
       "loan original date": 29,
       "orig_ln_dt": 2,
       "original date": 3,
+      "original loan date": 4,
       "origination date": 2
     },
     "original_fico_score": {
       "application_creditscore": 5,
-      "credit score": 43,
+      "credit score": 47,
       "fico": 3,
       "inv": 8,
       "user_defined_field_7": 2
@@ -83,10 +90,10 @@
       "orig nbr pymts": 13,
       "orig_ln_amt": 2,
       "original date": 3,
-      "original loan amount": 16
+      "original loan amount": 20
     },
     "total_available_credit": {
-      "credit limit": 45,
+      "credit limit": 49,
       "credit line amount": 8,
       "creditlimitamt": 5,
       "limit": 3,
@@ -109,6 +116,7 @@
     "cc last stmt bal": "CC LAST STMT BAL",
     "cc note last 4": "CC Note Last 4",
     "col_cd": "col_cd",
+    "col_x": "col_X",
     "contractdate": "CONTRACTDATE",
     "credit limit": "CREDIT LIMIT",
     "credit line amount": "Credit Line Amount",
@@ -117,6 +125,7 @@
     "current bal": "Current Bal",
     "current balance": "Current Balance",
     "current balance amount": "Current Balance Amount",
+    "current loan bal": "Current Loan Bal",
     "current loan balance": "Current Loan Balance",
     "currmiaccttypcd": "CURRMIACCTTYPCD",
     "currupb": "CURRUPB",
@@ -129,6 +138,7 @@
     "dlq_days": "dlq_days",
     "fico": "FICO",
     "finalloanamount": "FinalLoanAmount",
+    "int rate": "Int Rate",
     "int_rate": "int_rate",
     "interest rate": "Interest Rate",
     "interest rate (apr)": "Interest Rate (APR)",
@@ -156,6 +166,7 @@
     "orig_ln_dt": "orig_ln_dt",
     "original date": "Original Date",
     "original loan amount": "Original Loan Amount",
+    "original loan date": "Original Loan Date",
     "origination date": "Origination Date",
     "past due": "Past Due",
     "pool": "POOL",
@@ -164,6 +175,6 @@
     "type of mortgage": "Type of Mortgage",
     "user_defined_field_7": "User_Defined_Field_7"
   },
-  "updated_at": "2026-06-05T15:14:06",
+  "updated_at": "2026-06-08T19:42:51",
   "version": 1
 }

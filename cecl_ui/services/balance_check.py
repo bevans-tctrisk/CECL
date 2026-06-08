@@ -8,12 +8,47 @@ mis-mapped pool codes / balance-format issues before generating reports.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from cecl_ui.services import monthly_bal_parser
+
+
+_UNNAMED_RX = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$", re.IGNORECASE)
+_WS_RX = re.compile(r"\s+")
+
+
+def _excel_idx_to_letter(idx: int) -> str:
+    """0 -> 'A', 25 -> 'Z', 26 -> 'AA'..."""
+    if idx < 0:
+        return ""
+    s = ""
+    n = idx
+    while True:
+        s = chr(ord("A") + (n % 26)) + s
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return s
+
+
+def _normalize_header_columns(cols) -> list[str]:
+    """Mirror ``sample_parser._clean_header`` so wizard-saved mapping
+    values (e.g. ``'Current Loan Bal'`` for a wrap-text cell, or
+    ``'col_X'`` for a blank header) resolve correctly against the
+    DataFrame's columns at lookup time."""
+    out: list[str] = []
+    for i, c in enumerate(cols):
+        s = "" if c is None else _WS_RX.sub(" ", str(c)).strip()
+        low = s.lower()
+        if (not s) or low == "nan" or _UNNAMED_RX.match(s):
+            out.append(f"col_{_excel_idx_to_letter(i)}")
+        else:
+            out.append(s)
+    return out
 
 
 def _report_period_cutoff(state: dict[str, Any]) -> str:
@@ -74,7 +109,7 @@ def _load_loan_extract(
     except Exception:  # noqa: BLE001
         return None
     if has_header:
-        df.columns = [str(c).strip() for c in df.columns]
+        df.columns = _normalize_header_columns(df.columns)
     return df
 
 

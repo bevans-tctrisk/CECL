@@ -154,7 +154,7 @@
     Tell us where the data lives in the workbook. (Auto-detection will be
     added &mdash; for now please confirm by hand.)
   </p>
-  <form method="post">
+  <form method="post" enctype="multipart/form-data">
     <table style="border-collapse:collapse; font-size:13px;">
       <tr>
         <th style="text-align:left; padding:4px 10px;">Sheet name</th>
@@ -286,7 +286,6 @@
       <button class="btn btn-primary" type="submit"
               name="action" value="next">Save &amp; Next &rarr;</button>
     </div>
-  </form>
 </div>
 
 {# ── 3. Allowance for Credit Loss (ACL) ── #}
@@ -306,7 +305,6 @@
     needed for this quarter&rsquo;s reports.
   </p>
 
-  <form method="post" enctype="multipart/form-data">
     <div style="margin:8px 0;">
       <label style="display:block; margin:6px 0;">
         <input type="radio" name="acl_source" value="monthly_file"

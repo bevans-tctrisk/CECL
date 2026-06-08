@@ -2180,7 +2180,8 @@
       <tbody>
       {% for label in hpm.get('labels', []) %}
         {% set current = (hpm.get('mapping') or {}).get(label, '') %}
-        {% set in_step2 = current and (current in (step2_pools or [])) %}
+        {% set is_ignored = (current == '__ignore__') %}
+        {% set in_step2 = current and not is_ignored and (current in (step2_pools or [])) %}
         <tr>
           <td>
             <code>{{ label }}</code>
@@ -2189,12 +2190,12 @@
           <td>
             <select name="pool_for_{{ loop.index0 }}" style="width:100%;">
               <option value="__ignore__"
-                      {% if not current %}selected{% endif %}>&laquo; ignore &raquo;</option>
+                      {% if is_ignored or not current %}selected{% endif %}>&laquo; ignore &raquo;</option>
               {% for p in step2_pools or [] %}
                 <option value="{{ p }}"
                         {% if in_step2 and current == p %}selected{% endif %}>{{ p }}</option>
               {% endfor %}
-              {% if current and not in_step2 %}
+              {% if current and not in_step2 and not is_ignored %}
                 {# Preserve a previously-saved value that doesn't match any
                    current Step 2 pool (e.g. pool was renamed/removed) so
                    the user doesn't lose data silently. #}
@@ -2218,11 +2219,13 @@
 
   {% set unmapped_ns = namespace(count=0) %}
   {% for lbl, pool in (hpm.get('mapping') or {}).items() %}
+    {# Treat "__ignore__" as an intentional choice, not an unmapped row. #}
     {% if not pool %}{% set unmapped_ns.count = unmapped_ns.count + 1 %}{% endif %}
   {% endfor %}
   {% if unmapped_ns.count > 0 %}
     <div class="flash error" style="margin-top:10px;">
-      {{ unmapped_ns.count }} loan type(s) still need a pool assignment.
+      {{ unmapped_ns.count }} loan type(s) still need a pool assignment
+      (pick a pool or choose &laquo; ignore &raquo; for header / spacer rows).
     </div>
   {% endif %}
 </div>
@@ -2325,6 +2328,104 @@
         Upload Charge-Off Workbook
       </button>
     </form>
+
+    {# Column-mapping card for the single-workbook upload. Uses the
+       same `co_inspect` / `co_columns` state and `save_co_columns`
+       action as the monthly-files mode — just rendered with a slim
+       UX (no per-layout picker, no member/account block). When the
+       auto-detector fails to find a Loan Code / Charge-Off Amount /
+       Charge-Off Date column on upload, the user picks here and
+       re-runs Aggregate. #}
+    {% set co_ins_sw = state.get('co_inspect') %}
+    {% set co_cols_sw = state.get('co_columns') or {} %}
+    {% if co_ins_sw and co_files %}
+      <div class="card" style="margin-top:12px; padding:10px;
+                               background:#f7faff;">
+        <strong>Column Mapping</strong>
+        <span class="muted">
+          (auto-detected from <code>{{ co_ins_sw.filename }}</code>)
+        </span>
+        <p class="muted" style="margin:4px 0 0 0; font-size:12px;">
+          Pick the workbook columns the aggregator should use. If the
+          auto-detector left any field blank, choose it here and click
+          <strong>Save Column Mapping</strong>, then re-run
+          <em>Aggregate Charge-Off Workbook(s)</em>.
+        </p>
+        {% if co_ins_sw.error %}
+          <div class="flash error" style="margin-top:6px;">
+            {{ co_ins_sw.error }}
+          </div>
+        {% endif %}
+        <form method="post" style="margin-top:8px;">
+          <div style="display:grid;
+                      grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+                      gap:12px;">
+            <label>Loan Code column
+              <select name="co_loan_code_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins_sw.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols_sw.get('loan_code') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Charge-Off Amount column
+              <select name="co_amount_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins_sw.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols_sw.get('amount') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Charge-Off Date column
+              <select name="co_date_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins_sw.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols_sw.get('date') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+          <div style="margin-top:8px;">
+            <button class="btn btn-secondary" type="submit"
+                    name="action" value="save_co_columns">
+              Save Column Mapping
+            </button>
+            <button class="btn btn-link" type="submit"
+                    name="action" value="reinspect_co_monthly"
+                    style="margin-left:8px;"
+                    title="Re-read headers from the uploaded workbook">
+              Re-inspect
+            </button>
+          </div>
+        </form>
+        {% if co_ins_sw.preview_rows %}
+          <details style="margin-top:8px;">
+            <summary style="cursor:pointer;">Preview rows</summary>
+            <table class="data-table" style="margin-top:6px;">
+              <thead><tr>
+                {% for h in co_ins_sw.headers %}<th>{{ h }}</th>{% endfor %}
+              </tr></thead>
+              <tbody>
+              {% for r in co_ins_sw.preview_rows %}
+                <tr>
+                  {% for c in r %}<td>{{ c if c is not none else '' }}</td>{% endfor %}
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </details>
+        {% endif %}
+      </div>
+    {% endif %}
 
     {# Aggregate uploaded workbook(s) into the historical CO database.
        Each row's Charge-Off Date is snapped to its month-end, then sums
@@ -2966,7 +3067,6 @@
 
     <form method="post" style="margin-top:10px;">
       <button class="btn btn-primary" type="submit"
-              formaction="{{ url_for('setup.step3_historical') }}"
               name="action" value="run_solr_co_backfill"
               {% if not _ch or not tgt_period or not sb.get('solr_url')
                     or not co_cmap %}disabled{% endif %}>
@@ -3036,6 +3136,104 @@
       </div>
     {% endif %}
   </div>
+
+  {# --- 5300/file Loan-code -> pool mapping (always shown when there are
+       any distinct loan codes from the workbook OR the DB history table).
+       This lets the user assign NCUA canonical names emitted by the
+       5300 backfill (e.g. "Used Vehicles", "Junior Liens") to the pools
+       established on Step 2, exactly like the Balance Titles flow on
+       the WARM setup. Saves into the global Step 3 Loan Code Mapping
+       so balance / CO / recov / DQ overlays all share one pool_map. --- #}
+  {% if co_distinct_codes %}
+    {% set lcm_global = state.get('pool_map') or {} %}
+    {% set _co_resolved = [] %}
+    {% set _co_unmapped = [] %}
+    {% for c in co_distinct_codes %}
+      {% set _v = (lcm_global.get(c) or '') | string %}
+      {% if _v and _v.strip() %}
+        {% set _ = _co_resolved.append(c) %}
+      {% else %}
+        {% set _ = _co_unmapped.append(c) %}
+      {% endif %}
+    {% endfor %}
+    <div class="card" style="margin-top:16px;">
+      <strong>Map charge-off loan codes &rarr; pools</strong>
+      <p class="muted" style="margin:4px 0 0 0;">
+        {{ _co_resolved|length }} of {{ co_distinct_codes|length }}
+        loan code(s) already mapped to a pool.
+        {% if _co_unmapped %}
+          <span style="color:#a60;">
+            {{ _co_unmapped|length }} need to be mapped before they
+            appear in the report.
+          </span>
+        {% endif %}
+        Saves to the global Step 3 Loan Code Mapping (used by every
+        history overlay).
+      </p>
+      {% if _co_unmapped %}
+        {% set _co_pool_choices = [] %}
+        {% for p in (state.pool_settings or []) %}
+          {% if p.name and not p.excluded
+                and p.name not in _co_pool_choices %}
+            {% set _ = _co_pool_choices.append(p.name) %}
+          {% endif %}
+        {% endfor %}
+        <form method="post" style="margin-top:8px;">
+          <input type="hidden" name="action"
+                 value="map_unmapped_co_codes">
+          <table class="data-table"
+                 style="margin-top:4px; max-width:600px;">
+            <thead>
+              <tr><th>Loan code</th><th>Map to pool</th></tr>
+            </thead>
+            <tbody>
+              {% for c in _co_unmapped %}
+                <tr>
+                  <td><code>{{ c }}</code>
+                    <input type="hidden" name="unmapped_code"
+                           value="{{ c }}">
+                  </td>
+                  <td>
+                    <select name="unmapped_pool_{{ loop.index0 }}"
+                            style="min-width:200px;">
+                      <option value="">&mdash; choose &mdash;</option>
+                      {% for p in _co_pool_choices %}
+                        <option value="{{ p }}">{{ p }}</option>
+                      {% endfor %}
+                      <option value="Ignore">Ignore (exclude)</option>
+                    </select>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <button class="btn btn-secondary" type="submit"
+                  style="margin-top:6px;">
+            Save mappings
+          </button>
+        </form>
+      {% endif %}
+      {% if _co_resolved %}
+        <details style="margin-top:8px;">
+          <summary class="muted" style="cursor:pointer;">
+            Already mapped ({{ _co_resolved|length }})
+          </summary>
+          <table class="data-table"
+                 style="margin-top:4px; max-width:600px;">
+            <thead><tr><th>Loan code</th><th>Pool</th></tr></thead>
+            <tbody>
+              {% for c in _co_resolved %}
+                <tr>
+                  <td><code>{{ c }}</code></td>
+                  <td>{{ lcm_global.get(c) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </details>
+      {% endif %}
+    </div>
+  {% endif %}
 
   {{ amount_history_matrix(co_history_view|default(none), state.credit_union,
         'charge-off',
@@ -3144,6 +3342,100 @@
           Upload Recoveries Workbook
         </button>
       </form>
+
+      {# Column-mapping card for the single-workbook upload. Uses the
+         same `recov_inspect` / `recov_columns` state and
+         `save_recov_columns` action as the monthly-files mode. #}
+      {% set recov_ins_sw = state.get('recov_inspect') %}
+      {% set recov_cols_sw = state.get('recov_columns') or {} %}
+      {% if recov_ins_sw and recov_files %}
+        <div class="card" style="margin-top:12px; padding:10px;
+                                 background:#f7faff;">
+          <strong>Column Mapping</strong>
+          <span class="muted">
+            (auto-detected from <code>{{ recov_ins_sw.filename }}</code>)
+          </span>
+          <p class="muted" style="margin:4px 0 0 0; font-size:12px;">
+            Pick the workbook columns the aggregator should use. If the
+            auto-detector left any field blank, choose it here and click
+            <strong>Save Column Mapping</strong>, then re-run
+            <em>Aggregate Recoveries Workbook(s)</em>.
+          </p>
+          {% if recov_ins_sw.error %}
+            <div class="flash error" style="margin-top:6px;">
+              {{ recov_ins_sw.error }}
+            </div>
+          {% endif %}
+          <form method="post" style="margin-top:8px;">
+            <div style="display:grid;
+                        grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+                        gap:12px;">
+              <label>Loan Code column
+                <select name="recov_loan_code_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins_sw.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols_sw.get('loan_code') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>Recovery Amount column
+                <select name="recov_amount_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins_sw.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols_sw.get('amount') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>Recovery Date column
+                <select name="recov_date_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins_sw.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols_sw.get('date') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+            </div>
+            <div style="margin-top:8px;">
+              <button class="btn btn-secondary" type="submit"
+                      name="action" value="save_recov_columns">
+                Save Column Mapping
+              </button>
+              <button class="btn btn-link" type="submit"
+                      name="action" value="reinspect_recov_monthly"
+                      style="margin-left:8px;"
+                      title="Re-read headers from the uploaded workbook">
+                Re-inspect
+              </button>
+            </div>
+          </form>
+          {% if recov_ins_sw.preview_rows %}
+            <details style="margin-top:8px;">
+              <summary style="cursor:pointer;">Preview rows</summary>
+              <table class="data-table" style="margin-top:6px;">
+                <thead><tr>
+                  {% for h in recov_ins_sw.headers %}<th>{{ h }}</th>{% endfor %}
+                </tr></thead>
+                <tbody>
+                {% for r in recov_ins_sw.preview_rows %}
+                  <tr>
+                    {% for c in r %}<td>{{ c if c is not none else '' }}</td>{% endfor %}
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </details>
+          {% endif %}
+        </div>
+      {% endif %}
 
       {# Aggregate uploaded recoveries workbook(s) into the historical
          recoveries DB.  Same per-row date binning as the CO workbook
@@ -3785,7 +4077,6 @@
 
       <form method="post" style="margin-top:10px;">
         <button class="btn btn-primary" type="submit"
-                formaction="{{ url_for('setup.step3_historical') }}"
                 name="action" value="run_solr_recov_backfill"
                 {% if not _ch or not tgt_period or not sb.get('solr_url')
                       or not rec_cmap %}disabled{% endif %}>
@@ -3857,6 +4148,100 @@
     </div>
   </div>
 
+  {# --- Recovery loan-code -> pool mapping (always shown when there are
+       any distinct loan codes from the workbook OR the DB history table).
+       Mirrors the CO section so 5300-backfill canonical names get mapped. --- #}
+  {% if recov_distinct_codes %}
+    {% set lcm_global = state.get('pool_map') or {} %}
+    {% set _rc_resolved = [] %}
+    {% set _rc_unmapped = [] %}
+    {% for c in recov_distinct_codes %}
+      {% set _v = (lcm_global.get(c) or '') | string %}
+      {% if _v and _v.strip() %}
+        {% set _ = _rc_resolved.append(c) %}
+      {% else %}
+        {% set _ = _rc_unmapped.append(c) %}
+      {% endif %}
+    {% endfor %}
+    <div class="card" style="margin-top:16px;">
+      <strong>Map recovery loan codes &rarr; pools</strong>
+      <p class="muted" style="margin:4px 0 0 0;">
+        {{ _rc_resolved|length }} of {{ recov_distinct_codes|length }}
+        loan code(s) already mapped to a pool.
+        {% if _rc_unmapped %}
+          <span style="color:#a60;">
+            {{ _rc_unmapped|length }} need to be mapped before they
+            appear in the report.
+          </span>
+        {% endif %}
+        Saves to the global Step 3 Loan Code Mapping (used by every
+        history overlay).
+      </p>
+      {% if _rc_unmapped %}
+        {% set _rc_pool_choices = [] %}
+        {% for p in (state.pool_settings or []) %}
+          {% if p.name and not p.excluded
+                and p.name not in _rc_pool_choices %}
+            {% set _ = _rc_pool_choices.append(p.name) %}
+          {% endif %}
+        {% endfor %}
+        <form method="post" style="margin-top:8px;">
+          <input type="hidden" name="action"
+                 value="map_unmapped_recov_codes">
+          <table class="data-table"
+                 style="margin-top:4px; max-width:600px;">
+            <thead>
+              <tr><th>Loan code</th><th>Map to pool</th></tr>
+            </thead>
+            <tbody>
+              {% for c in _rc_unmapped %}
+                <tr>
+                  <td><code>{{ c }}</code>
+                    <input type="hidden" name="unmapped_code"
+                           value="{{ c }}">
+                  </td>
+                  <td>
+                    <select name="unmapped_pool_{{ loop.index0 }}"
+                            style="min-width:200px;">
+                      <option value="">&mdash; choose &mdash;</option>
+                      {% for p in _rc_pool_choices %}
+                        <option value="{{ p }}">{{ p }}</option>
+                      {% endfor %}
+                      <option value="Ignore">Ignore (exclude)</option>
+                    </select>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <button class="btn btn-secondary" type="submit"
+                  style="margin-top:6px;">
+            Save mappings
+          </button>
+        </form>
+      {% endif %}
+      {% if _rc_resolved %}
+        <details style="margin-top:8px;">
+          <summary class="muted" style="cursor:pointer;">
+            Already mapped ({{ _rc_resolved|length }})
+          </summary>
+          <table class="data-table"
+                 style="margin-top:4px; max-width:600px;">
+            <thead><tr><th>Loan code</th><th>Pool</th></tr></thead>
+            <tbody>
+              {% for c in _rc_resolved %}
+                <tr>
+                  <td><code>{{ c }}</code></td>
+                  <td>{{ lcm_global.get(c) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </details>
+      {% endif %}
+    </div>
+  {% endif %}
+
   {{ amount_history_matrix(recov_history_view|default(none), state.credit_union,
         'recovery',
         'Nothing in the recovery history database yet for this CU. '
@@ -3889,7 +4274,11 @@
 {% set ns = namespace(complete=True) %}
 {% if mapping_required %}
   {% for lbl in hpm2.get('labels', []) %}
-    {% if not (hpm2.get('mapping') or {}).get(lbl) %}
+    {# A row counts as "complete" if it has either a real pool or the
+       explicit "__ignore__" sentinel (user chose to skip it). Only an
+       unreviewed blank keeps the section incomplete. #}
+    {% set _m = (hpm2.get('mapping') or {}).get(lbl) %}
+    {% if not _m %}
       {% set ns.complete = False %}
     {% endif %}
   {% endfor %}

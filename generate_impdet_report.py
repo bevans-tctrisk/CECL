@@ -29,7 +29,7 @@ from cecl_engine import (
     assign_business_risk_grade,
     build_grade_order,
 )
-from import_data import derive_member_account, _normalize_col_map_for_no_header
+from import_data import derive_member_account, _normalize_col_map_for_no_header, _excel_idx_to_letter
 
 load_dotenv()
 # Honour CECL_WORKSPACE_ROOT so the data root can be decoupled from the
@@ -921,7 +921,22 @@ def _load_extract_enrichment(config, workspace_root):
                     df = pd.read_csv(path, header=pd_header)
                 else:
                     df = pd.read_excel(path, header=pd_header)
-                df.columns = [str(c).strip() for c in df.columns]
+                # Mirror import_data's header normalisation: collapse
+                # internal whitespace (wrap-text headers often have CR/LF
+                # inside a single cell) and rewrite blank / 'nan' /
+                # pandas 'Unnamed: N' placeholders to ``col_<LETTER>`` so
+                # the wizard-saved column_mappings resolve correctly.
+                _unnamed_rx = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$",
+                                          re.IGNORECASE)
+                _normed = []
+                for _i, _c in enumerate(df.columns):
+                    _s = re.sub(r"\s+", " ", str(_c)).strip() if _c is not None else ""
+                    _low = _s.lower()
+                    if (not _s) or _low == "nan" or _unnamed_rx.match(_s):
+                        _normed.append(f"col_{_excel_idx_to_letter(_i)}")
+                    else:
+                        _normed.append(_s)
+                df.columns = _normed
             else:
                 if ext_lc == '.csv':
                     df = pd.read_csv(path, header=None)

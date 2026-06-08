@@ -42,6 +42,8 @@ _LOAN_CODE_HEADERS = (
     "security code", "security_code",
     "loan type", "loan_type", "loan class", "loan_class",
     "product code", "product_code", "product type", "product_type",
+    "collateral code", "collateral_code", "collateral type",
+    "collateral_type",
 )
 _MEMBER_HEADERS = (
     "member number", "member_number", "member#", "member #", "member id",
@@ -439,14 +441,26 @@ def inspect_file(path: Path) -> dict[str, Any]:
                 "manually below."
             )
             # Still expose the first row as a best-effort header list.
+            # Normalise embedded whitespace (newlines / tabs / runs of
+            # spaces) so the option ``value`` posted by the browser
+            # round-trips cleanly back into the saved column mapping.
             out["headers"] = [
-                str(c) if c is not None else ""
+                re.sub(r"\s+", " ", str(c)).strip() if c is not None else ""
                 for c in (raw[0] if raw else [])
             ]
             out["preview_rows"] = [list(r) for r in raw[1:6]]
             return out
 
-    headers = [str(c) if c is not None else "" for c in raw[hdr_idx]]
+    # Normalise embedded whitespace in header cells (Excel often wraps
+    # headers across lines, leaving \n / \t inside the value). Browsers
+    # collapse whitespace inside ``<option value="...">`` attributes
+    # when submitting forms, so without this the saved value ("Chargeoff
+    # Amount") would never match the option text ("Chargeoff\nAmount")
+    # on subsequent renders and the dropdown would reset to "choose".
+    headers = [
+        re.sub(r"\s+", " ", str(c)).strip() if c is not None else ""
+        for c in raw[hdr_idx]
+    ]
 
     def _name_at(idx: int | None) -> str:
         if idx is None or idx >= len(headers):

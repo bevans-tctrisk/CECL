@@ -2984,26 +2984,20 @@ def _grade_pct_from_last_month(pdata):
 def extend_hist_bal_with_monthly(hist_bal_data, monthly_balances):
     """Extend hist_bal_data with pool-level monthly balance records.
 
-    Only adds months *after* the last date already in hist_bal_data.
-    Monthly file dates are normalized to month-end for consistency.
-    Grade values are distributed proportionally using the most recent month's
+    Adds any (pool, month-end) that isn't already in hist_bal_data — both
+    AFTER the prior report's coverage (going-forward extension to current
+    snapshot) and BEFORE it (back-filling years from the 5300 backfill in
+    ``loan_code_history`` that landed in hist['monthly_balances'] but
+    weren't in the prior TCT report when it was generated). Grade-level
+    values are distributed proportionally using the most recent month's
     grade percentages from the prior report.
     """
     if monthly_balances is None or monthly_balances.empty:
         return
 
-    # Find the latest date already in hist_bal_data
-    latest_existing = pd.Timestamp.min
-    for pdata in hist_bal_data.values():
-        for d in pdata.get('dates', []):
-            ts = pd.Timestamp(d)
-            if ts > latest_existing:
-                latest_existing = ts
-
-    if latest_existing == pd.Timestamp.min:
-        return  # no existing data to extend from
-
-    # Pre-compute grade percentage distributions per pool (before adding new months)
+    # Pre-compute grade percentage distributions per pool (before adding
+    # new months) so back-fill and forward-fill both use the prior
+    # report's most-recent-month grade mix as the proxy.
     grade_pcts = {}
     for pool, pdata in hist_bal_data.items():
         grade_pcts[pool] = _grade_pct_from_last_month(pdata)
@@ -3029,23 +3023,34 @@ def extend_hist_bal_with_monthly(hist_bal_data, monthly_balances):
 
         pdata = hist_bal_data[mapped]
         pcts = grade_pcts.get(mapped, {})
+        existing_dates_set = set(
+            pd.Timestamp(d) for d in pdata.get('dates', [])
+        )
 
+        added_any = False
         for _, row in grp.sort_values('date').iterrows():
-            dt = pd.Timestamp(row['date'])
-            # Normalize to month-end
-            dt = dt + pd.offsets.MonthEnd(0)
-            # Only add months after what the prior report already had
-            if dt <= latest_existing:
+            dt = pd.Timestamp(row['date']) + pd.offsets.MonthEnd(0)
+            if dt in existing_dates_set:
                 continue
-            # Check not already present (e.g. from DB extension)
-            if dt in set(pd.Timestamp(d) for d in pdata['dates']):
-                continue
+            existing_dates_set.add(dt)
             pool_total = float(row['balance'])
             pdata['dates'].append(dt)
             pdata['total'].append(pool_total)
-            # Distribute total across grades using prior month's percentages
             for g, vals in pdata.get('grades', {}).items():
                 vals.append(pool_total * pcts.get(g, 0.0))
+            added_any = True
+
+        if added_any:
+            # Re-sort all arrays by date so chronological order is
+            # preserved (back-filled months land before existing ones).
+            order = sorted(
+                range(len(pdata['dates'])),
+                key=lambda i: pd.Timestamp(pdata['dates'][i]),
+            )
+            pdata['dates'] = [pdata['dates'][i] for i in order]
+            pdata['total'] = [pdata['total'][i] for i in order]
+            for g, vals in pdata.get('grades', {}).items():
+                pdata['grades'][g] = [vals[i] for i in order]
 
 
 def extend_hist_bal_with_db(hist_bal_data, df, snap, grades, config):
@@ -3270,6 +3275,18 @@ def load_historical_data(config):
         'dq_pct': dq_pct,
         'alll_by_date': alll_by_date,
     }
+
+    # Extend hist['years'] to include any year covered only by the
+    # balance-history overlay (5300 distributed backfill writes balance
+    # rows but not CO/RC rows, so years 2018-2022 typically appear in
+    # avg_balances but not in co_rec['years']). Without this, the
+    # Display HIst Bal year axis would only show CO/RC-covered years.
+    extra_years = {
+        y for y in (avg_balances or {}).keys()
+        if isinstance(y, int) and y not in set(hist['years'])
+    }
+    if extra_years:
+        hist['years'] = sorted(set(hist['years']) | extra_years)
 
     # Print summary
     if co_rec['years']:
@@ -10179,7 +10196,8 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                     for ym, pools in prior.get('warm_rc_monthly', {}).items()
                 }
                 hist['years'] = sorted(set(hist['chargeoffs'])
-                                       | set(hist['recoveries']))
+                                       | set(hist['recoveries'])
+                                       | set(hist.get('avg_balances') or {}))
                 tot_co = sum(sum(p.values())
                              for p in hist['chargeoffs'].values())
                 tot_rc = sum(sum(p.values())
