@@ -799,12 +799,27 @@ _EXTRACT_FIELDS = [
 
 
 def _resolve_extract_path(file_pattern, search_dirs):
-    """Find the first file in any search_dir whose name matches file_pattern."""
+    """Find the first file in any search_dir whose name matches file_pattern.
+
+    ``file_pattern`` accepts either a single regex string or a list of regex
+    strings (multi-pattern, first-match-wins). Empty/None returns ``None``.
+    Invalid regexes are skipped.
+    """
     if not file_pattern:
         return None
-    try:
-        rx = re.compile(file_pattern)
-    except re.error:
+    if isinstance(file_pattern, str):
+        raw_patterns = [file_pattern]
+    elif isinstance(file_pattern, (list, tuple)):
+        raw_patterns = [p for p in file_pattern if isinstance(p, str) and p]
+    else:
+        return None
+    compiled = []
+    for p in raw_patterns:
+        try:
+            compiled.append(re.compile(p))
+        except re.error:
+            continue
+    if not compiled:
         return None
     for sdir in search_dirs:
         if not sdir or not os.path.isdir(sdir):
@@ -813,7 +828,7 @@ def _resolve_extract_path(file_pattern, search_dirs):
             for f in files:
                 if f.startswith('~$') or f.upper().startswith('DNU'):
                     continue
-                if rx.search(f):
+                if any(rx.search(f) for rx in compiled):
                     return os.path.join(root, f)
     return None
 

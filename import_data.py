@@ -128,6 +128,9 @@ def extract_snapshot_date(source_text, config):
             month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
             year += 2000 if year < 100 else 0
             return date(year, month, day).isoformat()
+        elif date_fmt == 'MMDDYYYY':
+            month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return date(year, month, day).isoformat()
         elif date_fmt == 'MMYY':
             month, year = int(match.group(1)), int(match.group(2))
             year += 2000 if year < 100 else 0
@@ -241,6 +244,47 @@ def _try_common_date_layouts(text: str) -> str | None:
         except (ValueError, calendar.IllegalMonthError):
             continue
     return None
+
+
+def _compile_file_patterns(value, *, label=""):
+    """Compile a YAML ``file_pattern`` value into a list of regex objects.
+
+    Accepts either a single regex string (legacy single-pattern form) or a
+    list of regex strings (new multi-pattern form, first-match-wins). Empty
+    or ``None`` returns an empty list. Invalid regexes are warned and
+    skipped so a typo in one pattern doesn't blow up the whole import.
+
+    The multi-pattern form lets a single ``loan_data_extracts`` entry match
+    files whose names changed across years (e.g. anonymized old-style
+    ``Aires Loan <date> Credit Union B.xlsx`` alongside modern
+    ``<acct> - Nova Aires Loan <date>.xlsx``). Same shape semantics as a
+    single regex — order in the list is preserved for diagnostics.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        items = [v for v in value if isinstance(v, str) and v]
+    else:
+        return []
+    out = []
+    for s in items:
+        try:
+            out.append(re.compile(s, re.IGNORECASE))
+        except re.error as exc:
+            tag = f" ({label})" if label else ""
+            print(f"  WARNING: invalid file_pattern {s!r}{tag}: {exc}; skipping.")
+    return out
+
+
+def _patterns_match_any(patterns, *texts):
+    """Return True if any compiled pattern matches any of the texts."""
+    for p in patterns:
+        for t in texts:
+            if t and p.search(t):
+                return True
+    return False
 
 
 def clean_balance(series, balance_format):
@@ -394,12 +438,22 @@ def load_credit_pull_scores(config):
                                 except (ValueError, TypeError):
                                     pass
                         print(f"    Credit pull file: {fname} ({len(scores)} scores loaded)")
-                    if pull_as_of is None:
-                        try:
-                            pull_as_of = pd.Timestamp(os.path.getmtime(fpath), unit='s')
-                        except (OSError, ValueError):
-                            pass
-                    break  # use first matching file
+                        if pull_as_of is None:
+                            try:
+                                pull_as_of = pd.Timestamp(os.path.getmtime(fpath), unit='s')
+                            except (OSError, ValueError):
+                                pass
+                        break  # headers matched + scores loaded; stop here
+                    else:
+                        # File matched the regex but its headers don't carry the
+                        # configured member/score columns. Common when a shared
+                        # temp/sample folder holds files for multiple CUs with
+                        # divergent header conventions (Account # vs Account
+                        # Number, FICO vs Credit Score, etc.). Skip this file
+                        # and let the loop try the next match.
+                        print(f"    Credit pull file {fname}: headers do not contain "
+                              f"'{member_col}' and/or '{score_col}' — skipping.")
+                        continue
 
     # 2. Also check credit pull tabs in existing CECL report to fill gaps
     # (older credit pulls may cover members not in the latest standalone file)
@@ -1159,7 +1213,13 @@ def process_client(client_name, specific_file=None):
     """Process all matching files for a client."""
     config = load_client_config(client_name)
     cu_name = config['credit_union']
-    file_pattern_re = re.compile(config['file_pattern'], re.IGNORECASE)
+    # ``file_pattern`` accepts either a single regex string (legacy) or a
+    # list of regex strings (multi-pattern, first-match-wins). Empty list
+    # means no top-level catch-all is enforced — only per-extract patterns
+    # decide which files to import.
+    top_pattern_res = _compile_file_patterns(
+        config.get('file_pattern'), label='top-level',
+    )
 
     # Per-file loan-data extracts (wizard "Column Mappings" step). When
     # present, each entry overrides ``column_mappings`` / ``member_account``
@@ -1167,16 +1227,14 @@ def process_client(client_name, specific_file=None):
     # matches the extract's own ``file_pattern``. Falls back to the
     # top-level mapping when no per-file pattern matches.
     extracts_raw = config.get('loan_data_extracts') or []
-    extracts: list[tuple[re.Pattern, dict]] = []
+    extracts: list[tuple[list[re.Pattern], dict]] = []
     for e in extracts_raw:
-        pat = (e or {}).get('file_pattern') or ''
-        if not pat:
-            continue
-        try:
-            extracts.append((re.compile(pat, re.IGNORECASE), e))
-        except re.error as exc:
-            print(f"  WARNING: loan_data_extracts entry {e.get('label','?')!r} "
-                  f"has invalid file_pattern {pat!r}: {exc}. Skipping.")
+        label = (e or {}).get('label', '?')
+        pats = _compile_file_patterns(
+            (e or {}).get('file_pattern'), label=label,
+        )
+        if pats:
+            extracts.append((pats, e))
 
     # Optional custom loan source folder (absolute or relative), useful for external client folders.
     configured_loan_folder = config.get('loan_file_folder')
@@ -1241,8 +1299,8 @@ def process_client(client_name, specific_file=None):
         # back to the top-level mapping for back-compat.
         per_file_cfg = config
         matched_extract = None
-        for pat, extract in extracts:
-            if pat.search(filename) or pat.search(relative_file):
+        for pats, extract in extracts:
+            if _patterns_match_any(pats, filename, relative_file):
                 matched_extract = extract
                 break
         if matched_extract is not None:
@@ -1280,13 +1338,14 @@ def process_client(client_name, specific_file=None):
             # file matched that we'd still be here. Skip with a warning
             # rather than risk mis-mapping with the first extract's
             # columns.
-            if not file_pattern_re.search(filename):
+            if not _patterns_match_any(top_pattern_res, filename, relative_file):
                 continue
             print(f"    WARNING: {filename} matched top-level file_pattern but "
                   "no loan_data_extracts entry. Using top-level mapping as "
                   "fallback.")
 
-        if not file_pattern_re.search(filename) and matched_extract is None:
+        if (not _patterns_match_any(top_pattern_res, filename, relative_file)
+                and matched_extract is None):
             continue
 
         print(f"\n  File: {relative_file}")

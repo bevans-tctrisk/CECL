@@ -205,6 +205,20 @@ def reports(short_name: str):
         flash("Pick at least one report to generate.", "error")
         return redirect(url_for("run.client_dashboard", short_name=short_name))
 
+    # If reports succeeded and this CU has no Completed-setup entry yet,
+    # auto-adopt its YAML config so it shows up alongside wizard-built
+    # CUs on the home page. Lazy-imported to avoid a circular import
+    # between home.py and run.py at module load.
+    if outputs and not errors:
+        try:
+            from cecl_ui.routes.home import adopt_config_to_completed
+            adopt_config_to_completed(
+                current_app.config["WORKSPACE_ROOT"], short_name,
+            )
+        except Exception:  # noqa: BLE001
+            # Auto-adoption is a UX-nicety; never block the results page.
+            pass
+
     return render_template(
         "run/results.html",
         short_name=short_name,
@@ -510,25 +524,37 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
     # patterns first (most specific), then fall back to the top-level
     # ``file_pattern`` + top-level ``column_mappings`` so files that no
     # extract matches still get scanned.
+    def _compile_list(value):
+        """str | list[str] -> list[Pattern]; invalid regexes silently skipped."""
+        if not value:
+            return []
+        items = [value] if isinstance(value, str) else [
+            v for v in value if isinstance(v, str) and v
+        ]
+        out: list = []
+        for s in items:
+            try:
+                out.append(re.compile(s, re.IGNORECASE))
+            except re.error:
+                continue
+        return out
+
     extracts = cfg.get("loan_data_extracts") or []
     patterns: list[tuple] = []
     for e in extracts:
-        pat = (e or {}).get("file_pattern") or ""
-        if not pat:
-            continue
-        try:
-            pre = re.compile(pat, re.IGNORECASE)
-        except re.error:
+        pres = _compile_list((e or {}).get("file_pattern"))
+        if not pres:
             continue
         cm = (e or {}).get("column_mappings") or {}
-        patterns.append((pre, cm))
-    top_pat = cfg.get("file_pattern") or ""
-    if top_pat:
-        try:
-            patterns.append((re.compile(top_pat, re.IGNORECASE),
-                             cfg.get("column_mappings") or {}))
-        except re.error:
-            pass
+        # One tuple per regex so the existing single-Pattern consumer
+        # below works unchanged for multi-pattern extracts.
+        for pre in pres:
+            patterns.append((pre, cm))
+    top_pres = _compile_list(cfg.get("file_pattern"))
+    if top_pres:
+        top_cm = cfg.get("column_mappings") or {}
+        for pre in top_pres:
+            patterns.append((pre, top_cm))
     if not patterns:
         return []
 
