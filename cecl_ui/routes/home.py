@@ -64,6 +64,44 @@ def adopt_config(short_name: str):
     if not cfg:
         flash(f"Config for '{short_name}' is empty.", "error")
         return redirect(url_for("home.index"))
+    adopted = adopt_config_to_completed(workspace, short_name, cfg)
+    if adopted:
+        flash(
+            f"Adopted '{cfg.get('credit_union') or short_name}' into Completed setup. "
+            "Click Edit setup to revise any step.",
+            "success",
+        )
+    else:
+        flash(
+            f"'{cfg.get('credit_union') or short_name}' already has a wizard draft.",
+            "info",
+        )
+    return redirect(url_for("home.index"))
+
+
+def adopt_config_to_completed(
+    workspace: str, short_name: str, cfg: dict | None = None,
+) -> bool:
+    """Lift an existing YAML config into a Completed migration draft.
+
+    Idempotent: when a migration draft already exists (in-progress OR
+    completed), this is a no-op and returns False. Returns True on
+    successful adoption. Safe to call from any successful-report
+    code path so credit unions configured outside the wizard
+    automatically show up in the Completed setup table on the home
+    page.
+    """
+    if cfg is None:
+        try:
+            cfg = config_service.load_client_config(workspace, short_name)
+        except FileNotFoundError:
+            return False
+    if not cfg:
+        return False
+    # Skip if a migration draft (any state) already exists.
+    for d in wizard_drafts.list_drafts(workspace):
+        if d.get("key") == short_name and d.get("model") == "migration":
+            return False
     state = dict(cfg)
     state["short_name"] = short_name
     state["model"] = "migration"
@@ -74,15 +112,14 @@ def adopt_config(short_name: str):
         "completed_at": datetime.now().isoformat(timespec="seconds"),
         "adopted_from_config": True,
     }
-    wizard_drafts.save_draft(
-        workspace, state, active_step="review", model="migration",
-    )
-    flash(
-        f"Adopted '{cfg.get('credit_union') or short_name}' into Completed setup. "
-        "Click Edit setup to revise any step.",
-        "success",
-    )
-    return redirect(url_for("home.index"))
+    try:
+        wizard_drafts.save_draft(
+            workspace, state, active_step="review", model="migration",
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        # Adoption is a UX-nicety; never raise into a calling code path.
+        return False
 
 
 @home_bp.route("/model-select", methods=["GET", "POST"])

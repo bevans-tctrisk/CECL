@@ -67,6 +67,222 @@ def _normalise(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower()).strip("_")
 
 
+# ---------- Date format validation ----------
+#
+# These are the literal values ``import_data.extract_snapshot_date`` knows
+# how to translate from the configured ``date_pattern`` regex groups.
+# Anything else silently falls through to the YYYY-MM branch and yields
+# garbage dates. Single source of truth so the wizard can validate user
+# picks before the YAML is written.
+
+ACCEPTED_DATE_FORMATS: tuple[str, ...] = (
+    "YYYY-MM",      # default: 2 capture groups (year, month)
+    "YYYYMMDD",     # 3 capture groups (year, month, day)
+    "MMDDYY",       # 3 capture groups (month, day, year[2 or 4 digits])
+    "MMYY",         # 2 capture groups (month, year[2 digits])
+    "MMYYYY",       # 2 capture groups (month, year[4 digits])
+    "YYYYQ",        # 2 capture groups (year, quarter[1-4])
+    "QYYYY",        # 2 capture groups (quarter, year)
+)
+
+DATE_FORMAT_LABELS: dict[str, str] = {
+    "YYYY-MM":  "YYYY-MM (e.g. 2025-12) - default; matches 2-group regex",
+    "YYYYMMDD": "YYYYMMDD (e.g. 20251231) - 3-group, year/month/day",
+    "MMDDYY":   "MMDDYY or MM-DD-YYYY (e.g. 12-31-25 or 12-31-2025)",
+    "MMYY":     "MMYY (e.g. 12-25)",
+    "MMYYYY":   "MMYYYY (e.g. 12-2025)",
+    "YYYYQ":    "YYYYQ (e.g. 2025Q4 or 2025-Q4)",
+    "QYYYY":    "QYYYY (e.g. Q4-2025)",
+}
+
+
+def validate_date_format(
+    date_pattern: str,
+    date_format: str,
+    sample_filename: str = "",
+) -> dict[str, Any]:
+    """Validate a (date_pattern, date_format) pair and resolve a sample.
+
+    Returns ``{ok, error, preview, recognized}``:
+      * ``recognized`` - True iff ``date_format`` is one ``import_data`` knows.
+      * ``ok`` - True iff the regex compiled and (if ``sample_filename``
+        given) successfully resolved to a date.
+      * ``preview`` - resolved ISO date string (e.g. ``"2025-12-31"``)
+        when a sample was supplied and the parse succeeded; else ``""``.
+      * ``error`` - human-readable string when something failed.
+    """
+    out: dict[str, Any] = {
+        "ok": False, "error": None, "preview": "",
+        "recognized": date_format in ACCEPTED_DATE_FORMATS,
+    }
+    if not out["recognized"]:
+        out["error"] = (
+            f"Date format {date_format!r} is not recognized. "
+            f"Pick one of: {', '.join(ACCEPTED_DATE_FORMATS)}."
+        )
+        return out
+    try:
+        re.compile(date_pattern)
+    except re.error as exc:
+        out["error"] = f"Invalid date_pattern regex: {exc}"
+        return out
+    if not sample_filename:
+        out["ok"] = True
+        return out
+    # Defer the import: import_data is a heavy module and we only need
+    # one function. This keeps wizard pages snappy.
+    try:
+        import import_data as _id  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"Could not import date resolver: {exc}"
+        return out
+    iso = _id.extract_snapshot_date(
+        sample_filename,
+        {"date_pattern": date_pattern, "date_format": date_format},
+    )
+    if not iso:
+        out["error"] = (
+            f"Could not extract a date from {sample_filename!r} "
+            f"using pattern {date_pattern!r} / format {date_format}."
+        )
+        return out
+    out["ok"] = True
+    out["preview"] = iso
+    return out
+
+
+# ---------- Member / Account number layout inference ----------
+#
+# Looks at the literal account-key cells from the loan extract and
+# proposes a ``member_account`` block (mode + delimiter / suffix length)
+# that the import pipeline knows how to split. The wizard previously
+# defaulted everyone to ``mode=fixed_suffix, suffix_length=3``; CUs
+# whose account column is e.g. ``000000470-06`` (delimiter) or
+# ``219044`` (no suffix) silently failed credit-pull joins until an
+# operator hand-edited the YAML.
+
+_DELIM_INFER_RX = re.compile(r"^\s*(\d+)([\-_LXlx/])(\d+)\s*$")
+_DIGITS_RX = re.compile(r"^\s*(\d+)\s*$")
+
+
+def infer_member_account_from_values(
+    values: list[Any],
+    sample_size: int = 50,
+) -> dict[str, Any] | None:
+    """Inspect raw values and propose a ``member_account`` mapping.
+
+    Returns ``None`` when the values are too sparse or ambiguous to
+    suggest anything useful (caller should fall back to its own
+    default). Otherwise returns a dict shaped like::
+
+        {"mode": "delimiter", "delimiter": "-", "suffix_length": 3,
+         "confidence": "high"|"medium"|"low",
+         "rationale": "human-readable explanation"}
+
+    The ``suffix_length`` field is always present so the dict can be
+    used as a drop-in replacement for the wizard's default; for
+    ``mode=delimiter`` it carries the *typical* observed suffix length
+    (informational; the importer ignores it). For ``mode=fixed_suffix``
+    it is the dominant trailing-segment length actually observed.
+    """
+    cleaned: list[str] = []
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, float) and v != v:  # NaN
+            continue
+        s = str(v).strip()
+        if not s or s.lower() in {"nan", "none"}:
+            continue
+        cleaned.append(s)
+        if len(cleaned) >= sample_size:
+            break
+    if len(cleaned) < 3:
+        return None
+
+    delim_hits: dict[str, list[int]] = {}
+    digit_only: list[str] = []
+    other = 0
+    for s in cleaned:
+        m = _DELIM_INFER_RX.match(s)
+        if m:
+            delim_hits.setdefault(m.group(2), []).append(len(m.group(3)))
+            continue
+        d = _DIGITS_RX.match(s)
+        if d:
+            digit_only.append(d.group(1))
+            continue
+        other += 1
+
+    total = len(cleaned)
+
+    # --- delimiter mode ---
+    if delim_hits:
+        # Pick the most-frequent delimiter. Promote it to delimiter mode
+        # only if it covers a clear majority and digit-only rows aren't.
+        best_delim, best_lens = max(
+            delim_hits.items(), key=lambda kv: len(kv[1])
+        )
+        share = len(best_lens) / total
+        if share >= 0.6:
+            # Most-common suffix length (informational).
+            suffix_len = max(set(best_lens), key=best_lens.count)
+            conf = "high" if share >= 0.85 else "medium"
+            return {
+                "mode": "delimiter",
+                "delimiter": best_delim if best_delim.lower() != "x" else best_delim.upper(),
+                "suffix_length": int(suffix_len),
+                "confidence": conf,
+                "rationale": (
+                    f"{len(best_lens)}/{total} sample values match "
+                    f"<digits>{best_delim}<digits>; suffix ~"
+                    f"{suffix_len} chars."
+                ),
+            }
+
+    # --- digit-only branch ---
+    # If everything is bare digits, decide between fixed_suffix and
+    # zero-suffix (member-only). Look at trailing-3 vs trailing-2 vs
+    # trailing-4 stability. If the last N chars vary widely AND the
+    # length itself varies widely, the column is probably the bare
+    # member number with no embedded suffix.
+    if digit_only and len(digit_only) / total >= 0.85:
+        lens = {len(s) for s in digit_only}
+        # If lengths are tightly clustered, prefer fixed_suffix=3 (the
+        # historical default); we can't tell from values alone whether
+        # the last 3 chars are a suffix or part of the member number,
+        # but fixed_suffix=3 has been the heuristic for years and the
+        # operator can override on Step 3.
+        if len(lens) <= 2 and min(lens) >= 6:
+            return {
+                "mode": "fixed_suffix",
+                "delimiter": "-",
+                "suffix_length": 3,
+                "confidence": "low",
+                "rationale": (
+                    f"All {len(digit_only)}/{total} values are digit-only "
+                    f"({sorted(lens)} chars); defaulting to "
+                    "fixed_suffix=3. Override if the column is the bare "
+                    "member number with no embedded suffix."
+                ),
+            }
+        # Highly variable digit-only lengths -> probably bare member
+        # numbers with no suffix portion.
+        return {
+            "mode": "fixed_suffix",
+            "delimiter": "-",
+            "suffix_length": 0,
+            "confidence": "medium",
+            "rationale": (
+                f"{len(digit_only)}/{total} digit-only values with "
+                f"variable lengths {sorted(lens)} - looks like a bare "
+                "member number with no suffix."
+            ),
+        }
+
+    return None
+
+
 _UNNAMED_RX = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$", re.IGNORECASE)
 
 
@@ -161,6 +377,10 @@ _DATE_RX_CANDIDATES: list[tuple[str, str]] = [
     ("YYYY_MM",       r"(20\d{2})_(\d{2})"),
     ("YYYYMM",        r"(20\d{2})(\d{2})(?!\d)"),
     ("MM-YYYY",       r"(\d{2})-(20\d{2})"),
+    # MM-DD-YY with separators (e.g. "12-31-25", "12_31_25"). Negative
+    # look-behind avoids matching the tail half of "2025-12-31" as "25-12-31".
+    ("MM-DD-YY",      r"(?<!\d)(\d{2})-(\d{2})-(\d{2})(?!\d)"),
+    ("MM_DD_YY",      r"(?<!\d)(\d{2})_(\d{2})_(\d{2})(?!\d)"),
     ("MMDDYY",        r"(\d{2})(\d{2})(\d{2})(?!\d)"),
     # Quarter-end forms: "2025Q4", "2026-Q1", "2026_Q1".
     ("YYYYQ",         r"(20\d{2})[-_ ]?[Qq]([1-4])(?!\d)"),
@@ -302,6 +522,7 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
             except (ValueError, IndexError):
                 continue
         elif desc.startswith(("MM-DD-YYYY", "MM_DD_YYYY", "MMDDYYYY",
+                              "MM-DD-YY", "MM_DD_YY",
                               "MM-YYYY", "MMDDYY")):
             try:
                 if not 1 <= int(m.group(1)) <= 12:
@@ -323,7 +544,8 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
         date_pattern = rx
         # Pick the date_format extract_snapshot_date expects. Month-first
         # 3-group patterns use 'MMDDYY' (it handles 2- or 4-digit years).
-        if desc in ("MM-DD-YYYY", "MM_DD_YYYY", "MMDDYYYY", "MMDDYY"):
+        if desc in ("MM-DD-YYYY", "MM_DD_YYYY", "MMDDYYYY",
+                    "MM-DD-YY", "MM_DD_YY", "MMDDYY"):
             date_format = "MMDDYY"
         elif desc in ("YYYY-MM-DD", "YYYY_MM_DD", "YYYYMMDD"):
             date_format = "YYYYMMDD"
@@ -346,7 +568,16 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
 def _looks_numeric(val: Any) -> bool:
     if val is None:
         return False
+    if isinstance(val, bool):
+        return False
     if isinstance(val, (int, float)):
+        # NaN is a float but not a "real" numeric value for header detection.
+        try:
+            import math
+            if isinstance(val, float) and math.isnan(val):
+                return False
+        except Exception:  # noqa: BLE001
+            pass
         return True
     s = str(val).strip().replace(",", "").replace("$", "").replace("(", "-").replace(")", "")
     if not s:
@@ -367,7 +598,22 @@ def _detect_has_header(df_no_header: "pd.DataFrame") -> bool:
     row1 = df_no_header.iloc[1].tolist()
     text_score_0 = sum(1 for v in row0 if v is not None and not _looks_numeric(v))
     num_score_1  = sum(1 for v in row1 if _looks_numeric(v))
-    return text_score_0 >= max(2, len(row0) // 2) and num_score_1 >= max(2, len(row1) // 2)
+    if text_score_0 >= max(2, len(row0) // 2) and num_score_1 >= max(2, len(row1) // 2):
+        return True
+    # Strong signal: row 0 has many short-string identifier-like cells AND
+    # zero numeric cells (typical AIRES / Symitar header rows). Row 1 just
+    # needs to have at least a couple of numeric cells anywhere — even text-
+    # heavy data rows usually carry balance/score/term numbers somewhere.
+    if num_score_1 >= 2:
+        row0_numeric = sum(1 for v in row0 if v is not None and _looks_numeric(v))
+        row0_strings = sum(1 for v in row0
+                           if v is not None
+                           and not _looks_numeric(v)
+                           and isinstance(v, str)
+                           and v.strip())
+        if row0_numeric == 0 and row0_strings >= 5:
+            return True
+    return False
 
 
 # ---------- Main entry ----------
@@ -773,6 +1019,19 @@ def analyse_sample_file(
 
     fname_guesses = guess_filename_patterns(original_filename)
 
+    # Member/account layout inference: peek at the column heuristically
+    # picked as the member-number column. Falls back gracefully when no
+    # such column was detected.
+    ma_suggestion: dict[str, Any] | None = None
+    member_col = col_sugg.get("member_number")
+    if member_col and member_col in body.columns:
+        try:
+            ma_suggestion = infer_member_account_from_values(
+                body[member_col].head(60).tolist()
+            )
+        except Exception:  # noqa: BLE001
+            ma_suggestion = None
+
     return {
         "ok": True,
         "error": None,
@@ -780,6 +1039,7 @@ def analyse_sample_file(
         "saved_path": str(path),
         "file_pattern": fname_guesses["file_pattern"],
         "date_pattern": fname_guesses["date_pattern"],
+        "date_format": fname_guesses.get("date_format", "YYYY-MM"),
         "has_header": has_header,
         "header_row": header_row_used,
         "row_count_total": int(len(raw)),
@@ -787,4 +1047,5 @@ def analyse_sample_file(
         "sample_rows": preview,
         "column_suggestions": col_sugg,
         "pool_code_suggestions": pool_codes,
+        "member_account_suggestion": ma_suggestion,
     }

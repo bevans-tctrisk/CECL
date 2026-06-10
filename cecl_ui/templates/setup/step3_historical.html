@@ -383,11 +383,31 @@
   {% if hist_source == 'single_workbook' %}
     {% set bal_files = (state.hist_scan or {}).get('monthly_files', []) %}
     {% if bal_files %}
-      <div class="upload-status-list" style="margin-top:16px;">
+      <div style="display:flex; gap:12px; align-items:center; margin-top:16px; margin-bottom:6px;">
+        <strong>Uploaded historical balance workbook(s) ({{ bal_files|length }})</strong>
+        {% if bal_files|length > 1 %}
+          <form method="post" style="display:inline; margin-left:auto;"
+                onsubmit="return confirm('Remove ALL {{ bal_files|length }} historical balance workbook(s) and the associated loan-type \u2192 pool mapping? This cannot be undone.');">
+            <input type="hidden" name="action" value="remove_all_balance_history">
+            <button type="submit" class="btn btn-link" style="color:#a33;">
+              Remove all
+            </button>
+          </form>
+        {% endif %}
+      </div>
+      <div class="upload-status-list">
         {% for f in bal_files %}
-          <div class="upload-status-item">
+          <div class="upload-status-item" style="display:flex; gap:8px; align-items:center;">
             <span class="upload-status-icon">&#10003;</span>
             <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+            <form method="post" style="display:inline; margin-left:auto;"
+                  onsubmit="return confirm('Remove {{ f.name }} and clear the associated loan-type \u2192 pool mapping?');">
+              <input type="hidden" name="action" value="remove_balance_history">
+              <input type="hidden" name="filename" value="{{ f.name }}">
+              <button type="submit" class="btn btn-link" style="color:#a33;">
+                Remove
+              </button>
+            </form>
           </div>
         {% endfor %}
       </div>
@@ -1422,9 +1442,18 @@
 
     {# -- Files table -- #}
     {% if mfiles %}
-      <h4 style="margin-top:20px; margin-bottom:6px;">
-        Ingested monthly workbooks ({{ mfiles|length }})
-      </h4>
+      <div style="display:flex; gap:12px; align-items:center; margin-top:20px; margin-bottom:6px;">
+        <h4 style="margin:0;">
+          Ingested monthly workbooks ({{ mfiles|length }})
+        </h4>
+        <form method="post" style="display:inline; margin-left:auto;"
+              onsubmit="return confirm('Remove ALL {{ mfiles|length }} monthly workbook(s)? This cannot be undone.');">
+          <input type="hidden" name="action" value="remove_all_per_month_step3">
+          <button type="submit" class="btn btn-link" style="color:#a33;">
+            Remove all
+          </button>
+        </form>
+      </div>
       <table class="data-table" style="width:100%; margin-top:4px;">
         <thead>
           <tr>
@@ -1542,12 +1571,14 @@
         <button class="btn btn-secondary" type="submit">Import Mapping</button>
       </div>
       {% if pm_up.filename %}
-        <div class="muted" style="margin-top:6px;">
-          Last upload: <code>{{ pm_up.filename }}</code>
-          (label = col {{ pm_up.label_col }}, pool = col {{ pm_up.pool_col }},
-          {{ pm_up.row_count or 0 }} row(s) parsed).
-          Adjust the columns above and click <em>Import Mapping</em> again
-          to re-parse the same file &mdash; you don't need to re-pick it.
+        <div class="muted" style="margin-top:6px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+          <span>
+            Last upload: <code>{{ pm_up.filename }}</code>
+            (label = col {{ pm_up.label_col }}, pool = col {{ pm_up.pool_col }},
+            {{ pm_up.row_count or 0 }} row(s) parsed).
+            Adjust the columns above and click <em>Import Mapping</em> again
+            to re-parse the same file &mdash; you don't need to re-pick it.
+          </span>
         </div>
         {% if pm_up.sample_pairs %}
           <div style="margin-top:8px;">
@@ -1576,6 +1607,16 @@
         {% endif %}
       {% endif %}
     </form>
+
+    {% if pm_up.filename %}
+      <form method="post" style="margin-top:6px;"
+            onsubmit="return confirm('Remove the uploaded pool-mapping file? The label-to-pool entries it added will stay; edit them in the table above if needed.');">
+        <input type="hidden" name="action" value="remove_pool_mapping_upload">
+        <button class="btn btn-link" type="submit" style="color:#a33;">
+          Remove uploaded mapping file
+        </button>
+      </form>
+    {% endif %}
 
     {% if all_labels %}
         <p class="muted" style="margin-top:0;">
@@ -1705,9 +1746,18 @@
 
     {# -- Files table -- #}
     {% if yfiles %}
-      <h4 style="margin-top:20px; margin-bottom:6px;">
-        Ingested annual workbooks ({{ yfiles|length }})
-      </h4>
+      <div style="display:flex; gap:12px; align-items:center; margin-top:20px; margin-bottom:6px;">
+        <h4 style="margin:0;">
+          Ingested annual workbooks ({{ yfiles|length }})
+        </h4>
+        <form method="post" style="display:inline; margin-left:auto;"
+              onsubmit="return confirm('Remove ALL {{ yfiles|length }} annual workbook(s)? This cannot be undone.');">
+          <input type="hidden" name="action" value="remove_all_annual_step3">
+          <button type="submit" class="btn btn-link" style="color:#a33;">
+            Remove all
+          </button>
+        </form>
+      </div>
       <table class="data-table" style="width:100%; margin-top:4px;">
         <thead>
           <tr>

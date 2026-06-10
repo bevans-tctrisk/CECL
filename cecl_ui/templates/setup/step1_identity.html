@@ -74,9 +74,89 @@
         </label>
       </div>
     </div>
+
+    {# Auto-scan: paste a folder, click Scan, the wizard auto-derives
+       column mappings, pool codes, file patterns, balance-sheet layout,
+       impaired/credit-pull/CO/recov staging, mgmt-adj baselines, and
+       the report set, then jumps to the first step that still needs
+       your input. #}
+    <fieldset style="margin-top:14px; padding:12px; border:1px dashed #888;">
+      <legend style="padding:0 6px; font-weight:600;">Auto-fill from raw data folder (optional)</legend>
+      <p class="muted" style="margin-top:0;">
+        Paste the folder path the credit union sent you (or your local copy of it).
+        The wizard will classify the files, run the parsers, populate as much as
+        it can on every step, and drop you on the first step that still needs your
+        input. You can always revisit any step from the stepper at the top.
+      </p>
+      <div class="form-row">
+        <div style="flex:1;">
+          <label>Raw data folder
+            <input type="text" name="raw_data_folder"
+                   value="{{ state.raw_data_folder or '' }}"
+                   placeholder="e.g. Z:\Shared\Clients\Census FCU 5641\Portfolio Management\CECL Migration IDLR">
+            <span class="help">Server-side path. Use a UNC or mapped-drive
+              path the Flask server can read. Sub-folders are scanned
+              recursively.</span>
+          </label>
+        </div>
+      </div>
+      <div style="margin-top:10px;">
+        <button class="btn btn-secondary" type="submit"
+                name="action" value="scan_folder"
+                title="Save identity, scan the folder, auto-fill state, and jump to the first step that needs your input.">
+          Scan &amp; auto-fill &rarr;
+        </button>
+      </div>
+    </fieldset>
+
+    {% if state._auto_scan_completed %}
+    {# Show the most recent auto-scan report on Step 1 so the user can
+       confirm what was filled before jumping into a HIL step. #}
+    <div class="card" style="margin-top:14px;">
+      <h3>Last auto-scan report</h3>
+      <p class="muted">
+        Folder: <code>{{ state._auto_scan_folder }}</code>
+      </p>
+      {% if state._auto_scan_messages %}
+        <ul style="margin-top:6px;">
+          {% for m in state._auto_scan_messages %}
+          <li>{{ m }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+      {% if state._auto_scan_errors %}
+        <p style="color:#b00; margin-top:6px;"><strong>Errors:</strong></p>
+        <ul style="color:#b00;">
+          {% for e in state._auto_scan_errors %}
+          <li>{{ e }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+      {% if state._auto_scan_report %}
+        <details style="margin-top:8px;">
+          <summary class="muted" style="cursor:pointer;">Per-step auto-fill details</summary>
+          <table style="margin-top:6px;">
+            <tr><th>Step</th><th>Auto-filled</th></tr>
+            {% for step_key, msgs in state._auto_scan_report.items() %}
+            <tr>
+              <td><code>{{ step_key }}</code></td>
+              <td>
+                <ul style="margin:0; padding-left:18px;">
+                  {% for m in msgs %}<li>{{ m }}</li>{% endfor %}
+                </ul>
+              </td>
+            </tr>
+            {% endfor %}
+          </table>
+        </details>
+      {% endif %}
+    </div>
+    {% endif %}
+
     <div class="btn-row">
       <a class="btn btn-secondary" href="{{ url_for('setup.start_warm_choice') }}">&larr; Back</a>
-      <button class="btn btn-primary" type="submit">Next &rarr;</button>
+      <button class="btn btn-primary" type="submit"
+              name="action" value="save_and_continue">Next &rarr;</button>
     </div>
   </form>
 </div>

@@ -214,6 +214,7 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
     cfg.update({
         "file_pattern": state["file_pattern"],
         "date_pattern": state["date_pattern"],
+        "date_format": state.get("date_format") or "YYYY-MM",
         "account_suffix_length": int(state.get("account_suffix_length", 3)),
         "member_account": dict(state.get("member_account") or {
             "mode": "fixed_suffix",
@@ -388,6 +389,13 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         acl_block["history"] = {
             d: float(v) for d, v in sorted(acl_history.items())
         }
+    # NCUA 5300 fallback flag — emitted unconditionally so the report
+    # engine has a clear True/False toggle. Default True for any wizard
+    # state that didn't explicitly set it (matches the new-CU default).
+    if acl_state:
+        acl_block["use_5300_fallback"] = bool(
+            acl_state.get("use_5300_fallback", True)
+        )
     if acl_block:
         cfg["acl"] = acl_block
 

@@ -117,7 +117,43 @@ WIZARD_STEPS = WIZARD_STEPS_NO_WARM
 def _state() -> dict[str, Any]:
     if STATE_KEY not in session:
         session[STATE_KEY] = _default_state()
+    _strip_legacy_pool_map_stubs(session[STATE_KEY])
     return session[STATE_KEY]
+
+
+# Legacy `_default_state()` (pre-2026-06-09) pre-seeded `pool_map` with
+# these 7 example code->pool pairs. They were intended as
+# illustrative placeholders but lingered in every CU's session/draft and
+# surfaced as "Unrecognized pool names" on Step 3 even when the CU's
+# real data contained no such codes. _default_state() now starts with
+# an empty pool_map; this shim cleans up sessions and drafts saved
+# before that change so users don't have to manually Ignore the stubs.
+_LEGACY_POOL_MAP_STUBS = {
+    "AUTO_NEW": "New Vehicle",
+    "AUTO_USED": "Used Vehicle",
+    "MORT": "Mortgage Loans",
+    "CC": "Credit Cards",
+    "SIG": "Signature Loans",
+    "HELOC": "HELOC",
+    "SECURED": "Share Secured",
+}
+
+
+def _strip_legacy_pool_map_stubs(state: dict[str, Any]) -> bool:
+    """Remove the 7 hard-coded legacy `pool_map` example entries when their
+    value still matches the original default. Safe to call on every request
+    — only touches state when at least one stub is present. Returns True
+    when changes were made.
+    """
+    pm = state.get("pool_map")
+    if not isinstance(pm, dict) or not pm:
+        return False
+    removed = False
+    for k, v in _LEGACY_POOL_MAP_STUBS.items():
+        if pm.get(k) == v:
+            pm.pop(k, None)
+            removed = True
+    return removed
 
 
 def _default_state() -> dict[str, Any]:
@@ -127,6 +163,13 @@ def _default_state() -> dict[str, Any]:
         "short_name": "",
         "charter_number": "",
         "data_directory": "",
+        # Optional raw-data folder pasted by the user on Step 1
+        # (Identity). When non-blank the wizard's auto-scan walks
+        # this path with cecl_ui.services.auto_setup to populate as
+        # much of the state as it can BEFORE the user touches any
+        # downstream step. Persisted so the user can re-scan after
+        # adding more files to the folder.
+        "raw_data_folder": "",
         # Report period (YYYY-MM) the user is configuring this CU to
         # run reports for. Acts as the global "as-of" anchor: any
         # source file / column whose period is AFTER this is ignored
@@ -137,6 +180,13 @@ def _default_state() -> dict[str, Any]:
         # files
         "file_pattern": r"LOANDATA.*\.(xlsx|xls|csv)$",
         "date_pattern": r"(\d{4})-(\d{2})",
+        # ``date_format`` tells ``import_data.extract_snapshot_date`` how
+        # to interpret the regex capture groups. Must be one of the values
+        # in ``sample_parser.ACCEPTED_DATE_FORMATS`` (currently:
+        # YYYY-MM, YYYYMMDD, MMDDYY, MMYY, MMYYYY, YYYYQ, QYYYY).
+        # Anything else silently falls through to YYYY-MM and will yield
+        # a bogus snapshot date at import time.
+        "date_format": "YYYY-MM",
         "account_suffix_length": 3,
         # How the loan-data extract represents member + account numbers.
         # mode = "fixed_suffix" -> member & account share a column; the last
@@ -174,15 +224,15 @@ def _default_state() -> dict[str, Any]:
             "total_available_credit": "",
         },
         # pools
-        "pool_map": {
-            "AUTO_NEW": "New Vehicle",
-            "AUTO_USED": "Used Vehicle",
-            "MORT": "Mortgage Loans",
-            "CC": "Credit Cards",
-            "SIG": "Signature Loans",
-            "HELOC": "HELOC",
-            "SECURED": "Share Secured",
-        },
+        #
+        # Empty by default. The wizard auto-populates this from the
+        # uploaded sample file (one row per distinct loan_pool_code) on
+        # the Sample step, and the WARM-detection branch on Step 2 seeds
+        # it from the WARM workbook's pool map. Pre-seeding with example
+        # codes here would pollute every new CU's Loan Code Mapping step
+        # with stub rows ("AUTO_NEW", "MORT", ...) that don't exist in
+        # the CU's real data.
+        "pool_map": {},
         "default_pool": "Ignore",
         "pool_code_split": "/",
         # grades
@@ -450,8 +500,42 @@ def _wizard_ctx(active: str) -> dict[str, Any]:
     # them to it.
     st["_active_step"] = active
     session.modified = True
-    return {"steps": steps, "active": active, "state": st,
-            "step_endpoints": STEP_ENDPOINTS}
+
+    # Compute per-step status badges + HIL list when the user has run
+    # the Step 1 auto-scan. Without an auto-scan, every step renders
+    # as "pending" (no badges shown).
+    step_status: dict[str, str] = {}
+    hil_needs: list[dict[str, Any]] = []
+    next_hil_key: str | None = None
+    if st.get("_auto_scan_completed"):
+        try:
+            from cecl_ui.services import auto_setup
+            hil_needs = auto_setup.compute_hil_needs(st)
+            need_keys = {n["step_key"] for n in hil_needs}
+            report = st.get("_auto_scan_report") or {}
+            for key, _label in steps:
+                if key in need_keys:
+                    step_status[key] = "hil"
+                elif key in report:
+                    step_status[key] = "auto"
+                else:
+                    step_status[key] = "pending"
+            next_hil_key = auto_setup.first_hil_step_key(st, steps)
+        except Exception:  # noqa: BLE001
+            # Defensive: stepper rendering must never 500.
+            step_status = {}
+            hil_needs = []
+            next_hil_key = None
+
+    return {
+        "steps": steps,
+        "active": active,
+        "state": st,
+        "step_endpoints": STEP_ENDPOINTS,
+        "step_status": step_status,
+        "hil_needs": hil_needs,
+        "next_hil_key": next_hil_key,
+    }
 
 
 # Map wizard step keys to their Flask endpoint names so the stepper can
@@ -564,6 +648,7 @@ def resume_draft(key: str, model: str = "migration"):
     # the next Save round-trips back to the right file.
     if model == "scale":
         data["model"] = "scale"
+    _strip_legacy_pool_map_stubs(data)
     session[STATE_KEY] = data
     session.modified = True
     active = (data.get(wizard_drafts.DRAFT_META_KEY) or {}).get("active_step") \
@@ -734,7 +819,72 @@ def step1_identity():
             # wizard (Files step), not on this Identity step.
             state["economic_data"]["state"] = request.form.get("state", "").strip()
             state["economic_data"]["county"] = request.form.get("county", "").strip()
+            # Raw-data folder for auto-scan (Step 1 paste field).
+            state["raw_data_folder"] = (
+                request.form.get("raw_data_folder", "") or ""
+            ).strip()
             _save_state(state)
+
+            # --- Auto-scan branch ---------------------------------------
+            # When the user clicks "Scan & auto-fill" we run the folder
+            # classifier + populater, then redirect them to the first
+            # step that still needs human input. Identity save above
+            # already happened so short_name / charter / economic
+            # fields are persisted before the scan runs.
+            action = (request.form.get("action") or "").strip().lower()
+            if action == "scan_folder":
+                folder = state.get("raw_data_folder") or ""
+                if not folder:
+                    flash(
+                        "Paste a raw-data folder path before clicking "
+                        "Scan & auto-fill.",
+                        "error",
+                    )
+                else:
+                    from cecl_ui.services import auto_setup
+                    snapshot = state.get("report_period") or None
+                    findings = auto_setup.scan_folder_for_setup(
+                        folder, snapshot_yyyymm=snapshot
+                    )
+                    if not findings.get("ok"):
+                        flash(
+                            f"Auto-scan failed: {findings.get('error')}",
+                            "error",
+                        )
+                    else:
+                        report = auto_setup.apply_findings_to_state(
+                            state, findings,
+                            current_app.config["WORKSPACE_ROOT"],
+                        )
+                        # Persist the populated state immediately so a
+                        # crash mid-step doesn't lose the scan results.
+                        _save_state(state)
+                        # Friendly summary flash.
+                        n_steps = len(report)
+                        n_msgs = sum(len(v) for v in report.values())
+                        flash(
+                            f"Auto-scan complete: filled {n_msgs} item(s) "
+                            f"across {n_steps} step(s). Errors: "
+                            f"{len(findings.get('errors') or [])}.",
+                            "success" if n_msgs else "info",
+                        )
+                        # Route to first HIL step.
+                        if state.get("model") == "scale":
+                            steps = WIZARD_STEPS_SCALE
+                        elif state.get("has_warm_files") == "yes":
+                            steps = WIZARD_STEPS_WARM
+                        else:
+                            steps = WIZARD_STEPS_NO_WARM
+                        next_key = auto_setup.first_hil_step_key(state, steps)
+                        if next_key and next_key in STEP_ENDPOINTS:
+                            return redirect(url_for(STEP_ENDPOINTS[next_key]))
+                        # Nothing flagged HIL -> jump to review.
+                        return redirect(url_for("setup.step10_review"))
+                # Fall through to re-render Step 1 with the flashed
+                # error and any partial state.
+                return redirect(url_for("setup.step1_identity"))
+            # ------------------------------------------------------------
+
             # Conditional routing:
             #  * SCALE model -> jump straight to the SCALE Solr step.
             #  * Migration with WARM file -> WARM upload.
@@ -1726,6 +1876,12 @@ def _save_acl_form(mb: dict, form) -> None:
                     manual[f"{key}_value"] = val
                 except ValueError:
                     pass
+    # NCUA 5300 fallback toggle. The checkbox name is consistently
+    # ``acl_use_5300_fallback``; the hidden ``acl_5300_fallback_present``
+    # field tells us the form actually rendered the control so an
+    # unticked box means "user disabled it" rather than "field absent".
+    if "acl_5300_fallback_present" in form:
+        acl_state["use_5300_fallback"] = bool(form.get("acl_use_5300_fallback"))
 
 
 def _persist_per_month_layout(mb: dict, form) -> None:
@@ -2002,6 +2158,12 @@ def step5_monthly_bal():
             "month2_date": "", "month2_value": None,
             "month3_date": "", "month3_value": None,
         },
+        # NCUA 5300 fallback — when True and the file source produces
+        # no ACL value (or $0) for the snapshot quarter, the report
+        # engine pulls the ACL on Loans value directly from NCUA Form
+        # 5300. Default ON for new wizard runs; users can untick if
+        # the CU explicitly does not want 5300 data substituted.
+        "use_5300_fallback": True,
     })
     # Backfill any sub-keys that may be missing on older drafts (the
     # outer ``setdefault`` above only seeds when ``acl`` is absent).
@@ -2018,6 +2180,7 @@ def step5_monthly_bal():
     for _mk in ("month1", "month2", "month3"):
         _man.setdefault(f"{_mk}_date", "")
         _man.setdefault(f"{_mk}_value", None)
+    _acl.setdefault("use_5300_fallback", True)
 
     # Pre-fill manual ACL month-end dates from the WARM as-of date so the
     # user only has to type the three balances. We populate any blank date
@@ -2904,6 +3067,16 @@ def _loan_data_entry_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         "sample_rows": list(analysis.get("sample_rows") or [])[:5],
         "has_header": bool(analysis.get("has_header")),
         "header_row": int(analysis.get("header_row") or 0),
+        # Carry the parser's auto-detected member-account layout (if any)
+        # so Step 3 can show a "✓ auto-detected from sample" hint and
+        # ``_seed_loan_data_entry_mapping`` can prefer it over the
+        # historical hardcoded ``fixed_suffix=3`` default.
+        "member_account_suggestion": dict(analysis.get("member_account_suggestion") or {})
+            if analysis.get("member_account_suggestion") else None,
+        # Date format the filename heuristic guessed for this sample
+        # (one of ``sample_parser.ACCEPTED_DATE_FORMATS``). Surfaced to
+        # Step 2 so the user sees what value will land in the YAML.
+        "date_format": str(analysis.get("date_format") or "YYYY-MM"),
     }
 
 
@@ -2994,9 +3167,22 @@ def _seed_loan_data_entry_mapping(
     if not entry.get("column_mappings"):
         entry["column_mappings"] = dict(analysis.get("column_suggestions") or {})
     if not entry.get("member_account"):
-        entry["member_account"] = {
-            "mode": "fixed_suffix", "suffix_length": 3, "delimiter": "-",
-        }
+        # Prefer the parser's per-file inference over the historical
+        # ``fixed_suffix=3`` default. The inferred dict already carries
+        # mode/delimiter/suffix_length keys; we strip the metadata keys
+        # (``confidence``, ``rationale``) before storing on the entry
+        # so the YAML emit path stays clean.
+        sug = analysis.get("member_account_suggestion") or {}
+        if sug.get("mode"):
+            entry["member_account"] = {
+                "mode": sug.get("mode"),
+                "suffix_length": int(sug.get("suffix_length") or 0),
+                "delimiter": sug.get("delimiter") or "-",
+            }
+        else:
+            entry["member_account"] = {
+                "mode": "fixed_suffix", "suffix_length": 3, "delimiter": "-",
+            }
     return None
 
 
@@ -3013,6 +3199,12 @@ def _apply_sample_to_state(state: dict[str, Any], analysis: dict[str, Any]) -> N
         state["file_pattern"] = analysis["file_pattern"]
     if state.get("date_pattern") in ("", defaults["date_pattern"]):
         state["date_pattern"] = analysis["date_pattern"]
+    # Date format — only auto-set when the user is still on the default
+    # so a fresh sample upload doesn't clobber a deliberate Step 2 pick.
+    if state.get("date_format") in ("", defaults["date_format"]):
+        guessed_df = analysis.get("date_format")
+        if guessed_df and guessed_df in sample_parser.ACCEPTED_DATE_FORMATS:
+            state["date_format"] = guessed_df
 
     # Column mappings — overwrite per-field where the suggestion is non-empty
     # AND the user is still on the default value for that field.
@@ -4012,11 +4204,78 @@ def _earliest_month_pool_distribution(state: dict) -> dict:
             "by_pool": sw.get("by_pool") or {},
             "raw_rows": sw.get("raw_rows") or [],
         }}
+    elif source == "monthly_loan_extracts":
+        # No balance workbook to read — derive the earliest-month pool
+        # distribution from rows already extracted into
+        # ``loan_code_history`` (per-extract loan-code totals). The user
+        # must have run the per-extract Source-D ingestion first; if no
+        # rows exist we surface a clear error.
+        out["source"] = "monthly_loan_extracts"
+        cu = (state.get("credit_union") or "").strip()
+        if not cu:
+            out["error"] = (
+                "Credit union name is required to look up loan-code "
+                "history. Re-save Step 1."
+            )
+            return out
+        try:
+            from sqlalchemy import create_engine, text as _sql_text  # local
+            from cecl_credentials import get_database_url as _gdb
+            eng = create_engine(_gdb())
+            with eng.begin() as cx:
+                row = cx.execute(_sql_text(
+                    "SELECT MIN(as_of_date) FROM loan_code_history "
+                    "WHERE cu = :cu"
+                ), {"cu": cu}).fetchone()
+                earliest_d = row[0] if row else None
+                if earliest_d is None:
+                    out["error"] = (
+                        "No rows in loan_code_history for this credit union. "
+                        "Run the historical extracts ingest on Step 3 first, "
+                        "then come back."
+                    )
+                    return out
+                rows = cx.execute(_sql_text(
+                    "SELECT loan_code, total_balance "
+                    "FROM loan_code_history "
+                    "WHERE cu = :cu AND as_of_date = :d"
+                ), {"cu": cu, "d": earliest_d}).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = (
+                f"Could not query loan_code_history: {exc}"
+            )
+            return out
+        # Map each raw loan_code to a configured pool via pool_map.
+        pmap = state.get("pool_map") or {}
+        pmap_ci = {str(k).strip().lower(): v for k, v in pmap.items()}
+        excluded = {str(p).strip().lower()
+                    for p in (state.get("excluded_pools") or [])}
+        excluded.update({"ignore", "exclude"})
+        by_pool: dict[str, float] = {}
+        for code, bal in rows:
+            try:
+                bal_f = float(bal or 0)
+            except (TypeError, ValueError):
+                continue
+            if bal_f <= 0:
+                continue
+            code_s = str(code or "").strip()
+            if not code_s:
+                continue
+            pool = (
+                pmap.get(code_s)
+                or pmap_ci.get(code_s.lower())
+                or code_s  # fall back to using the code as-is
+            )
+            if not pool or str(pool).strip().lower() in excluded:
+                continue
+            by_pool[pool] = by_pool.get(pool, 0.0) + bal_f
+        by_period = {earliest_d.isoformat(): {"by_pool": by_pool}}
     else:
         out["error"] = (
             "Distributed mode requires the historical balance source to be "
-            "Single workbook, Annual balance sheets, or Monthly balance "
-            "sheets (Step 3)."
+            "Single workbook, Annual balance sheets, Monthly balance sheets, "
+            "or Monthly loan extracts (Step 3)."
         )
         return out
 
@@ -4778,6 +5037,86 @@ def step3_historical():
             else:
                 flash(f"File '{target_name}' not found.", "error")
             mb["monthly_files"] = files
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "remove_all_per_month_step3":
+            mb = state.setdefault("monthly_bal", {})
+            files = mb.get("monthly_files") or []
+            removed_count = 0
+            for e in files:
+                if not e.get("external"):
+                    sp = e.get("saved_path") or ""
+                    if sp:
+                        try:
+                            pp = Path(sp)
+                            if pp.is_file():
+                                pp.unlink()
+                        except Exception:  # noqa: BLE001
+                            pass
+                removed_count += 1
+            mb["monthly_files"] = []
+            if removed_count:
+                flash(
+                    f"Removed all {removed_count} monthly workbook(s).",
+                    "success",
+                )
+            else:
+                flash("No monthly workbooks to remove.", "info")
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "remove_all_annual_step3":
+            mb = state.setdefault("monthly_bal", {})
+            files = mb.get("year_files") or []
+            removed_count = 0
+            for e in files:
+                if not e.get("external"):
+                    sp = e.get("saved_path") or ""
+                    if sp:
+                        try:
+                            pp = Path(sp)
+                            if pp.is_file():
+                                pp.unlink()
+                        except Exception:  # noqa: BLE001
+                            pass
+                removed_count += 1
+            mb["year_files"] = []
+            if removed_count:
+                flash(
+                    f"Removed all {removed_count} annual workbook(s).",
+                    "success",
+                )
+            else:
+                flash("No annual workbooks to remove.", "info")
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
+
+        elif action == "remove_pool_mapping_upload":
+            mb = state.setdefault("monthly_bal", {})
+            pm_up = mb.get("pool_mapping_upload") or {}
+            fn = pm_up.get("filename") or ""
+            sp = pm_up.get("saved_path") or ""
+            if sp:
+                try:
+                    pp = Path(sp)
+                    # Only delete if the file lives in the managed
+                    # temp upload dir — never touch user-provided
+                    # paths outside of it.
+                    if pp.is_file() and "cecl_ui_monthly_bal" in str(pp).lower():
+                        pp.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+            mb["pool_mapping_upload"] = {}
+            if fn:
+                flash(
+                    f"Removed pool-mapping file: {fn}. "
+                    "Label-to-pool entries it added remain in the table "
+                    "above; edit or clear them as needed.",
+                    "success",
+                )
+            else:
+                flash("No pool-mapping file to remove.", "info")
             _save_state(state)
             return redirect(url_for(back_endpoint))
 
@@ -5710,6 +6049,88 @@ def step3_historical():
                     flash(f"Upload failed: {exc}", "error")
             else:
                 flash("Choose a historical balances file to upload.", "error")
+
+        elif action == "remove_balance_history":
+            target_name = (request.form.get("filename") or "").strip()
+            hs = state.get("hist_scan") or {}
+            files = list(hs.get("monthly_files") or [])
+            removed = None
+            for e in files:
+                if e.get("name") == target_name:
+                    removed = e
+                    break
+            if removed:
+                files.remove(removed)
+                sp = removed.get("path") or ""
+                if sp:
+                    try:
+                        pp = Path(sp)
+                        # Only delete files we manage in the wizard's
+                        # temp dir — never touch user-provided source
+                        # paths.
+                        if pp.is_file() and "cecl_ui_hist" in str(pp).lower():
+                            pp.unlink()
+                    except Exception:  # noqa: BLE001
+                        pass
+                hs["monthly_files"] = files
+                state["hist_scan"] = hs
+                # If a remaining file is still present, re-seed the
+                # loan-type -> pool mapping from the most recent one
+                # so the section 1b dropdowns stay in sync. Otherwise
+                # clear the cached mapping entirely.
+                if files:
+                    try:
+                        last_path = Path(files[-1].get("path") or "")
+                        if last_path.is_file():
+                            analysis = hist_parser.extract_balance_labels(
+                                last_path
+                            )
+                            if analysis.get("ok") and analysis.get("labels"):
+                                _seed_hist_pool_map(state, analysis)
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    state["hist_pool_map"] = None
+                flash(
+                    f"Removed {target_name} and refreshed the loan-type "
+                    f"\u2192 pool mapping.",
+                    "success",
+                )
+                _save_state(state)
+            else:
+                flash(f"File '{target_name}' not found.", "error")
+            return redirect(url_for(back_endpoint))
+
+        elif action == "remove_all_balance_history":
+            hs = state.get("hist_scan") or {}
+            files = list(hs.get("monthly_files") or [])
+            removed_count = 0
+            for e in files:
+                sp = e.get("path") or ""
+                if sp:
+                    try:
+                        pp = Path(sp)
+                        if pp.is_file() and "cecl_ui_hist" in str(pp).lower():
+                            pp.unlink()
+                    except Exception:  # noqa: BLE001
+                        pass
+                removed_count += 1
+            hs["monthly_files"] = []
+            state["hist_scan"] = hs
+            state["hist_pool_map"] = None
+            if removed_count:
+                flash(
+                    f"Removed all {removed_count} historical balance "
+                    f"workbook(s) and cleared the loan-type \u2192 pool "
+                    f"mapping.",
+                    "success",
+                )
+            else:
+                flash(
+                    "No historical balance workbooks to remove.", "info"
+                )
+            _save_state(state)
+            return redirect(url_for(back_endpoint))
 
         elif action == "save_hist_pool_map":
             _save_hist_pool_map_from_form(state, request.form)
@@ -7948,115 +8369,51 @@ _FILE_SCAN_LIMIT = 200  # cap so a noisy folder doesn't blow up the page
 
 
 def _suggest_file_patterns(filename: str) -> dict[str, str] | None:
-    """Heuristically derive ``file_pattern`` + ``date_pattern`` from a sample.
+    """Heuristically derive ``file_pattern`` + ``date_pattern`` + ``date_format``
+    from a sample loan-data filename.
 
-    Looks at the bare filename of a sample loan-data upload and returns
-    suggested regexes the importer can use to find sibling quarterly files.
-    Returns ``None`` if no recognizable date is found.
-
-    Examples::
-
-        "LOANDATA_2025-12.xlsx"     -> {file_pattern: r"LOANDATA.*\\.xlsx$",
-                                        date_pattern: r"(\\d{4})-(\\d{2})"}
-        "AIRESLOANS 2025-12-31.xls" -> {file_pattern: r"AIRESLOANS.*\\.xls$",
-                                        date_pattern: r"(\\d{4})-(\\d{2})-\\d{2}"}
-        "20251231 loans.csv"        -> {file_pattern: r".*loans.*\\.csv$",
-                                        date_pattern: r"(\\d{4})(\\d{2})\\d{2}"}
+    Delegates to :func:`sample_parser.guess_filename_patterns` so that the
+    returned ``date_format`` is one ``import_data`` actually understands
+    (see ``sample_parser.ACCEPTED_DATE_FORMATS``). Returns ``None`` when
+    no recognizable date is found.
     """
-    import re as _re
+    if not filename:
+        return None
+    try:
+        guess = sample_parser.guess_filename_patterns(filename)
+    except Exception:  # noqa: BLE001
+        return None
+    # ``guess_filename_patterns`` always returns a dict (defaults to
+    # YYYY-MM); only treat it as a real suggestion when a date pattern
+    # actually matched the filename. The default is a benign fallback,
+    # not an inferred match.
     name = Path(filename).name
-    stem, dot, ext = name.rpartition(".")
-    if not dot:
+    stem = Path(name).stem
+    if not any(
+        re.search(rx, stem) for _desc, rx in sample_parser._DATE_RX_CANDIDATES
+    ):
         return None
-    ext = ext.lower()
-
-    # Try a series of date layouts, most specific first. Each entry gives
-    # (regex to FIND the date in the stem, capture-group-based date_pattern
-    # to write into the YAML).
-    candidates: list[tuple[str, str]] = [
-        # YYYY-MM-DD with -, _, /, or space
-        (r"(20\d{2})[-_./ ](\d{2})[-_./ ](\d{2})", r"(\d{4})[-_./ ](\d{2})[-_./ ]\d{2}"),
-        # YYYY-MM
-        (r"(20\d{2})[-_./ ](\d{2})(?!\d)",         r"(\d{4})[-_./ ](\d{2})"),
-        # YYYYMMDD (8 contiguous digits starting 19xx/20xx)
-        (r"(20\d{2})(\d{2})(\d{2})",               r"(\d{4})(\d{2})\d{2}"),
-        # MMDDYYYY (8 contiguous digits ending in 19xx/20xx)
-        (r"(\d{2})(\d{2})(20\d{2})",               r"\d{2}\d{2}(\d{4})"),
-        # YYYYMM (6 contiguous digits)
-        (r"(20\d{2})(\d{2})(?!\d)",                r"(\d{4})(\d{2})"),
-        # MM-DD-YYYY
-        (r"(\d{2})[-_./ ](\d{2})[-_./ ](20\d{2})", r"\d{2}[-_./ ]\d{2}[-_./ ](\d{4})"),
-    ]
-    date_re = ""
-    date_match: _re.Match[str] | None = None
-    for finder, dp in candidates:
-        m = _re.search(finder, stem)
-        if not m:
-            continue
-        # Validate the captured month-of-year is real (1-12). Year-first
-        # patterns capture month at group(2); month-first patterns at group(1).
-        try:
-            if finder.startswith("(20"):
-                if not 1 <= int(m.group(2)) <= 12:
-                    continue
-            else:
-                if not 1 <= int(m.group(1)) <= 12:
-                    continue
-        except (ValueError, IndexError):
-            continue
-        date_match = m
-        date_re = dp
-        break
-    if not date_match:
-        return None
-
-    # Derive a stable filename "stem prefix" from the chars before the date.
-    # Grab the leading word-ish chunk (letters/digits) so we don't anchor on
-    # arbitrary punctuation right at the start. Fall back to ".*" if there's
-    # nothing usable.
-    prefix_text = stem[: date_match.start()].rstrip(" -_./")
-    word = _re.match(r"[A-Za-z][A-Za-z0-9]*", prefix_text or "")
-    if word:
-        file_pattern = f"{word.group(0)}.*\\.{ext}$"
-    else:
-        # No leading word — try a trailing word (e.g. "20251231 loans.csv")
-        suffix_text = stem[date_match.end():].lstrip(" -_./")
-        word2 = _re.match(r"[A-Za-z][A-Za-z0-9]*", suffix_text or "")
-        if word2:
-            file_pattern = f".*{word2.group(0)}.*\\.{ext}$"
-        else:
-            file_pattern = f".*\\.{ext}$"
-
-    return {"file_pattern": file_pattern, "date_pattern": date_re}
+    return {
+        "file_pattern": guess.get("file_pattern") or "",
+        "date_pattern": guess.get("date_pattern") or "",
+        "date_format": guess.get("date_format") or "YYYY-MM",
+    }
 
 
 def _scan_data_directory(
     data_directory: str,
     file_pattern: str,
     date_pattern: str,
+    date_format: str = "YYYY-MM",
 ) -> dict[str, Any]:
     """Walk ``data_directory`` and report which files match ``file_pattern``.
 
-    Returns::
-
-        {
-            "ok": bool,
-            "error": str | None,
-            "directory": str,         # the resolved path we actually scanned
-            "total_files": int,       # total candidate files (by extension)
-            "matched": int,
-            "truncated": bool,        # True if we hit _FILE_SCAN_LIMIT
-            "files": [                # newest first
-                {
-                    "name": str,
-                    "subdir": str,    # path relative to data_directory ("" = root)
-                    "matched": bool,
-                    "date": str | None,   # "YYYY-MM" if date_pattern extracted one
-                    "date_error": str | None,
-                },
-                ...
-            ],
-        }
+    When ``date_format`` is supplied, the per-file date preview is
+    resolved through ``import_data.extract_snapshot_date`` so it matches
+    exactly what the importer will produce at run-time. This catches
+    silent format / pattern mismatches (e.g. ``date_format='MDY'`` —
+    not a recognized value, falls through to YYYY-MM, yields garbage
+    months) before the user moves off Step 2.
     """
     import re as _re
     from datetime import datetime as _dt
@@ -8087,6 +8444,18 @@ def _scan_data_directory(
         out["error"] = f"Invalid date_pattern regex: {exc}"
         return out
 
+    # Defer the heavy ``import_data`` import to the first call that
+    # actually has both a date_pattern and date_format. Matches what
+    # the importer does at run-time, so silent format mismatches
+    # surface in the scan preview.
+    extract_date = None
+    if date_pattern and date_format:
+        try:
+            import import_data as _id  # type: ignore[import-not-found]
+            extract_date = _id.extract_snapshot_date
+        except Exception:  # noqa: BLE001
+            extract_date = None
+
     rows: list[dict[str, Any]] = []
     for path in root.rglob("*"):
         if not path.is_file():
@@ -8107,20 +8476,43 @@ def _scan_data_directory(
         date_str: str | None = None
         date_err: str | None = None
         if matched and date_re:
-            m = date_re.search(name)
-            if m and m.lastindex and m.lastindex >= 2:
+            # Preferred path: route through extract_snapshot_date so the
+            # preview reflects what the importer will actually do. Falls
+            # back to the simpler 2-group regex parse when import_data
+            # could not be loaded.
+            if extract_date is not None:
                 try:
-                    yr, mo = int(m.group(1)), int(m.group(2))
-                    if 1900 <= yr <= 2100 and 1 <= mo <= 12:
-                        date_str = f"{yr:04d}-{mo:02d}"
+                    iso = extract_date(
+                        name,
+                        {"date_pattern": date_pattern,
+                         "date_format": date_format},
+                    )
+                    if iso:
+                        # Render YYYY-MM-DD when import_data found a day,
+                        # else just YYYY-MM. The date_format dictates which.
+                        date_str = iso
                     else:
-                        date_err = f"out-of-range yr/mo: {yr}/{mo}"
-                except (ValueError, IndexError) as exc:
+                        date_err = (
+                            f"format {date_format} could not resolve "
+                            f"a date from this filename"
+                        )
+                except Exception as exc:  # noqa: BLE001
                     date_err = str(exc)
-            elif m:
-                date_err = "regex matched but lacks 2 capture groups"
             else:
-                date_err = "no date match"
+                m = date_re.search(name)
+                if m and m.lastindex and m.lastindex >= 2:
+                    try:
+                        yr, mo = int(m.group(1)), int(m.group(2))
+                        if 1900 <= yr <= 2100 and 1 <= mo <= 12:
+                            date_str = f"{yr:04d}-{mo:02d}"
+                        else:
+                            date_err = f"out-of-range yr/mo: {yr}/{mo}"
+                    except (ValueError, IndexError) as exc:
+                        date_err = str(exc)
+                elif m:
+                    date_err = "regex matched but lacks 2 capture groups"
+                else:
+                    date_err = "no date match"
         if matched:
             out["matched"] += 1
         try:
@@ -8153,6 +8545,7 @@ def step2_files():
     form_values: dict[str, Any] = {
         "file_pattern": state["file_pattern"],
         "date_pattern": state["date_pattern"],
+        "date_format": state.get("date_format") or "YYYY-MM",
         "pool_code_split": state["pool_code_split"],
         "balance_remove_chars": state["balance_remove_chars"],
         "accounting_negatives": state["accounting_negatives"],
@@ -8182,19 +8575,37 @@ def step2_files():
     if request.method == "GET" and suggestion and is_default:
         form_values["file_pattern"] = suggestion["file_pattern"]
         form_values["date_pattern"] = suggestion["date_pattern"]
+        # Only override the saved date_format when the user is still on
+        # the wizard default; if they've already locked in a value we
+        # don't want a sample re-detection to clobber it on revisit.
+        if (state.get("date_format") or "YYYY-MM") == "YYYY-MM":
+            form_values["date_format"] = suggestion.get(
+                "date_format", "YYYY-MM"
+            )
 
     if request.method == "POST":
         action = request.form.get("action", "save")
         # Read everything off the form first.
         fp = request.form.get("file_pattern", "").strip()
         dp = request.form.get("date_pattern", "").strip()
+        df = (request.form.get("date_format") or "").strip() or "YYYY-MM"
+        if df not in sample_parser.ACCEPTED_DATE_FORMATS:
+            # Reject silently-invalid choices BEFORE they reach state /
+            # YAML / import_data. The select on the form is restricted to
+            # accepted values so this only fires on direct form tampering.
+            flash(
+                f"Date format {df!r} is not recognized; "
+                f"falling back to YYYY-MM.",
+                "error",
+            )
+            df = "YYYY-MM"
         pcs = request.form.get("pool_code_split", "").strip() or "/"
         an = request.form.get("accounting_negatives") == "on"
         rcs_str = request.form.get("balance_remove_chars", "$,").strip()
         rcs = [c for c in rcs_str.split(",") if c]
 
         form_values.update({
-            "file_pattern": fp, "date_pattern": dp,
+            "file_pattern": fp, "date_pattern": dp, "date_format": df,
             "pool_code_split": pcs,
             "balance_remove_chars": rcs, "accounting_negatives": an,
         })
@@ -8226,7 +8637,7 @@ def step2_files():
                 except OSError as exc:
                     flash(f"Could not delete {target_rel}: {exc}", "error")
             # Re-scan so the user immediately sees the file is gone.
-            scan = _scan_data_directory(data_dir, fp, dp)
+            scan = _scan_data_directory(data_dir, fp, dp, df)
         elif action == "suggest":
             # User clicked "Suggest from sample". Overwrite file/date
             # patterns from the sample filename heuristic and re-render
@@ -8234,9 +8645,13 @@ def step2_files():
             if suggestion:
                 form_values["file_pattern"] = suggestion["file_pattern"]
                 form_values["date_pattern"] = suggestion["date_pattern"]
+                form_values["date_format"] = suggestion.get(
+                    "date_format", "YYYY-MM"
+                )
                 flash(
                     f"Suggested patterns from sample: "
-                    f"{sample_loan_name}",
+                    f"{sample_loan_name} (format "
+                    f"{form_values['date_format']}).",
                     "success",
                 )
             else:
@@ -8249,7 +8664,9 @@ def step2_files():
         elif action == "test":
             # Test the patterns against the configured data directory but DO
             # NOT save state — let the user iterate.
-            scan = _scan_data_directory(state.get("data_directory", ""), fp, dp)
+            scan = _scan_data_directory(
+                state.get("data_directory", ""), fp, dp, df,
+            )
             if scan.get("error"):
                 flash(scan["error"], "error")
             else:
@@ -8261,6 +8678,7 @@ def step2_files():
         else:  # save / next
             state["file_pattern"] = fp
             state["date_pattern"] = dp
+            state["date_format"] = df
             state["pool_code_split"] = pcs
             state["accounting_negatives"] = an
             state["balance_remove_chars"] = rcs
@@ -8275,7 +8693,24 @@ def step2_files():
                 state.get("data_directory", ""),
                 form_values["file_pattern"],
                 form_values["date_pattern"],
+                form_values["date_format"],
             )
+
+    # Live validation preview: shows whether the current
+    # (date_pattern, date_format) pair can resolve a date out of the
+    # uploaded sample filename. Surfaces silent-format-fallthrough
+    # bugs (e.g. ``date_format='MDY'`` lands at YYYY-MM and produces
+    # garbage at run-time) right on this page.
+    date_format_preview: dict[str, Any] | None = None
+    if form_values.get("date_pattern"):
+        try:
+            date_format_preview = sample_parser.validate_date_format(
+                form_values["date_pattern"],
+                form_values["date_format"],
+                sample_loan_name,
+            )
+        except Exception:  # noqa: BLE001
+            date_format_preview = None
 
     return render_template(
         "setup/step2_files.html",
@@ -8283,6 +8718,9 @@ def step2_files():
         scan=scan,
         sample_loan_name=sample_loan_name,
         suggestion=suggestion,
+        date_format_choices=sample_parser.ACCEPTED_DATE_FORMATS,
+        date_format_labels=sample_parser.DATE_FORMAT_LABELS,
+        date_format_preview=date_format_preview,
         **_wizard_ctx("files"),
     )
 
@@ -8310,6 +8748,34 @@ def step3_columns():
         for entry in files:
             cached = entry.get("analysis") or {}
             cached_headers = list(cached.get("headers") or [])
+            import re as _re_hdr
+            _SYN = _re_hdr.compile(r"^col_[A-Z]+$")
+            all_synthetic = bool(cached_headers) and all(
+                _SYN.match(str(h)) for h in cached_headers
+            )
+            any_real = bool(cached_headers) and any(
+                not _SYN.match(str(h)) for h in cached_headers
+            )
+            # Stale-mapping check: the entry's saved column_mappings
+            # reference header names that no longer exist in the cached
+            # headers list — this happens when the file was originally
+            # parsed with header_row=1 (real names captured + mapped),
+            # then re-parsed with header_row=0 (synthetic col_<LETTER>
+            # names took over) without clearing the mappings. The user
+            # is stuck with ``Balance (not in current sample)`` ghost
+            # options that always win over fresh picks. Recover by
+            # re-parsing with header_row=1.
+            cm = entry.get("column_mappings") or {}
+            cm_real_values = [
+                v for k, v in cm.items()
+                if k != "loan_pool_code_static"
+                and v
+                and not _SYN.match(str(v))
+            ]
+            stale_mappings_against_synthetic = bool(
+                cm_real_values
+                and all_synthetic
+            )
             needs_reparse = (
                 not entry.get("analysis")
                 or entry.get("signature") is None
@@ -8317,6 +8783,20 @@ def step3_columns():
                 # file has a header row — re-parse so Step 10 can build
                 # real dropdowns.
                 or (not cached_headers and bool(entry.get("has_header")))
+                # has_header=True but every header is a synthetic
+                # ``col_<LETTER>`` — leftover from a stale parse where
+                # auto-detect missed the header row but the user later
+                # toggled the checkbox; force a fresh parse so the
+                # dropdowns can show the real header names.
+                or (bool(entry.get("has_header")) and all_synthetic)
+                # has_header=False but headers contain real names —
+                # the user toggled the checkbox off after a real-header
+                # parse; re-parse with header_row=0 so col_<LETTER>
+                # placeholders take over.
+                or (not entry.get("has_header") and any_real)
+                # Saved mappings reference real header names but the
+                # cache is synthetic — entry is inconsistent.
+                or stale_mappings_against_synthetic
             )
             if not needs_reparse:
                 continue
@@ -8333,8 +8813,14 @@ def step3_columns():
             # Respect an explicit "no header" entry (header_row==0 AND
             # has_header==False). Otherwise pass the user's chosen
             # 1-based row, falling back to auto-detect when unset.
-            if not entry.get("has_header") and hr_int == 0:
-                header_row_arg: int | None = 0
+            if stale_mappings_against_synthetic:
+                # The entry is inconsistent: saved mappings reference
+                # real header names but the cached headers are
+                # synthetic. Force a real-header re-parse so the
+                # mappings can re-attach to a fresh ``analysis``.
+                header_row_arg: int | None = 1
+            elif not entry.get("has_header") and hr_int == 0:
+                header_row_arg = 0
             elif hr_int >= 1:
                 header_row_arg = hr_int
             else:
@@ -8352,13 +8838,26 @@ def step3_columns():
             entry["analysis"] = _loan_data_entry_analysis(analysis)
             entry["has_header"] = bool(analysis.get("has_header"))
             entry["header_row"] = int(analysis.get("header_row") or 0)
+            # Drop any column_mappings whose value no longer exists in
+            # the freshly-parsed headers list. Otherwise the dropdown
+            # ends up showing a ``(not in current sample)`` ghost option
+            # that always wins over a real header pick.
+            new_headers = list(entry["analysis"].get("headers") or [])
+            old_map = entry.get("column_mappings") or {}
+            entry["column_mappings"] = {
+                k: v
+                for k, v in old_map.items()
+                if k == "loan_pool_code_static" or v in new_headers
+            }
             # Seed mapping from prior top-level state (if any) so the
             # user doesn't lose their previous work; otherwise fall
             # through to suggestion-based seeding.
             top_map = state.get("column_mappings") or {}
             top_ma = state.get("member_account") or {}
             if top_map and not entry.get("column_mappings"):
-                entry["column_mappings"] = dict(top_map)
+                entry["column_mappings"] = {
+                    k: v for k, v in top_map.items() if v in new_headers
+                }
             if top_ma and not entry.get("member_account"):
                 entry["member_account"] = dict(top_ma)
             _seed_loan_data_entry_mapping(state, entry, analysis)
@@ -8417,6 +8916,20 @@ def step3_columns():
             "member_account": dict(entry.get("member_account") or {
                 "mode": "fixed_suffix", "suffix_length": 3, "delimiter": "-",
             }),
+            # Surfaced for the "auto-detected from sample" hint on the
+            # member-account radios. ``None`` when the parser couldn't
+            # infer anything (template renders no hint in that case).
+            "member_account_suggestion": (
+                dict(analysis.get("member_account_suggestion") or {})
+                if analysis.get("member_account_suggestion") else None
+            ),
+            # Top-level state's member_account dict, so the template can
+            # render a "Custom override (differs from top-level)" pill
+            # whenever the per-file dict diverges. Lets the user reason
+            # about which extracts inherit vs. override.
+            "top_level_member_account": dict(
+                state.get("member_account") or {}
+            ),
             "has_header": bool(entry.get("has_header")),
             "header_row": int(entry.get("header_row") or 0),
             "sample_rows": list(analysis.get("sample_rows") or [])[:5],
@@ -8451,6 +8964,101 @@ def step3_columns():
         all_errors: list[str] = []
         new_entries: list[tuple[dict[str, Any], dict[str, Any]]] = []
         # tuples of (original_entry, new_values_dict_to_apply)
+
+        # First pass: detect any per-file ``has_header`` toggles.
+        # When the checkbox state on the form differs from what was
+        # saved on the entry, the cached ``analysis.headers`` is stale
+        # — re-parse the file with the new header setting BEFORE we
+        # process column mappings, otherwise dropdowns are populated
+        # with column-letter placeholders (col_A/col_B/...) and any
+        # mapping values the user picks against those placeholders
+        # won't match the file's real headers.
+        reparsed_labels: list[str] = []
+        import re as _re_hdr
+        _SYNTHETIC_HDR = _re_hdr.compile(r"^col_[A-Z]+$")
+        for i, entry in enumerate(files):
+            prefix = f"f{i}__"
+            has_header_flag = request.form.get(prefix + "has_header") == "on"
+            cached_has_header = bool(entry.get("has_header"))
+            cached_headers = list(
+                (entry.get("analysis") or {}).get("headers") or []
+            )
+            all_synthetic = bool(cached_headers) and all(
+                _SYNTHETIC_HDR.match(str(h)) for h in cached_headers
+            )
+            any_real = bool(cached_headers) and any(
+                not _SYNTHETIC_HDR.match(str(h)) for h in cached_headers
+            )
+            # Re-parse when (a) the checkbox state changed since the
+            # entry was last analysed, or (b) the cached headers don't
+            # match the requested header mode (synthetic col_* names
+            # while header mode is on, or real names while off — both
+            # are leftovers from before the form is in sync with the
+            # parsed file).
+            stale_for_header_mode = (
+                (has_header_flag and all_synthetic)
+                or (not has_header_flag and any_real)
+            )
+            if has_header_flag == cached_has_header and not stale_for_header_mode:
+                continue
+            saved = entry.get("path")
+            if not saved or not Path(saved).exists():
+                # Can't re-parse without the original upload — just
+                # update the flag so the user can manually re-upload.
+                entry["has_header"] = has_header_flag
+                continue
+            new_header_row = 1 if has_header_flag else 0
+            try:
+                analysis = sample_parser.analyse_sample_file(
+                    saved,
+                    original_filename=entry.get("name") or Path(saved).name,
+                    header_row=new_header_row,
+                )
+            except Exception:  # noqa: BLE001
+                analysis = None
+            if not analysis or not analysis.get("ok"):
+                entry["has_header"] = has_header_flag
+                continue
+            entry["analysis"] = _loan_data_entry_analysis(analysis)
+            entry["has_header"] = bool(analysis.get("has_header"))
+            entry["header_row"] = int(analysis.get("header_row") or 0)
+            # Drop any column_mappings whose value no longer exists in
+            # the freshly-parsed headers list. Keep entries that still
+            # match (e.g. user previously had real header names mapped
+            # and the re-parse confirmed them) and the static-pool-code
+            # synthetic key, which isn't a real column.
+            new_headers = list(entry["analysis"].get("headers") or [])
+            old_map = entry.get("column_mappings") or {}
+            entry["column_mappings"] = {
+                k: v
+                for k, v in old_map.items()
+                if k == "loan_pool_code_static" or v in new_headers
+            }
+            # Re-seed any unset suggestion-driven defaults from the
+            # fresh analysis so the user starts with a reasonable
+            # baseline against the new headers.
+            for fld, sug in (entry["analysis"].get("column_suggestions") or {}).items():
+                if not entry["column_mappings"].get(fld):
+                    entry["column_mappings"][fld] = sug
+            reparsed_labels.append(entry.get("name") or f"File {i + 1}")
+
+        if reparsed_labels:
+            _save_state(state)
+            flash(
+                "Re-parsed loan-data extract(s) after the "
+                "<em>This file includes a header row</em> toggle changed: "
+                + ", ".join(f"<code>{n}</code>" for n in reparsed_labels)
+                + ". Please re-confirm column mappings against the "
+                "newly-detected headers, then click Save again.",
+                "info",
+            )
+            return render_template(
+                "setup/step3_columns.html",
+                files_view=[
+                    _file_view(e, i) for i, e in enumerate(_files_list())
+                ],
+                **_wizard_ctx("columns"),
+            )
 
         for i, entry in enumerate(files):
             prefix = f"f{i}__"

@@ -812,6 +812,45 @@ def load_chargeoff_recovery_history(config):
         # Build a string-keyed pool map that handles numeric codes
         str_pool_map = {str(k).strip(): v for k, v in pool_map.items()}
 
+        # ------------------------------------------------------------------
+        # Combined-file mode detection.
+        #
+        # Some CUs (e.g. Shuford FCU) ship a SINGLE workbook per quarter
+        # containing both charge-off and recovery rows side-by-side: same
+        # account / code / date columns, just different amount columns
+        # (e.g. column 8 = chargeoff amount, column 9 = recovery amount).
+        # When ``historical_file_formats`` describes both halves AND the
+        # account/code/date column wiring is identical, every matched
+        # file should be parsed via BOTH parsers — otherwise the half
+        # whose token ('charge'/'off' vs 'recov') doesn't appear in the
+        # filename gets silently dropped (the original logic explicitly
+        # excludes 'recov' files from the CO branch and vice-versa).
+        # ------------------------------------------------------------------
+        def _shared_locator(co_cfg, rc_cfg):
+            if not (co_cfg and rc_cfg):
+                return False
+            keys = ('account_col', 'code_col', 'date_col',
+                    'has_header', 'skip_rows')
+            for k in keys:
+                if co_cfg.get(k) != rc_cfg.get(k):
+                    return False
+            # Distinct amount columns are the whole point — refuse to
+            # collapse if the YAML accidentally points both halves at
+            # the same column.
+            return co_cfg.get('amount_col') != rc_cfg.get('amount_col')
+
+        combined_mode = _shared_locator(chargeoff_parse_cfg, recovery_parse_cfg)
+        if combined_mode:
+            print(
+                "    Combined CO+Recovery file mode: every matched file "
+                "will be parsed for both halves (account/code/date "
+                "columns shared; amount columns differ)."
+            )
+        # Track files already fed into each side so a filename matching
+        # both tokens isn't double-counted. Tuple of (kind, abs path).
+        _processed_co: set[str] = set()
+        _processed_rc: set[str] = set()
+
         def _lookup_pool(raw_code):
             """Look up pool from a code value (numeric or text)."""
             code = str(raw_code).strip()
@@ -847,22 +886,75 @@ def load_chargeoff_recovery_history(config):
             print(f"    No YYYY-MM quarter subfolders under {data_dir}; "
                   f"scanning top-level for charge-off / recovery files.")
 
+        # Filename-date fallback: many CUs ship per-month CO/Recovery
+        # files like "CECL Charge Off 12312025.xlsx" or "Charge Off
+        # 12-31-22.xlsx" where individual recovery ROWS may have NULL
+        # date cells (e.g. Shuford's combined files use ChargeOffDateS
+        # for both halves; recovery rows leave it blank). When that
+        # happens, fall back to the date encoded in the filename
+        # before defaulting to today's year. Reuses the same fallback
+        # layouts used by import_data.extract_snapshot_date.
+        try:
+            from import_data import _try_common_date_layouts as _file_iso
+        except Exception:  # noqa: BLE001
+            _file_iso = None  # type: ignore
+
+        def _file_period(fname: str):
+            """Return (year, month) parsed from filename, or None."""
+            if not _file_iso:
+                return None
+            iso = _file_iso(fname)
+            if not iso or len(iso) < 7:
+                return None
+            try:
+                return int(iso[0:4]), int(iso[5:7])
+            except (TypeError, ValueError):
+                return None
+
         for folder, qlabel in quarters:
             year = int(qlabel[:4])
 
             for f in os.listdir(folder):
                 fl = f.lower()
-                if ('charge' in fl and 'off' in fl) and (fl.endswith('.xlsx') or fl.endswith('.csv')):
-                    if 'proposed' in fl or '3yr' in fl or 'recov' in fl:
-                        continue
-                    filepath = os.path.join(folder, f)
+                filepath = os.path.join(folder, f)
+                # Determine which side(s) this file should feed.
+                # In combined mode any file matching EITHER token is
+                # parsed for BOTH halves; in legacy mode the filename
+                # tokens decide and the original 'proposed'/'3yr'/'recov'
+                # exclusions still apply.
+                want_co = False
+                want_rc = False
+                if fl.endswith('.xlsx') or fl.endswith('.csv'):
+                    if combined_mode:
+                        if (('charge' in fl and 'off' in fl)
+                                or 'recov' in fl):
+                            if 'proposed' not in fl and '3yr' not in fl:
+                                want_co = True
+                                want_rc = True
+                    else:
+                        if (('charge' in fl and 'off' in fl)
+                                and 'proposed' not in fl
+                                and '3yr' not in fl
+                                and 'recov' not in fl):
+                            want_co = True
+                        if 'recov' in fl and '3yr' not in fl:
+                            want_rc = True
+
+                if want_co and filepath not in _processed_co:
+                    _processed_co.add(filepath)
+                    # Per-file filename date (for rows with NULL date cells).
+                    _fp = _file_period(f)
+                    file_default_year = _fp[0] if _fp else year
+                    file_default_month = _fp[1] if _fp else (
+                        int(qlabel[5:7]) if len(qlabel) >= 7 else 12
+                    )
                     try:
                         df = _parse_chargeoff_file(filepath, parse_config=chargeoff_parse_cfg)
                         for _, row in df.iterrows():
                             pool = _lookup_pool(row['code'])
                             if pool and pd.notna(row['amount']):
-                                row_year = year
-                                row_month = int(qlabel[5:7]) if len(qlabel) >= 7 else 12
+                                row_year = file_default_year
+                                row_month = file_default_month
                                 if pd.notna(row.get('date')):
                                     try:
                                         dt = pd.to_datetime(row['date'])
@@ -878,19 +970,23 @@ def load_chargeoff_recovery_history(config):
                                 co_monthly.setdefault(ym, {})
                                 co_monthly[ym][pool] = co_monthly[ym].get(pool, 0) + row['amount']
                     except Exception as e:
-                        print(f"    Warning: Could not parse {filepath}: {e}")
+                        print(f"    Warning: Could not parse charge-offs from {filepath}: {e}")
 
-                if ('recov' in fl) and (fl.endswith('.xlsx') or fl.endswith('.csv')):
-                    if '3yr' in fl:
-                        continue
-                    filepath = os.path.join(folder, f)
+                if want_rc and filepath not in _processed_rc:
+                    _processed_rc.add(filepath)
+                    # Per-file filename date (for rows with NULL date cells).
+                    _fp = _file_period(f)
+                    file_default_year = _fp[0] if _fp else year
+                    file_default_month = _fp[1] if _fp else (
+                        int(qlabel[5:7]) if len(qlabel) >= 7 else 12
+                    )
                     try:
                         df = _parse_recovery_file(filepath, parse_config=recovery_parse_cfg)
                         for _, row in df.iterrows():
                             pool = _lookup_pool(row['code'])
                             if pool and pd.notna(row['amount']):
-                                row_year = year
-                                row_month = int(qlabel[5:7]) if len(qlabel) >= 7 else 12
+                                row_year = file_default_year
+                                row_month = file_default_month
                                 if pd.notna(row.get('date')):
                                     try:
                                         dt = pd.to_datetime(row['date'])
@@ -906,7 +1002,7 @@ def load_chargeoff_recovery_history(config):
                                 rc_monthly.setdefault(ym, {})
                                 rc_monthly[ym][pool] = rc_monthly[ym].get(pool, 0) + row['amount']
                     except Exception as e:
-                        print(f"    Warning: Could not parse {filepath}: {e}")
+                        print(f"    Warning: Could not parse recoveries from {filepath}: {e}")
 
         # Also check for 3yr file (covers 2019-2022 Q3)
         for root, dirs, files in os.walk(data_dir):
@@ -1110,12 +1206,17 @@ def _load_monthly_balances_per_month(mb_cfg, acl_cfg=None):
     return pd.DataFrame(records, columns=['pool', 'date', 'balance']), alll_by_date
 
 
-def _load_monthly_balances_per_year(mb_cfg):
+def _load_monthly_balances_per_year(mb_cfg, acl_cfg=None):
     """Read one annual balance-sheet workbook per calendar year and emit
     (pool, date, bal) rows. Each file is opened on ``layout.sheet`` (or
     the first/best sheet) and the per-file header row is re-scanned to
     pull month-end columns. Labels are mapped to wizard pool names via
     ``pool_map`` (case-insensitive, falls back to the raw label).
+
+    When ``acl_cfg`` is provided with ``source == 'monthly_file'`` and a
+    1-based ``row`` (and optional ``col`` letter override), the same row
+    is read from each period column of each yearly workbook and returned
+    as the ``alll_by_date`` dict keyed by month-end timestamp.
 
     Delegates the heavy lifting to
     ``cecl_ui.services.monthly_bal_parser.pool_balances_for_per_year_files``
@@ -1155,7 +1256,98 @@ def _load_monthly_balances_per_year(mb_cfg):
             records.append({'pool': pool, 'date': dt, 'balance': bal_f})
     if result.get('error'):
         print(f"    Warning: per_year loader: {result['error']}")
-    return pd.DataFrame(records, columns=['pool', 'date', 'balance']), {}
+
+    # ------------------------------------------------------------------
+    # ACL Balance extraction (mirrors per_month flow).
+    # ------------------------------------------------------------------
+    alll_by_date: dict = {}
+    acl_cfg = acl_cfg or {}
+    acl_src = (acl_cfg.get('source') or '').strip().lower()
+    acl_row_1b = acl_cfg.get('row')
+    try:
+        acl_row_1b = int(acl_row_1b) if acl_row_1b is not None else 0
+    except (TypeError, ValueError):
+        acl_row_1b = 0
+    acl_col_override = acl_cfg.get('col') or ''
+    extract_acl = bool(acl_src == 'monthly_file' and acl_row_1b > 0)
+    if extract_acl and year_files:
+        from openpyxl import load_workbook as _lwb
+        from openpyxl.utils import column_index_from_string as _col2idx
+        # Re-detect per-file period columns (mirrors what
+        # pool_balances_for_per_year_files does internally), then read
+        # the acl row at each period column.
+        try:
+            from cecl_ui.services.monthly_bal_parser import (
+                analyse_per_year_file as _analyse_py,
+            )
+        except Exception:
+            _analyse_py = None
+        # Allow an explicit column letter to override the per-file
+        # detection (useful when user wants "always col C" semantics).
+        forced_col_idx = None
+        if acl_col_override:
+            try:
+                forced_col_idx = _col2idx(str(acl_col_override).upper())
+            except Exception:
+                forced_col_idx = None
+        for yf in year_files:
+            path = yf.get('saved_path') or yf.get('path') or ''
+            if not path:
+                continue
+            try:
+                wb = _lwb(path, read_only=True, data_only=True)
+            except Exception as e:
+                print(f"    Warning: ACL extract failed to open {path}: {e}")
+                continue
+            try:
+                sheet_name = (layout.get('sheet') or '').strip()
+                if sheet_name and sheet_name in wb.sheetnames:
+                    ws = wb[sheet_name]
+                elif _analyse_py:
+                    info = _analyse_py(path) or {}
+                    sn = info.get('sheet')
+                    ws = wb[sn] if sn and sn in wb.sheetnames else wb.active
+                else:
+                    ws = wb.active
+                # Determine period columns: re-detect per file when
+                # available; fall back to layout's period_columns.
+                period_cols = []
+                if _analyse_py:
+                    info = _analyse_py(path) or {}
+                    period_cols = info.get('period_columns') or []
+                if not period_cols:
+                    period_cols = layout.get('period_columns') or []
+                for pc in period_cols:
+                    try:
+                        if forced_col_idx:
+                            col_idx = forced_col_idx
+                        else:
+                            raw_col = pc.get('col')
+                            if isinstance(raw_col, str):
+                                col_idx = _col2idx(raw_col.strip().upper())
+                            else:
+                                col_idx = int(raw_col)
+                        period_iso = pc.get('period_iso') or pc.get('period')
+                        if not period_iso:
+                            continue
+                        cell_val = ws.cell(row=acl_row_1b, column=col_idx).value
+                        av = _coerce_balance(cell_val)
+                        if av is None:
+                            continue
+                        dt = pd.to_datetime(period_iso, errors='coerce')
+                        if pd.isna(dt):
+                            continue
+                        alll_by_date[dt] = abs(float(av))
+                    except Exception:
+                        continue
+            finally:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+        if alll_by_date:
+            print(f"    ACL Balance extracted from per_year files (row {acl_row_1b}): {len(alll_by_date)} period(s)")
+    return pd.DataFrame(records, columns=['pool', 'date', 'balance']), alll_by_date
 
 
 def _coerce_balance(v):
@@ -1468,7 +1660,7 @@ def load_monthly_balances(config):
         # If per_month failed (no files / unreadable), fall through to the
         # legacy scan so the user at least gets the historical context.
     if mb_source == 'per_year':
-        df, alll = _load_monthly_balances_per_year(mb_cfg)
+        df, alll = _load_monthly_balances_per_year(mb_cfg, acl_cfg=config.get('acl'))
         if not df.empty:
             return df, _merge_acl_history(alll, config)
 
@@ -10252,6 +10444,57 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         imp['total_spec_id'] = wizard_imp['total_spec_id']
         hist['impaired'] = imp
 
+    # ── 5300 DQ fallback ──
+    # When the credit union has no historical delinquency rows in the
+    # DB but has a charter number on file, pull DQ% history directly
+    # from NCUA Form 5300 and write it to
+    # ``loan_code_delinquency_history``. Subsequent runs find the rows
+    # already in place and skip the fetch. Opt out per CU via
+    # ``cfg['delinquency']['use_5300_fallback']: false``. Requires
+    # ``cfg['charter_number']`` to know which CU to query.
+    dq_cfg = config.get('delinquency') or {}
+    if (dq_cfg.get('use_5300_fallback', True)
+            and config.get('charter_number')):
+        try:
+            from cecl_ui.services import delinquency_hist_processor as _dqp
+            try:
+                _hv = _dqp.history_matrix(config['credit_union'])
+                _existing_dq = set((_hv or {}).get('months') or [])
+            except Exception:  # noqa: BLE001
+                _existing_dq = set()
+            if not _existing_dq:
+                from cecl_ui.services import (
+                    solr_5300_delq_backfill as _solr_dq,
+                )
+                _snap_iso = pd.Timestamp(snapshot_date).date().isoformat()
+                _months_back = int(dq_cfg.get('history_months') or 84)
+                _solr_url = (
+                    dq_cfg.get('solr_url')
+                    or 'http://searchserver1.tctrisk.com:8983/solr'
+                )
+                _solr_core = dq_cfg.get('solr_core') or 'ncua'
+                _res = _solr_dq.backfill_missing_delinquency_quarters(
+                    config['credit_union'],
+                    int(config['charter_number']),
+                    _solr_url, _solr_core,
+                    _snap_iso, _months_back,
+                )
+                if _res.get('ok'):
+                    _filled = len(_res.get('months_filled') or [])
+                    print(
+                        f"    5300 DQ backfill: filled {_filled} "
+                        f"quarter(s), wrote "
+                        f"{_res.get('rows_written', 0)} row(s) for "
+                        f"charter {config['charter_number']}"
+                    )
+                else:
+                    print(
+                        f"    5300 DQ fallback skipped: "
+                        f"{_res.get('error')}"
+                    )
+        except Exception as _e:  # noqa: BLE001
+            print(f"    5300 DQ fallback skipped: {_e}")
+
     # ── Overlay DQ% from loan_code_delinquency_history table ──
     # The wizard's "Historical DQ" step writes rows here from three
     # sources (loan-extract derivation, 5300 backfill, manual entry).
@@ -10372,6 +10615,67 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             rr_map[pool] = False
         imp_now['risk_rated'] = rr_map
         hist['impaired'] = imp_now
+
+    # ── 5300 ACL fallback ──
+    # When the credit union's monthly-balance / ACL source does not
+    # include an ACL row for the snapshot quarter (or stores $0), the
+    # report engine can pull the value directly from NCUA Form 5300.
+    # Opt-in per CU via ``cfg['acl']['use_5300_fallback']``; requires
+    # ``cfg['charter_number']`` to know which CU to query. The fetcher
+    # probes A718A3 (CECL ACL on Loans) → A718A5 (Total ACL) → A719
+    # (legacy ALLL) so it works for both reporting regimes. Only
+    # missing or zero quarter-end values are filled — explicit user
+    # values from the file / YAML history always win.
+    acl_cfg = config.get('acl') or {}
+    if acl_cfg.get('use_5300_fallback') and config.get('charter_number'):
+        try:
+            from cecl_ui.services import solr_5300_acl as _solr_acl
+            alll_by_date = hist.get('alll_by_date') or {}
+            snap_dt = pd.Timestamp(snapshot_date)
+
+            # Decide which quarter-ends to probe. Always probe the
+            # snapshot quarter. Also probe any quarter-end already in
+            # alll_by_date that currently holds 0 (those came from the
+            # file with a blank/zero cell).
+            from datetime import date as _date
+
+            def _qe_for(ts):
+                ts = pd.Timestamp(ts)
+                m = ts.month
+                qm = 3 * ((m - 1) // 3 + 1)
+                yr = ts.year
+                last = {3: 31, 6: 30, 9: 30, 12: 31}[qm]
+                return _date(yr, qm, last).isoformat()
+
+            wanted: set[str] = {_qe_for(snap_dt)}
+            for dt, val in list(alll_by_date.items()):
+                try:
+                    if float(val) == 0.0:
+                        wanted.add(_qe_for(dt))
+                except (TypeError, ValueError):
+                    continue
+
+            results = _solr_acl.fetch_acl_history(
+                config['charter_number'],
+                sorted(wanted),
+            ) or {}
+
+            filled = 0
+            field_used = None
+            for qe_iso, info in results.items():
+                ts = pd.Timestamp(qe_iso)
+                cur = alll_by_date.get(ts)
+                if cur is None or float(cur or 0) == 0.0:
+                    alll_by_date[ts] = float(info['value'])
+                    field_used = info.get('field') or field_used
+                    filled += 1
+            if filled:
+                hist['alll_by_date'] = alll_by_date
+                print(f"    5300 ACL fallback: filled {filled} quarter(s) "
+                      f"for charter {config['charter_number']} "
+                      f"(field {field_used or 'mixed'})")
+        except Exception as _e:  # noqa: BLE001
+            print(f"    5300 ACL fallback skipped: {_e}")
 
     # ── Set ACL Balance from Monthly loan balances file (ALLL Balance row) ──
     alll_by_date = hist.get('alll_by_date', {})

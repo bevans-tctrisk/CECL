@@ -58,6 +58,41 @@ tmp_*.html
 # ---- Throwaway debug scripts at repo root ----
 /temp_*.py
 
+# ---- Local working notes (per-developer scratch files) ----
+/notes/
+/import_log.txt
+
+# ---- Diagnostic / one-shot scripts (not part of the shipped tooling) ----
+# Permanent utility scripts live elsewhere (or are explicitly tracked).
+# Throwaway `inspect_*`, `check_*`, `diag_*`, `diff_*`, `compare_*`,
+# `dump_*`, `rebuild_*`, `regenerate_*`, `recopy_*`, `restore_*`,
+# `verify_*`, `show_*`, `distinct_*`, `drive_*`, `just_*`, `rerun_*`,
+# `reimport_*`, `backfill_test_*`, `import_and_*`, `copy_workbook_*`
+# scripts under scripts/ stay local to the developer's machine.
+/scripts/inspect_*.py
+/scripts/check_*.py
+/scripts/diag_*.py
+/scripts/diff_*.py
+/scripts/compare_*.py
+/scripts/dump_*.py
+/scripts/rebuild_*.py
+/scripts/regenerate_*.py
+/scripts/recopy_*.py
+/scripts/restore_*.py
+/scripts/verify_*.py
+/scripts/show_*.py
+/scripts/distinct_*.py
+/scripts/drive_*.py
+/scripts/just_*.py
+/scripts/rerun_*.py
+/scripts/reimport_*.py
+/scripts/backfill_test_*.py
+/scripts/import_and_*.py
+/scripts/copy_workbook_*.py
+/scripts/run_test_*.py
+/scripts/run_census_baseline*.py
+/scripts/run_census_scratch*.py
+
 # Old/backup source files kept locally but not versioned
 /generate_report_old.py
 /report_tct_backup.py

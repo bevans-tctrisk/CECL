@@ -33,6 +33,24 @@
       {% set ma_mode = ma.get('mode', 'fixed_suffix') %}
       {% set ma_suffix = ma.get('suffix_length', 3) %}
       {% set ma_delim = ma.get('delimiter', '-') %}
+      {# member_account_suggestion: parser-inferred layout from sample
+         values. Used to drive the "✓ auto-detected" hint when the
+         entry's saved values match the inference. #}
+      {% set ma_sug = fv.member_account_suggestion or {} %}
+      {% set ma_auto_match = ma_sug and (
+           ma_sug.get('mode') == ma_mode
+           and (ma_mode != 'delimiter' or (ma_sug.get('delimiter') or '-') == (ma_delim or '-'))
+           and (ma_mode != 'fixed_suffix' or (ma_sug.get('suffix_length') or 0) | int == (ma_suffix or 0) | int)
+         ) %}
+      {# Top-level (state-wide) member_account dict. When the per-file
+         dict diverges, render a "Custom override" pill so the analyst
+         knows this extract isn't inheriting the global setting. #}
+      {% set ma_top = fv.top_level_member_account or {} %}
+      {% set ma_overridden = ma_top and (
+           ma_top.get('mode') != ma_mode
+           or (ma_mode == 'delimiter' and (ma_top.get('delimiter') or '-') != (ma_delim or '-'))
+           or (ma_mode == 'fixed_suffix' and (ma_top.get('suffix_length') or 0) | int != (ma_suffix or 0) | int)
+         ) %}
 
       {% macro hlabel(h) -%}
         {%- if not header_detected and first_row.get(h) -%}
@@ -95,6 +113,34 @@
       <h3>Member &amp; Account number</h3>
       <p class="muted">Pick the shape that matches this file's member /
         account / suffix layout.</p>
+
+      {% if ma_auto_match %}
+        <p style="color:#2a7; margin:4px 0 8px;">
+          <span style="font-weight:bold;">&#10003;</span>
+          Auto-detected from sample data
+          ({{ ma_sug.get('confidence', 'medium') }} confidence).
+          {% if ma_sug.get('rationale') %}
+            <span class="help">{{ ma_sug.get('rationale') }}</span>
+          {% endif %}
+        </p>
+      {% elif ma_sug and ma_sug.get('mode') %}
+        <p style="color:#26a; margin:4px 0 8px;">
+          <span style="font-weight:bold;">&#9432;</span>
+          Sample suggests <strong>{{ ma_sug.get('mode') }}</strong>
+          {% if ma_sug.get('mode') == 'delimiter' %}with delimiter <code>{{ ma_sug.get('delimiter') }}</code>{% endif %}
+          {% if ma_sug.get('mode') == 'fixed_suffix' %}with suffix length <code>{{ ma_sug.get('suffix_length') }}</code>{% endif %}.
+          {% if ma_sug.get('rationale') %}
+            <span class="help">{{ ma_sug.get('rationale') }}</span>
+          {% endif %}
+        </p>
+      {% endif %}
+      {% if ma_overridden %}
+        <p style="color:#a60; margin:4px 0 8px;">
+          <span style="font-weight:bold;">&#9888;</span>
+          Custom override on this extract — differs from top-level
+          (<code>{{ ma_top.get('mode') }}</code>{% if ma_top.get('mode') == 'delimiter' %} delimiter <code>{{ ma_top.get('delimiter') }}</code>{% elif ma_top.get('mode') == 'fixed_suffix' %} suffix length <code>{{ ma_top.get('suffix_length') }}</code>{% endif %}).
+        </p>
+      {% endif %}
 
       <div class="form-row">
         <div>

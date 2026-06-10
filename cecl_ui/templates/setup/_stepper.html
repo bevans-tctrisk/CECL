@@ -1,14 +1,86 @@
 {# Stepper component, included at the top of every wizard step. #}
+{# Per-step status (auto / hil / pending) is supplied by _wizard_ctx
+   when the user has completed a Step 1 auto-scan. Empty step_status
+   dict (no auto-scan) renders the original badge-less stepper. #}
 <div class="stepper">
   {% for key, label in steps %}
     {% set ep = step_endpoints.get(key) if step_endpoints is defined and step_endpoints else none %}
+    {% set status = (step_status[key] if step_status is defined and step_status and key in step_status else '') %}
+    {% set badge = '' %}
+    {% set badge_title = '' %}
+    {% if status == 'auto' %}
+      {% set badge = '&#x2713;' %}
+      {% set badge_title = 'Auto-filled by Step 1 scan' %}
+    {% elif status == 'hil' %}
+      {% set badge = '&#x26A0;' %}
+      {% set badge_title = 'Needs your input' %}
+    {% endif %}
     {% if ep and key != active %}
-      <a class="step" href="{{ url_for(ep) }}">{{ label }}</a>
+      <a class="step{% if status %} step-{{ status }}{% endif %}" href="{{ url_for(ep) }}">
+        {% if badge %}<span class="step-badge" title="{{ badge_title }}">{{ badge | safe }}</span>{% endif %}
+        {{ label }}
+      </a>
     {% else %}
-      <div class="step {% if key == active %}active{% endif %}">{{ label }}</div>
+      <div class="step{% if key == active %} active{% endif %}{% if status %} step-{{ status }}{% endif %}">
+        {% if badge %}<span class="step-badge" title="{{ badge_title }}">{{ badge | safe }}</span>{% endif %}
+        {{ label }}
+      </div>
     {% endif %}
   {% endfor %}
 </div>
+
+{# HIL banner — only shown after a successful auto-scan, when at least one
+   step still needs user input. #}
+{% if hil_needs is defined and hil_needs %}
+{% set _completed_auto = 0 %}
+{% if step_status is defined and step_status %}
+  {% set _completed_auto = step_status.values() | list | select('equalto', 'auto') | list | length %}
+{% endif %}
+<div class="hil-banner" style="margin:8px 0; padding:10px 14px; border-left:4px solid #d6940a; background:#fff8e7; border-radius:4px;">
+  <div style="display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;">
+    <div style="flex:1; min-width:200px;">
+      <strong>Auto-scan results:</strong>
+      {{ _completed_auto }} step(s) auto-filled,
+      {{ hil_needs | length }} still need{% if hil_needs | length == 1 %}s{% endif %} your input.
+      {% if next_hil_key and next_hil_key != active and step_endpoints and step_endpoints[next_hil_key] %}
+        Next: <a href="{{ url_for(step_endpoints[next_hil_key]) }}">{{ next_hil_key }} &rarr;</a>
+      {% endif %}
+    </div>
+    <details style="flex:2; min-width:280px;">
+      <summary class="muted" style="cursor:pointer;">See remaining items</summary>
+      <ul style="margin:6px 0 0 0; padding-left:18px;">
+        {% for need in hil_needs %}
+          {% set ep = step_endpoints.get(need.step_key) if step_endpoints else none %}
+          <li>
+            {% if ep %}<a href="{{ url_for(ep) }}">{{ need.step_key }}</a>{% else %}<strong>{{ need.step_key }}</strong>{% endif %}
+            <span class="muted" style="font-size:0.85em;">({{ need.severity }})</span>:
+            {{ need.reasons | join('; ') }}
+          </li>
+        {% endfor %}
+      </ul>
+    </details>
+  </div>
+</div>
+{% endif %}
+
+<style>
+  .stepper .step-badge {
+    display: inline-block;
+    width: 1.1em;
+    height: 1.1em;
+    line-height: 1em;
+    text-align: center;
+    margin-right: 4px;
+    font-size: 0.85em;
+    font-weight: bold;
+  }
+  .stepper .step-auto { background: #e6f4ea; }
+  .stepper .step-auto .step-badge { color: #1e7e34; }
+  .stepper .step-hil { background: #fff8e7; }
+  .stepper .step-hil .step-badge { color: #d6940a; }
+  .stepper a.step-auto:hover { background: #d4ecd9; }
+  .stepper a.step-hil:hover { background: #fff0c4; }
+</style>
 
 <div class="stepper-actions" style="margin:8px 0 16px 0; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
   {% if step_form_id is defined and step_form_id %}

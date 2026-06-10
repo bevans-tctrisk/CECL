@@ -2,8 +2,10 @@
   "field_to_header_counts": {
     "current_balance": {
       "bal": 2,
+      "balance": 2,
       "book_balance": 5,
       "cc last stmt bal": 10,
+      "curr bal": 1,
       "current bal": 3,
       "current balance": 2,
       "current balance amount": 8,
@@ -13,11 +15,12 @@
       "loan balance": 29
     },
     "current_fico_score": {
-      "credit score": 4
+      "credit score": 5
     },
     "days_delinquent": {
       "col_x": 4,
       "days delinquent": 6,
+      "days deliquent": 2,
       "days dq": 3,
       "days past due": 2,
       "days_past_due": 5,
@@ -25,31 +28,33 @@
       "dlq_days": 2,
       "inv": 8,
       "member close date": 10,
-      "past due": 29
+      "past due": 30
     },
     "interest_rate": {
       "annual rate 1": 29,
       "cash annual interest rate": 8,
       "int rate": 4,
       "int_rate": 2,
-      "interest rate": 2,
+      "interest rate": 4,
       "interest rate (apr)": 6,
       "interest rate code": 3,
       "noteintrate": 5,
       "rate": 8
     },
     "loan_pool_code": {
+      "acct type": 2,
       "col_cd": 2,
       "currmiaccttypcd": 5,
       "loan collateral code": 5,
       "loan purpose": 8,
       "loan type": 33,
-      "loan type code": 1,
+      "loan type code": 2,
       "mbr state code": 6,
       "type": 11,
       "type of mortgage": 1
     },
     "loan_suffix": {
+      "acct number": 1,
       "card account number": 8,
       "cc note last 4": 10,
       "ln_sfx": 2,
@@ -57,10 +62,11 @@
     },
     "member_number": {
       "account #": 7,
-      "account number": 18,
+      "account number": 20,
       "acct nbr": 10,
       "acctnbr": 5,
       "acn": 2,
+      "customer #": 1,
       "loan#": 8,
       "member name": 16,
       "member's name (last, first, middle initial)": 3,
@@ -70,6 +76,7 @@
       "card open date": 8,
       "contractdate": 5,
       "date of loan": 6,
+      "loan date": 2,
       "loan original date": 29,
       "orig_ln_dt": 2,
       "original date": 3,
@@ -78,13 +85,14 @@
     },
     "original_fico_score": {
       "application_creditscore": 5,
-      "credit score": 47,
+      "credit score": 49,
       "fico": 3,
       "inv": 8,
       "user_defined_field_7": 2
     },
     "original_loan_amount": {
       "finalloanamount": 5,
+      "loan amount": 2,
       "loan original amnt": 16,
       "loan#": 8,
       "orig nbr pymts": 13,
@@ -93,7 +101,7 @@
       "original loan amount": 20
     },
     "total_available_credit": {
-      "credit limit": 49,
+      "credit limit": 51,
       "credit line amount": 8,
       "creditlimitamt": 5,
       "limit": 3,
@@ -104,11 +112,14 @@
     "account #": "Account #",
     "account number": "Account Number",
     "acct nbr": "ACCT NBR",
+    "acct number": "ACCT NUMBER",
+    "acct type": "Acct Type",
     "acctnbr": "ACCTNBR",
     "acn": "acn",
     "annual rate 1": "Annual Rate 1",
     "application_creditscore": "APPLICATION_CREDITSCORE",
     "bal": "bal",
+    "balance": "Balance",
     "book_balance": "BOOK_BALANCE",
     "card account number": "Card Account Number",
     "card open date": "Card Open Date",
@@ -122,6 +133,7 @@
     "credit line amount": "Credit Line Amount",
     "credit score": "CREDIT SCORE",
     "creditlimitamt": "CREDITLIMITAMT",
+    "curr bal": "CURR BAL",
     "current bal": "Current Bal",
     "current balance": "Current Balance",
     "current balance amount": "Current Balance Amount",
@@ -129,8 +141,10 @@
     "current loan balance": "Current Loan Balance",
     "currmiaccttypcd": "CURRMIACCTTYPCD",
     "currupb": "CURRUPB",
+    "customer #": "CUSTOMER #",
     "date of loan": "Date of Loan",
     "days delinquent": "Days Delinquent",
+    "days deliquent": "Days Deliquent",
     "days dq": "Days DQ",
     "days past due": "Days past due",
     "days_past_due": "DAYS_PAST_DUE",
@@ -147,8 +161,10 @@
     "limit": "Limit",
     "ln_limit": "ln_limit",
     "ln_sfx": "ln_sfx",
+    "loan amount": "Loan Amount",
     "loan balance": "LOAN BALANCE",
     "loan collateral code": "Loan Collateral Code",
+    "loan date": "Loan Date",
     "loan original amnt": "LOAN ORIGINAL AMNT",
     "loan original date": "LOAN ORIGINAL DATE",
     "loan purpose": "Loan Purpose",
@@ -175,6 +191,6 @@
     "type of mortgage": "Type of Mortgage",
     "user_defined_field_7": "User_Defined_Field_7"
   },
-  "updated_at": "2026-06-08T19:42:51",
+  "updated_at": "2026-06-09T18:05:43",
   "version": 1
 }
