@@ -39,7 +39,15 @@ def _normalize_header_columns(cols) -> list[str]:
     """Mirror ``sample_parser._clean_header`` so wizard-saved mapping
     values (e.g. ``'Current Loan Bal'`` for a wrap-text cell, or
     ``'col_X'`` for a blank header) resolve correctly against the
-    DataFrame's columns at lookup time."""
+    DataFrame's columns at lookup time.
+
+    Also dedupes duplicate header names by appending an Excel-letter
+    suffix to the second+ occurrence (mirrors
+    ``sample_parser._dedupe_headers``). Some workbooks (e.g. CUMA MTG
+    Servicing reports) ship with duplicate column labels, which would
+    otherwise cause ``df[name]`` to return a DataFrame slice instead of
+    a Series and break downstream string ops.
+    """
     out: list[str] = []
     for i, c in enumerate(cols):
         s = "" if c is None else _WS_RX.sub(" ", str(c)).strip()
@@ -48,7 +56,16 @@ def _normalize_header_columns(cols) -> list[str]:
             out.append(f"col_{_excel_idx_to_letter(i)}")
         else:
             out.append(s)
-    return out
+    seen: dict[str, int] = {}
+    deduped: list[str] = []
+    for i, name in enumerate(out):
+        if name in seen:
+            seen[name] += 1
+            deduped.append(f"{name} ({_excel_idx_to_letter(i)})")
+        else:
+            seen[name] = 1
+            deduped.append(name)
+    return deduped
 
 
 def _report_period_cutoff(state: dict[str, Any]) -> str:
@@ -155,16 +172,40 @@ def _clean_balance(series: pd.Series, remove_chars, accounting_negatives) -> pd.
     return pd.to_numeric(s, errors="coerce")
 
 
+def _normalize_raw_code(x: Any) -> str:
+    """Coerce a pool-code cell to a clean string.
+
+    Handles NaN/None/float values that survive ``astype(str).str.*``
+    chains (pandas preserves NaN through the str accessor) and
+    normalises numeric strings like ``"85.0"`` to ``"85"``.
+    """
+    if x is None:
+        return ""
+    try:
+        if isinstance(x, float) and pd.isna(x):
+            return ""
+    except Exception:  # noqa: BLE001
+        pass
+    s = str(x).strip()
+    if not s or s.lower() == "nan":
+        return ""
+    if s.replace(".", "", 1).isdigit():
+        try:
+            return str(int(float(s)))
+        except (ValueError, OverflowError):
+            return s
+    return s
+
+
 def _map_pool_codes(series: pd.Series, pool_map: dict, split_char: str,
                     default_pool: str) -> pd.Series:
     if split_char:
         raw = series.astype(str).str.split(split_char).str[0].str.strip()
     else:
         raw = series.astype(str).str.strip()
-    # Normalise "85.0" -> "85" for numeric codes.
-    raw = raw.apply(
-        lambda x: str(int(float(x))) if x.replace(".", "", 1).isdigit() else x
-    )
+    # Normalise "85.0" -> "85" for numeric codes (defensive against
+    # NaN/float survivors).
+    raw = raw.apply(_normalize_raw_code)
     pmap = {str(k): v for k, v in (pool_map or {}).items()}
     return raw.map(pmap).fillna(default_pool or "")
 
@@ -318,9 +359,7 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
             raw_codes = pool_series.astype(str).str.split(split_char).str[0].str.strip()
         else:
             raw_codes = pool_series.astype(str).str.strip()
-        raw_codes = raw_codes.apply(
-            lambda x: str(int(float(x))) if x.replace(".", "", 1).isdigit() else x
-        )
+        raw_codes = raw_codes.apply(_normalize_raw_code)
         pmap_keys = {str(k) for k in (pool_map or {})}
         for code, pool_name, bal in zip(raw_codes, mapped, balances):
             b = float(bal or 0.0)
@@ -392,6 +431,7 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
             year_files=files,
             layout=layout,
             label_to_pool=mb.get("pool_map") or {},
+            exclude_labels=mb.get("exclude_labels") or [],
         )
         by_period = result.get("by_period") or {}
         if not by_period:
@@ -443,6 +483,7 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
             monthly_files=files,
             layout=layout,
             label_to_pool=mb.get("pool_map") or {},
+            exclude_labels=mb.get("exclude_labels") or [],
         )
         by_period = result.get("by_period") or {}
         if not by_period:
@@ -523,6 +564,7 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
         pool_name_col=pool_name_col,
         label_to_pool=mb.get("pool_map") or {},
         period=_report_period_cutoff(state) or None,
+        exclude_labels=mb.get("exclude_labels") or [],
     )
 
 

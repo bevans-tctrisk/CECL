@@ -95,21 +95,45 @@ def _parse_string_date(s: str) -> tuple[int, int, int] | None:
 
 
 def normalize_to_month_end(value: Any) -> date | None:
-    """Snap any date-ish value to the last day of its calendar month."""
+    """Snap any date-ish value to the last day of its calendar month.
+
+    Returns ``None`` for unparseable input or for dates that fall before
+    the year 1900 -- typos like ``"06/30/203"`` (meant to be 2023) get
+    rejected here so they never poison downstream "earliest period"
+    pickers.
+    """
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
+        if value.year < 1900:
+            return None
         return _last_day(value.year, value.month)
     if isinstance(value, date):
+        if value.year < 1900:
+            return None
         return _last_day(value.year, value.month)
     if isinstance(value, (int, float)):
         # Excel serial date (1900-based, ignoring the 1900 leap-year bug).
+        # Restrict to a plausible CECL window (year 2000 through ~2100) so
+        # balance values like 615.10, 1000, or 2,349,876.41 do not get
+        # misread as serial dates and poison header-row detection.
+        # Serial 36526 = 2000-01-01, serial 73415 = 2100-12-31.
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not (36526 <= f <= 73415):
+            return None
         try:
             from openpyxl.utils.datetime import from_excel
-            d = from_excel(float(value))
+            d = from_excel(f)
             if isinstance(d, datetime):
+                if d.year < 1900:
+                    return None
                 return _last_day(d.year, d.month)
             if isinstance(d, date):
+                if d.year < 1900:
+                    return None
                 return _last_day(d.year, d.month)
         except Exception:  # noqa: BLE001
             return None
@@ -117,6 +141,8 @@ def normalize_to_month_end(value: Any) -> date | None:
         parts = _parse_string_date(value)
         if parts:
             y, mo, _d = parts
+            if y < 1900:
+                return None
             return _last_day(y, mo)
     return None
 
@@ -520,6 +546,7 @@ def pool_balances_for_latest_period(
     pool_name_col: str,
     label_to_pool: dict[str, str] | None = None,
     period: str | None = None,
+    exclude_labels: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Read the monthly balance file and return per-pool balances for the
     latest detected period (or for ``period`` if given as ISO ``YYYY-MM-DD``).
@@ -538,6 +565,13 @@ def pool_balances_for_latest_period(
     canonical pool name). Labels that map to an empty/None pool are
     treated as "ignored" and dropped from ``by_pool`` totals (but still
     appear in ``raw_rows``).
+
+    ``exclude_labels`` is a case-insensitive set of raw labels that
+    should NEVER contribute to ``by_pool`` totals - typically the
+    parent/summary rows in a hierarchical Vizo-style 'Balance Sheets
+    <CU>' workbook where each parent row is the sum of its sub-category
+    rows beneath it. Excluded rows still appear in ``raw_rows`` (with
+    ``mapped_pool`` cleared) so the UI can show them as ``Skipped``.
     """
     p = Path(saved_path)
     if not p.exists():
@@ -602,6 +636,11 @@ def pool_balances_for_latest_period(
             (k or "").strip().lower(): (v or "").strip()
             for k, v in (label_to_pool or {}).items()
         }
+        excl = {
+            (s or "").strip().lower()
+            for s in (exclude_labels or [])
+            if (s or "").strip()
+        }
 
         by_pool: dict[str, float] = {}
         raw_rows: list[dict[str, Any]] = []
@@ -627,11 +666,13 @@ def pool_balances_for_latest_period(
             bal = _coerce_number(
                 ws.cell(row=r, column=target_col).value
             )
-            mapped = ltp.get(key, "")
+            is_excluded = key in excl
+            mapped = "" if is_excluded else ltp.get(key, "")
             raw_rows.append({
                 "label": label,
                 "balance": bal,
                 "mapped_pool": mapped,
+                "excluded": is_excluded,
             })
             if mapped and bal is not None:
                 by_pool[mapped] = by_pool.get(mapped, 0.0) + bal
@@ -1207,6 +1248,7 @@ def pool_balances_for_per_month_files(
     monthly_files: list[dict[str, Any]],
     layout: dict[str, Any],
     label_to_pool: dict[str, str] | None = None,
+    exclude_labels: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-pool balances across a list of single-month files.
 
@@ -1236,6 +1278,11 @@ def pool_balances_for_per_month_files(
     ltp = {
         (k or "").strip().lower(): (v or "").strip()
         for k, v in (label_to_pool or {}).items()
+    }
+    excl = {
+        (s or "").strip().lower()
+        for s in (exclude_labels or [])
+        if (s or "").strip()
     }
 
     by_period: dict[str, dict[str, Any]] = {}
@@ -1296,9 +1343,11 @@ def pool_balances_for_per_month_files(
             seen.add(key)
             bal = (_coerce_number(row[balance_col_idx - 1])
                    if balance_col_idx - 1 < len(row) else None)
-            mapped = ltp.get(key, "")
+            is_excluded = key in excl
+            mapped = "" if is_excluded else ltp.get(key, "")
             raw_rows.append({"label": label, "balance": bal,
-                             "mapped_pool": mapped})
+                             "mapped_pool": mapped,
+                             "excluded": is_excluded})
             if mapped and bal is not None:
                 by_pool[mapped] = by_pool.get(mapped, 0.0) + bal
         by_period[period] = {"by_pool": by_pool, "raw_rows": raw_rows}
@@ -1540,6 +1589,7 @@ def pool_balances_for_per_year_files(
     year_files: list[dict[str, Any]],
     layout: dict[str, Any],
     label_to_pool: dict[str, str] | None = None,
+    exclude_labels: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-pool balances across a list of single-year files.
 
@@ -1567,6 +1617,11 @@ def pool_balances_for_per_year_files(
     ltp = {
         (k or "").strip().lower(): (v or "").strip()
         for k, v in (label_to_pool or {}).items()
+    }
+    excl = {
+        (s or "").strip().lower()
+        for s in (exclude_labels or [])
+        if (s or "").strip()
     }
 
     by_period: dict[str, dict[str, Any]] = {}
@@ -1643,10 +1698,12 @@ def pool_balances_for_per_year_files(
                     continue
                 seen.add(key)
                 bal = (_coerce_number(row[c]) if c < len(row) else None)
-                mapped = ltp.get(key, "")
+                is_excluded = key in excl
+                mapped = "" if is_excluded else ltp.get(key, "")
                 slot["raw_rows"].append({
                     "label": label, "balance": bal,
                     "mapped_pool": mapped, "period": period_iso,
+                    "excluded": is_excluded,
                 })
                 if mapped and bal is not None:
                     slot["by_pool"][mapped] = (

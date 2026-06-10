@@ -38,7 +38,7 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
-from cecl_ui.services import balance_check as balance_check_service, chargeoff_hist_processor, co_recov_parser, column_mapping_suggestions, config_service, delinquency_hist_processor, dq_extract_parser, extract_hist_processor, extract_hist_service, geo_service, hist_parser, impaired_parser, monthly_bal_parser, monthly_co_recov_aggregator, pipeline_service, recovery_hist_processor, sample_parser, solr_5300_backfill, solr_5300_co_backfill, solr_5300_delq_backfill, solr_5300_recov_backfill, warm_parser, wizard_drafts
+from cecl_ui.services import balance_check as balance_check_service, chargeoff_hist_processor, co_recov_parser, column_mapping_suggestions, config_service, cu_locator, delinquency_hist_processor, dq_extract_parser, extract_hist_processor, extract_hist_service, geo_service, hist_parser, impaired_parser, monthly_bal_parser, monthly_co_recov_aggregator, pipeline_service, recovery_hist_processor, sample_parser, solr_5300_backfill, solr_5300_co_backfill, solr_5300_delq_backfill, solr_5300_recov_backfill, warm_parser, wizard_drafts
 from cecl_ui.services import admin_defaults
 
 
@@ -379,14 +379,17 @@ def _default_state() -> dict[str, Any]:
                 "core": "ncua",
                 # {loan_code: comma-separated 5300 field codes}
                 "loan_code_fields": {},
-                # "per_loan_code" (default): one row per canonical 5300
-                # bucket, downstream loader maps NCUA code -> user pool
-                # via pool_map / NCUA classifier.
-                # "distributed": fetch the QUARTER's TOTAL loan balance
-                # and distribute it across user pools in the same %
-                # ratios as the EARLIEST month of the historical
-                # balance file(s) uploaded above.
-                "mode": "per_loan_code",
+                # "distributed" (default): fetch the QUARTER's TOTAL
+                # loan balance and distribute it across user pools in
+                # the same % ratios as the EARLIEST month of the
+                # historical balance file(s) uploaded above. This is
+                # the right answer for almost every CU we onboard.
+                # "per_loan_code": one row per canonical 5300 bucket,
+                # downstream loader maps NCUA code -> user pool via
+                # pool_map / NCUA classifier. Only used in special
+                # cases where the 5300 categories line up cleanly with
+                # this CU's pools.
+                "mode": "distributed",
                 "last_test": None,
                 "last_run": None,
             },
@@ -468,7 +471,47 @@ def _default_state() -> dict[str, Any]:
     }
 
 
+# Action names that signal "user explicitly clicked Save & Next on this
+# step" — i.e. they consider the step done. Catches the bare ``next``
+# (used on most templates' Save & Next button) and any ``*_and_next`` /
+# ``*_next`` variant (per-month / per-year layouts, manual ACL save,
+# etc.). Plain "save" actions (Save Progress) are NOT included; they
+# don't advance to the next step.
+_SAVE_AND_NEXT_RX = re.compile(r"^(?:next|.+_(?:and_)?next)$")
+
+
+def _mark_step_user_completed(state: dict[str, Any], step_key: str) -> None:
+    """Record that the user explicitly finished *step_key* via Save & Next.
+
+    The breadcrumb stepper consults ``state["_user_completed_steps"]``
+    to render a green ✓ regardless of the current data-completion
+    predicate, so a user who clicked Save & Next on a step sees it
+    reflected as done even if a *recommended* HIL still applies.
+    """
+    if not step_key:
+        return
+    done = state.setdefault("_user_completed_steps", [])
+    if not isinstance(done, list):
+        done = []
+        state["_user_completed_steps"] = done
+    if step_key not in done:
+        done.append(step_key)
+
+
 def _save_state(state: dict[str, Any]) -> None:
+    # Detect a "Save & Next"-style POST and record the user's explicit
+    # done-signal for the active step. This drives the green ✓ on the
+    # breadcrumb. Safe to run on every save: only POST + matching
+    # action triggers the mark.
+    try:
+        if request.method == "POST":
+            action_val = (request.form.get("action") or "").strip()
+            if action_val and _SAVE_AND_NEXT_RX.match(action_val):
+                _mark_step_user_completed(state, state.get("_active_step", "") or "")
+    except RuntimeError:
+        # No active request context (e.g. background save) — skip.
+        pass
+
     session[STATE_KEY] = state
     session.modified = True
     # Auto-save to disk on every step so wizard work survives a session
@@ -510,17 +553,76 @@ def _wizard_ctx(active: str) -> dict[str, Any]:
     if st.get("_auto_scan_completed"):
         try:
             from cecl_ui.services import auto_setup
+            # Proactive self-heal: stale drafts saved before the
+            # Phase 9.4 bulk-stage code (or where only one side of a
+            # combined CO+Recov classification got staged) get their
+            # hist_scan.monthly_co_files / monthly_recov_files lists
+            # refilled here. Fires on EVERY wizard GET so the badges on
+            # Steps 5 and 6 reflect reality regardless of which step
+            # the user is currently viewing.
+            try:
+                _heal_msgs = auto_setup.selfheal_hist_scan_from_folder(st)
+                if _heal_msgs:
+                    _save_state(st)
+                    for _m in _heal_msgs:
+                        flash(f"Auto-scan: {_m}", "success")
+            except Exception:  # noqa: BLE001
+                # Self-heal is best-effort; never break the wizard.
+                pass
             hil_needs = auto_setup.compute_hil_needs(st)
             need_keys = {n["step_key"] for n in hil_needs}
+            # Severity-aware HIL set: any 'required' entry blocks the
+            # green check; 'recommended'-only entries do not.
+            required_keys = {
+                n["step_key"] for n in hil_needs
+                if str(n.get("severity") or "").lower() == "required"
+            }
             report = st.get("_auto_scan_report") or {}
+            step_complete = auto_setup.compute_step_completion(st)
+            user_done_raw = st.get("_user_completed_steps") or []
+            user_done: set[str] = set(
+                k for k in user_done_raw if isinstance(k, str)
+            )
             for key, _label in steps:
-                if key in need_keys:
+                # Priority:
+                #   1. Required HIL → ⚠ amber (data integrity always wins).
+                #   2. User explicitly clicked Save & Next on this step
+                #      → green ✓ (their stated intent overrides any
+                #      lingering recommended HIL).
+                #   3. Step has data sufficient for completion AND no
+                #      required HIL → green ✓.
+                #   4. Else if step has any HIL entry → amber ⚠.
+                #   5. Else if auto-scan filled it → green ✓ (legacy).
+                #   6. Else pending.
+                if key in required_keys:
+                    step_status[key] = "hil"
+                elif key in user_done:
+                    step_status[key] = "auto"
+                elif key in step_complete:
+                    step_status[key] = "auto"
+                elif key in need_keys:
                     step_status[key] = "hil"
                 elif key in report:
                     step_status[key] = "auto"
                 else:
                     step_status[key] = "pending"
+            # Filter the HIL banner: hide steps whose badge is now ✓
+            # (recommended-only items on completed steps no longer block
+            # progress, so don't list them as "needs your input").
+            hil_needs = [
+                n for n in hil_needs
+                if step_status.get(n["step_key"]) != "auto"
+            ]
             next_hil_key = auto_setup.first_hil_step_key(st, steps)
+            # If the original first-HIL step is now complete, advance to
+            # the next still-flagged step (if any).
+            still_hil = {n["step_key"] for n in hil_needs}
+            if next_hil_key and next_hil_key not in still_hil:
+                next_hil_key = None
+                for key, _label in steps:
+                    if key in still_hil:
+                        next_hil_key = key
+                        break
         except Exception:  # noqa: BLE001
             # Defensive: stepper rendering must never 500.
             step_status = {}
@@ -904,6 +1006,32 @@ def api_counties():
     return jsonify({"state": state, "counties": geo_service.counties_for_state(state)})
 
 
+# JSON: auto-detect state + county for a credit union by charter number.
+# Sources: state from the Solr 5300 ``ncua`` core (walks back through prior
+# quarters when the latest one indexes ``custate='NA'``); county from
+# NCUA's quarterly FOICU.txt (downloaded + cached on demand).
+@setup_bp.route("/api/locate-cu")
+def api_locate_cu():
+    charter_raw = (request.args.get("charter") or "").strip()
+    if not charter_raw.isdigit():
+        return jsonify({
+            "ok": False,
+            "errors": ["charter must be a positive integer"],
+        }), 400
+    try:
+        result = cu_locator.lookup_cu_geography(
+            int(charter_raw),
+            workspace_root=current_app.config["WORKSPACE_ROOT"],
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        return jsonify({
+            "ok": False,
+            "charter": int(charter_raw),
+            "errors": [f"lookup failed: {exc}"],
+        }), 500
+    return jsonify(result)
+
+
 # =================================================================
 # Step 2 — WARM workbook upload (optional)
 # =================================================================
@@ -1215,6 +1343,39 @@ def step_loan_pools():
     state = _state()
     if request.method == "POST":
         action = request.form.get("action", "")
+
+        if action == "apply_pool_grouping":
+            names = request.form.getlist("grp_pool_name")
+            choices: dict[str, str] = {}
+            for i, nm in enumerate(names):
+                nm = (nm or "").strip()
+                if not nm:
+                    continue
+                raw = (request.form.get(f"grp_choice_{i}", "keep") or "keep").strip().lower()
+                choices[nm] = "split" if raw == "split" else "keep"
+            try:
+                from cecl_ui.services import auto_setup as _auto_setup
+                result = _auto_setup.apply_pool_grouping_choice(state, choices)
+            except Exception as exc:  # noqa: BLE001
+                flash(f"Could not apply pool grouping: {exc}", "error")
+            else:
+                if result.get("ok"):
+                    _save_state(state)
+                    flash(
+                        f"Rebuilt pool list: {result['pools_count']} pool(s) "
+                        f"({result['kept_count']} kept, "
+                        f"{result['split_count']} split) &mdash; "
+                        f"{result['mappings_count']} sub-category mapping(s) "
+                        f"propagated to Step 8 Monthly Balance map.",
+                        "success",
+                    )
+                else:
+                    flash(
+                        result.get("error")
+                        or "Could not rebuild from pool seed.",
+                        "error",
+                    )
+            return redirect(url_for("setup.step_loan_pools"))
 
         if action == "save_pool_settings":
             names = request.form.getlist("ps_name")
@@ -4062,11 +4223,14 @@ def _ensure_hist_extracts(state: dict[str, Any]) -> dict[str, Any]:
     sb.setdefault("solr_url", "http://searchserver1.tctrisk.com:8983/solr")
     sb.setdefault("core", "ncua")
     sb.setdefault("loan_code_fields", {})
-    # "per_loan_code" (default) maps each canonical NCUA bucket through
-    # pool_map / NCUA inference. "distributed" fetches the quarter's
-    # TOTAL loan balance and apportions across user pools using the
-    # earliest historical-balance month's pool ratios.
-    sb.setdefault("mode", "per_loan_code")
+    # "distributed" (default) fetches the quarter's TOTAL loan balance
+    # and apportions across user pools using the earliest historical-
+    # balance month's pool ratios -- the right answer for almost every
+    # CU we onboard. "per_loan_code" maps each canonical NCUA bucket
+    # through pool_map / NCUA inference and is only used in special
+    # cases where the 5300 categories line up cleanly with this CU's
+    # pools.
+    sb.setdefault("mode", "distributed")
     sb.setdefault("last_test", None)
     sb.setdefault("last_run", None)
     # Parallel slot for the charge-off backfill (Solr URL/core are
@@ -4128,6 +4292,7 @@ def _earliest_month_pool_distribution(state: dict) -> dict:
             mb_state.get("year_files") or [],
             mb_state.get("per_year_layout") or {},
             label_to_pool,
+            exclude_labels=mb_state.get("exclude_labels") or [],
         )
         if not ann.get("ok") and not (ann.get("by_period") or {}):
             out["error"] = (
@@ -4142,6 +4307,7 @@ def _earliest_month_pool_distribution(state: dict) -> dict:
             mb_state.get("monthly_files") or [],
             mb_state.get("per_month_layout") or {},
             label_to_pool,
+            exclude_labels=mb_state.get("exclude_labels") or [],
         )
         if not pm.get("ok") and not (pm.get("by_period") or {}):
             out["error"] = (
@@ -4193,6 +4359,7 @@ def _earliest_month_pool_distribution(state: dict) -> dict:
         sw = monthly_bal_parser.pool_balances_for_latest_period(
             saved_path, sheet, int(header_row), pool_name_col,
             label_to_pool=label_to_pool, period=earliest_iso,
+            exclude_labels=mb_state.get("exclude_labels") or [],
         )
         if not sw.get("ok"):
             out["error"] = (
@@ -4305,7 +4472,241 @@ def _earliest_month_pool_distribution(state: dict) -> dict:
     return out
 
 
-def _next_profile_id(profiles: list[dict[str, Any]]) -> str:
+def _extracted_balance_preview(state: dict, max_recent_months: int = 6) -> dict:
+    """Build a confirmation/sanity-check preview of the historical
+    balances actually extracted from the uploaded balance file(s) +
+    any NCUA 5300 distributed-backfill rows written to the DB.
+
+    Returns a dict::
+
+        {
+            "ok": bool,
+            "error": str,
+            "source": "annual" | "per_month" | "single" | "",
+            "source_files": [str, ...],   # file names that produced data
+            "period_count": int,          # distinct month-ends
+            "earliest_period": "YYYY-MM-DD",
+            "latest_period": "YYYY-MM-DD",
+            "pool_count": int,
+            "recent_periods": ["YYYY-MM-DD", ...],   # most-recent N
+            "top_pools": [str, ...],                 # top by latest balance
+            "totals_by_period": {period_iso: total_$},
+            "balances_grid": {pool: {period_iso: $, ...}},  # for top_pools
+            "backfill": {                # 5300 distributed last_run summary
+                "present": bool,
+                "ok": bool,
+                "months_filled": int,
+                "rows_written": int,
+                "error": str,
+                "earliest_filled": "YYYY-MM-DD",
+                "latest_filled": "YYYY-MM-DD",
+            },
+        }
+
+    Cheap (<200ms typically); meant to be computed at template render
+    time and never raise.
+    """
+    out: dict = {
+        "ok": False, "error": "", "source": "",
+        "source_files": [], "period_count": 0,
+        "earliest_period": "", "latest_period": "",
+        "latest_period_with_data": "",
+        "pool_count": 0, "recent_periods": [], "top_pools": [],
+        "totals_by_period": {}, "balances_grid": {},
+        "backfill": {
+            "present": False, "ok": False,
+            "months_filled": 0, "rows_written": 0, "error": "",
+            "earliest_filled": "", "latest_filled": "",
+        },
+    }
+
+    # ----- Backfill summary (independent of source) --------------------
+    try:
+        sb_run = (
+            ((state.get("hist_extracts") or {}).get("solr_backfill") or {})
+            .get("last_run") or {}
+        )
+    except Exception:  # noqa: BLE001
+        sb_run = {}
+    if sb_run:
+        out["backfill"]["present"] = True
+        out["backfill"]["ok"] = bool(sb_run.get("ok"))
+        months = sb_run.get("months_filled") or sb_run.get("filled_months") or []
+        if isinstance(months, list):
+            out["backfill"]["months_filled"] = len(months)
+            # Each entry may be a plain ISO string OR a dict like
+            # {"period": "2018-10-31", "rows_written": ...}. Normalise to
+            # a list of strings before min/max so we never compare dicts.
+            period_strs: list[str] = []
+            for m in months:
+                if isinstance(m, dict):
+                    p = m.get("period") or m.get("as_of") or m.get("date")
+                    if p:
+                        period_strs.append(str(p))
+                elif m:
+                    period_strs.append(str(m))
+            if period_strs:
+                out["backfill"]["earliest_filled"] = min(period_strs)
+                out["backfill"]["latest_filled"] = max(period_strs)
+        try:
+            out["backfill"]["rows_written"] = int(
+                sb_run.get("rows_written") or 0
+            )
+        except (TypeError, ValueError):
+            pass
+        if not sb_run.get("ok") and sb_run.get("error"):
+            out["backfill"]["error"] = str(sb_run.get("error"))
+
+    # ----- Extracted balance grid -------------------------------------
+    mb_state = state.get("monthly_bal") or {}
+    label_to_pool = mb_state.get("pool_map") or {}
+    source = state.get("hist_balance_source") or ""
+    by_period: dict = {}
+    source_files: list[str] = []
+    try:
+        if source == "annual_balance_sheets":
+            out["source"] = "annual"
+            year_files = mb_state.get("year_files") or []
+            if not year_files:
+                # User picked the source but hasn't uploaded yet -- stay quiet.
+                return out
+            res = monthly_bal_parser.pool_balances_for_per_year_files(
+                year_files,
+                mb_state.get("per_year_layout") or {},
+                label_to_pool,
+                exclude_labels=mb_state.get("exclude_labels") or [],
+            )
+            by_period = res.get("by_period") or {}
+            for yf in year_files:
+                if isinstance(yf, dict):
+                    nm = yf.get("name") or yf.get("path") or ""
+                    if nm:
+                        source_files.append(str(nm).split("/")[-1].split("\\")[-1])
+        elif source == "monthly_balance_sheets":
+            out["source"] = "per_month"
+            monthly_files = mb_state.get("monthly_files") or []
+            if not monthly_files:
+                return out
+            res = monthly_bal_parser.pool_balances_for_per_month_files(
+                monthly_files,
+                mb_state.get("per_month_layout") or {},
+                label_to_pool,
+                exclude_labels=mb_state.get("exclude_labels") or [],
+            )
+            by_period = res.get("by_period") or {}
+            for mf in monthly_files:
+                if isinstance(mf, dict):
+                    nm = mf.get("name") or mf.get("path") or ""
+                    if nm:
+                        source_files.append(str(nm).split("/")[-1].split("\\")[-1])
+        elif source == "single_workbook":
+            # Single workbook needs a per-month walk; defer to the
+            # earliest-month helper which already opens it once. The
+            # full grid would require a wide-table reshape we don't
+            # ship today -- show the earliest month only.
+            saved_path = mb_state.get("saved_path") or ""
+            if not saved_path:
+                # No file uploaded yet -- stay quiet.
+                return out
+            earliest = _earliest_month_pool_distribution(state)
+            if earliest.get("ok"):
+                out["source"] = "single"
+                by_period = {earliest["period"]: {
+                    "by_pool": earliest.get("by_pool") or {}
+                }}
+                source_files.append(
+                    str(saved_path).split("/")[-1].split("\\")[-1]
+                )
+            else:
+                out["error"] = earliest.get("error") or "preview unavailable"
+                return out
+        else:
+            # No source picked yet -- stay quiet (no card).
+            return out
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"Could not build balance preview: {exc}"
+        return out
+
+    if not by_period:
+        out["error"] = (
+            "No periods extracted from the uploaded balance file(s). "
+            "Check the pool mapping below."
+        )
+        return out
+
+    out["source_files"] = source_files
+    sorted_periods = sorted(by_period.keys())
+    out["period_count"] = len(sorted_periods)
+    out["earliest_period"] = sorted_periods[0]
+    out["latest_period"] = sorted_periods[-1]
+
+    # Compute totals per period + collect every pool that has any balance
+    totals: dict[str, float] = {}
+    for per in sorted_periods:
+        by_pool = (by_period.get(per) or {}).get("by_pool") or {}
+        tot = 0.0
+        for pool, bal in by_pool.items():
+            try:
+                b = float(bal or 0)
+            except (TypeError, ValueError):
+                continue
+            if b <= 0:
+                continue
+            tot += b
+        totals[per] = round(tot, 2)
+
+    # Drop trailing periods with zero total (workbooks often pre-allocate
+    # future month columns that haven't been filled in yet). Surface this
+    # to the template as "latest_period_with_data" so the displayed grid
+    # never appears empty just because the workbook has empty future cells.
+    periods_with_data = [p for p in sorted_periods if totals.get(p, 0) > 0]
+    if not periods_with_data:
+        out["error"] = (
+            "Every extracted period summed to zero. Check that the pool "
+            "mapping below assigns at least one balance-sheet label to a "
+            "real pool (not 'Ignore')."
+        )
+        return out
+    latest_with_data = periods_with_data[-1]
+    out["latest_period_with_data"] = latest_with_data
+
+    # Pick top pools by balance at the latest period that actually has data
+    pool_to_latest: dict[str, float] = {}
+    latest_pools = (by_period.get(latest_with_data) or {}).get("by_pool") or {}
+    for pool, bal in latest_pools.items():
+        try:
+            b = float(bal or 0)
+        except (TypeError, ValueError):
+            continue
+        if b > 0:
+            pool_to_latest[str(pool)] = b
+    # Top N pools by latest balance
+    top_pools = [
+        p for p, _ in sorted(
+            pool_to_latest.items(), key=lambda kv: kv[1], reverse=True
+        )
+    ][:10]
+    out["pool_count"] = len(pool_to_latest)
+    out["top_pools"] = top_pools
+
+    # Show the most-recent N months WITH DATA as columns
+    recent = periods_with_data[-max_recent_months:]
+    out["recent_periods"] = recent
+    out["totals_by_period"] = {p: totals.get(p, 0.0) for p in recent}
+
+    grid: dict[str, dict[str, float]] = {}
+    for pool in top_pools:
+        row: dict[str, float] = {}
+        for per in recent:
+            by_pool = (by_period.get(per) or {}).get("by_pool") or {}
+            try:
+                row[per] = round(float(by_pool.get(pool, 0) or 0), 2)
+            except (TypeError, ValueError):
+                row[per] = 0.0
+        grid[pool] = row
+    out["balances_grid"] = grid
+    out["ok"] = True
+    return out
     used = {p.get("id") for p in profiles}
     n = 1
     while f"p{n}" in used:
@@ -4696,6 +5097,40 @@ def step3_historical():
         active_key = "historical"
         next_endpoint = "setup.step3a_co_history"
     back_endpoint = _ep if _ep.startswith("setup.") else f"setup.{_ep}"
+
+    # Auto-scan self-heal: when Step 1's auto-scan classified CO/Recov
+    # files in the folder but they never made it into hist_scan (e.g. the
+    # user ran the scan before this bulk-stage code was wired up), refill
+    # hist_scan.monthly_co_files / monthly_recov_files now so Step 5 and
+    # Step 6 render the per-file tables on the next page load.
+    if request.method == "GET" and state.get("_auto_scan_completed"):
+        folder = state.get("_auto_scan_folder") or ""
+        if folder:
+            hs = state.get("hist_scan") or {}
+            need_co = section in ("co",) and not (hs.get("monthly_co_files") or hs.get("co_files"))
+            need_recov = section in ("recov",) and not (hs.get("monthly_recov_files") or hs.get("recov_files"))
+            if need_co or need_recov:
+                try:
+                    from cecl_ui.services import auto_setup as _auto_setup
+                    cls = _auto_setup.classify_folder(folder)
+                    msgs: list[str] = []
+                    if need_co:
+                        msgs.extend(_auto_setup._stage_hist_scan_files(
+                            state, cls.get("co_files") or [],
+                            "monthly_co_files", "co",
+                        ))
+                    if need_recov:
+                        msgs.extend(_auto_setup._stage_hist_scan_files(
+                            state, cls.get("recov_files") or [],
+                            "monthly_recov_files", "recov",
+                        ))
+                    if msgs:
+                        _save_state(state)
+                        for m in msgs:
+                            flash(f"Auto-scan: {m}", "success")
+                except Exception:  # noqa: BLE001
+                    # Self-heal is best-effort; never block the page render.
+                    pass
 
     if request.method == "POST":
         action = request.form.get("action", "next")
@@ -5611,6 +6046,7 @@ def step3_historical():
                             mb_state.get("year_files") or [],
                             mb_state.get("per_year_layout") or {},
                             label_to_pool,
+                            exclude_labels=mb_state.get("exclude_labels") or [],
                         )
                         upload_months = set(
                             (ann.get("by_period") or {}).keys())
@@ -5619,6 +6055,7 @@ def step3_historical():
                             mb_state.get("monthly_files") or [],
                             mb_state.get("per_month_layout") or {},
                             label_to_pool,
+                            exclude_labels=mb_state.get("exclude_labels") or [],
                         )
                         upload_months = set(
                             (pm.get("by_period") or {}).keys())
@@ -6342,6 +6779,96 @@ def step3_historical():
                 flash("Saved recoveries column mapping.", "success")
 
         elif action in (
+            "copy_co_mapping_to_recov", "copy_recov_mapping_from_co",
+        ):
+            # Convenience action for CUs whose Charge-Off and Recovery
+            # data live in the SAME file (e.g. Destinations CU's
+            # "Recoveries-Chg-offs" workbooks have both a Charge-off
+            # Amount column and a Recovery Amount column in every row).
+            # Copies the saved charge-off column mapping into the
+            # recoveries slot, swapping the Amount column to the
+            # recoveries-side suggestion and (when available) swapping
+            # the Date column to a recoveries-specific date header.
+            src = state.get("co_columns") or {}
+            if not (src.get("loan_code") or src.get("amount")):
+                flash(
+                    "Save the charge-off column mapping first, then click "
+                    "this button to copy it to recoveries.",
+                    "error",
+                )
+            else:
+                recov_ins = state.get("recov_inspect") or {}
+                suggested = recov_ins.get("suggested") or {}
+                recov_headers = recov_ins.get("headers") or []
+                existing_recov = state.get("recov_columns") or {}
+
+                # New amount: prefer the recov-side suggestion from the
+                # inspector (so the SAME file's "Recovery Amount" header
+                # wins over the copied "Charge-off Amount"); fall back
+                # to whatever recov already had; finally fall back to
+                # the CO amount (single-amount-column files).
+                new_amount = (
+                    suggested.get("recov_amount")
+                    or existing_recov.get("amount")
+                    or src.get("amount")
+                    or ""
+                )
+
+                # New date: scan recov headers for a recovery-flavoured
+                # date column (e.g. "Recovery Date"); fall back to
+                # whatever the CO mapping used (single-date files).
+                new_date = src.get("date") or ""
+                for h in recov_headers:
+                    hs = str(h).lower()
+                    if "recov" in hs and "date" in hs:
+                        new_date = h
+                        break
+
+                # Build the recov mapping as a deep copy of CO with the
+                # two overrides. member_account block is copied as-is
+                # (same file => same account-key shape).
+                ma = dict(src.get("member_account") or {})
+                new_cols = {
+                    "loan_code":     src.get("loan_code") or "",
+                    "amount":        new_amount,
+                    "date":          new_date,
+                    "member_number": src.get("member_number") or "",
+                    "loan_suffix":   src.get("loan_suffix") or "",
+                    "member_account": ma or {
+                        "mode": "fixed_suffix",
+                        "suffix_length": 3,
+                        "delimiter": "-",
+                    },
+                }
+                state["recov_columns"] = new_cols
+
+                # Mirror into the per-layout map so the staleness
+                # round-trip preserves the copied mapping.  Prefer the
+                # recov side's active signature; if it's not set,
+                # adopt the CO side's signature so the copied mapping
+                # tracks with the same file layout.
+                rsig = (state.get("recov_active_signature") or "").strip()
+                if not rsig:
+                    rsig = (state.get("co_active_signature") or "").strip()
+                    if rsig:
+                        state["recov_active_signature"] = rsig
+                if rsig:
+                    layout_map = dict(state.get("recov_layout_columns") or {})
+                    layout_map[rsig] = new_cols
+                    state["recov_layout_columns"] = layout_map
+
+                _save_state(state)
+                flash(
+                    "Copied charge-off column mapping into recoveries"
+                    + (f" (amount column swapped to '{new_amount}'"
+                       + (f", date column swapped to '{new_date}'"
+                          if new_date != src.get("date") else "")
+                       + ")."
+                       if new_amount != src.get("amount") else "."),
+                    "success",
+                )
+
+        elif action in (
             "map_unmapped_co_codes", "map_unmapped_recov_codes",
         ):
             # Inline mapping of unmapped charge-off / recovery loan codes
@@ -6749,7 +7276,17 @@ def step3_historical():
                                     or "  " in h)
             for h in (_ins.get("headers") or [])
         )
-        if _first_name and (_first_name != _ins_name or _stale_ws):
+        # Detect cached inspects that errored out (e.g. the legacy
+        # ".xls openpyxl-not-supported" error from before xlrd support
+        # was added). If the cache has an error AND empty headers but
+        # the file still exists on disk, force a fresh inspect so
+        # post-fix code paths take over without requiring the user to
+        # click "Re-inspect" manually.
+        _stale_error = bool(
+            _ins.get("error") and not (_ins.get("headers") or [])
+        )
+        if _first_name and (_first_name != _ins_name or _stale_ws
+                            or _stale_error):
             # Preserve any saved per-layout mapping for the file now at
             # files[0]: only force a fresh seed when no saved mapping
             # exists for that layout.
@@ -6818,6 +7355,28 @@ def step3_historical():
         solr_dist_preview = _earliest_month_pool_distribution(state)
     except Exception:  # noqa: BLE001
         solr_dist_preview = {"ok": False, "error": "preview failed"}
+
+    # Full historical-balance extraction preview -- the user-visible
+    # confirmation that running the auto-scan (or manually picking the
+    # source on Step 4) actually pulled month-end balances out of the
+    # uploaded workbook(s). Always computed so the panel always shows
+    # something (an error message in the worst case).
+    try:
+        extracted_bal_preview = _extracted_balance_preview(state)
+    except Exception as exc:  # noqa: BLE001
+        extracted_bal_preview = {
+            "ok": False,
+            "error": f"preview unavailable: {exc}",
+            "source": "", "source_files": [], "period_count": 0,
+            "earliest_period": "", "latest_period": "",
+            "latest_period_with_data": "",
+            "pool_count": 0, "recent_periods": [], "top_pools": [],
+            "totals_by_period": {}, "balances_grid": {},
+            "backfill": {"present": False, "ok": False,
+                         "months_filled": 0, "rows_written": 0,
+                         "error": "", "earliest_filled": "",
+                         "latest_filled": ""},
+        }
 
     # Distinct loan codes from the active CO/Recov sample file so the
     # template can render a per-layout loan-code -> pool mapping table.
@@ -6973,6 +7532,7 @@ def step3_historical():
         co_canonical_map=solr_5300_co_backfill.load_canonical_map(),
         recov_canonical_map=solr_5300_recov_backfill.load_canonical_map(),
         solr_dist_preview=solr_dist_preview,
+        extracted_bal_preview=extracted_bal_preview,
         co_distinct_codes=co_distinct_codes,
         recov_distinct_codes=recov_distinct_codes,
         co_layouts=co_layouts,

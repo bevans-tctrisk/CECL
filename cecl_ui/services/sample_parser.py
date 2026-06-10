@@ -338,6 +338,27 @@ def _excel_col_letter(idx: int) -> str:
     return s
 
 
+def _dedupe_headers(headers: list[str]) -> list[str]:
+    """Append a positional suffix to repeated header names.
+
+    Some workbooks (e.g. CUMA MTG Servicing reports) ship with duplicate
+    column labels in the header row. Pandas tolerates duplicates but
+    ``df[col]`` then returns a DataFrame instead of a Series, which
+    breaks downstream ``.tolist()`` / ``.dropna()`` calls. Suffix the
+    second+ occurrence with the Excel column letter to keep names unique.
+    """
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for i, h in enumerate(headers):
+        if h in seen:
+            seen[h] += 1
+            out.append(f"{h} ({_excel_col_letter(i)})")
+        else:
+            seen[h] = 1
+            out.append(h)
+    return out
+
+
 def _match_columns(headers: list[str]) -> dict[str, str]:
     """Return {system_field: matched_header} using the heuristics."""
     out: dict[str, str] = {}
@@ -669,6 +690,7 @@ def extract_pool_codes(
             _clean_header(h, i)
             for i, h in enumerate(raw.iloc[hdr_idx].tolist())
         ]
+        headers = _dedupe_headers(headers)
         body = raw.iloc[hdr_idx + 1:].reset_index(drop=True)
     else:
         headers = [f"col_{_excel_col_letter(i)}" for i in range(raw.shape[1])]
@@ -837,6 +859,8 @@ def parse_pool_map_file(
         )
 
     headers = [_clean_header(h, i) for i, h in enumerate(df.columns.tolist())]
+    headers = _dedupe_headers(headers)
+    df.columns = headers
 
     # Pick columns
     if code_col and code_col in headers:
@@ -980,6 +1004,7 @@ def analyse_sample_file(
             _clean_header(h, i)
             for i, h in enumerate(raw.iloc[hdr_idx].tolist())
         ]
+        headers = _dedupe_headers(headers)
         body = raw.iloc[hdr_idx + 1:].reset_index(drop=True)
         body.columns = headers
     else:

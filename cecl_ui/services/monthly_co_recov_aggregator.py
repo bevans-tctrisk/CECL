@@ -270,6 +270,27 @@ def _read_rows(path: Path) -> list[list[Any]]:
                 out.append(list(row))
         return out
 
+    if ext == ".xls":
+        # Legacy BIFF format — openpyxl can't read these. Use xlrd.
+        import xlrd  # type: ignore
+
+        wb_xls = xlrd.open_workbook(str(path))
+        best_rows_xls: list[list[Any]] = []
+        best_score_xls = -1
+        for sh in wb_xls.sheets():
+            sheet_rows: list[list[Any]] = []
+            for r in range(sh.nrows):
+                row_vals = sh.row_values(r)
+                sheet_rows.append(list(row_vals) if row_vals else [])
+            score = sum(
+                1 for row in sheet_rows
+                for c in row if c not in (None, "")
+            )
+            if score > best_score_xls:
+                best_score_xls = score
+                best_rows_xls = sheet_rows
+        return best_rows_xls
+
     from openpyxl import load_workbook
 
     wb = load_workbook(path, read_only=True, data_only=True)

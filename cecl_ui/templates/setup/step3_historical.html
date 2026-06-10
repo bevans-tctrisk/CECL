@@ -1859,11 +1859,115 @@
   {% endif %}
 </div>
 
+{# -- Confirmation: historical balances actually extracted from the
+     uploaded workbook(s). Always rendered when the source can be
+     previewed (annual / monthly / single); shows a compact months ×
+     pools grid so the user can visually verify the data before
+     proceeding. -- #}
+{% set ebp = extracted_bal_preview or {} %}
+{% if ebp.get('ok') %}
+<div class="card" style="border:1px solid #b8d8be; background:#f0faf2;">
+  <h3 style="margin-top:0;">
+    <span style="color:#1e7e34;">&#10003;</span>
+    Historical balances extracted
+  </h3>
+  <p class="muted" style="margin-top:0;">
+    Read <strong>{{ ebp.period_count }}</strong> month-end period(s)
+    from <code>{{ ebp.earliest_period }}</code> through
+    <code>{{ ebp.latest_period }}</code> across
+    <strong>{{ ebp.pool_count }}</strong> pool(s)
+    {% if ebp.source_files %}
+      from
+      {% for fn in ebp.source_files[:3] %}
+        <code>{{ fn }}</code>{% if not loop.last %}, {% endif %}
+      {% endfor %}
+      {% if ebp.source_files|length > 3 %}
+        and {{ ebp.source_files|length - 3 }} more
+      {% endif %}
+    {% endif %}.
+    {% if ebp.latest_period_with_data and ebp.latest_period_with_data != ebp.latest_period %}
+      Periods after <code>{{ ebp.latest_period_with_data }}</code>
+      are empty placeholders in the workbook and are hidden below.
+    {% endif %}
+    {% if ebp.recent_periods|length < ebp.period_count %}
+      Showing the most-recent {{ ebp.recent_periods|length }} month(s)
+      with data and top {{ ebp.top_pools|length }} pool(s) by latest
+      balance.
+    {% endif %}
+  </p>
+
+  {% if ebp.top_pools and ebp.recent_periods %}
+  <div style="overflow-x:auto; max-width:100%; margin-top:6px;">
+    <table class="data-table" style="min-width:520px;">
+      <thead>
+        <tr>
+          <th style="text-align:left;">Pool</th>
+          {% for per in ebp.recent_periods %}
+            <th style="text-align:right;">{{ per }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for pool in ebp.top_pools %}
+        <tr>
+          <td>{{ pool }}</td>
+          {% for per in ebp.recent_periods %}
+            <td style="text-align:right;">
+              ${{ '{:,.0f}'.format(ebp.balances_grid.get(pool, {}).get(per, 0)) }}
+            </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+        <tr style="font-weight:bold; background:#e6f4ea;">
+          <td>Total (all pools)</td>
+          {% for per in ebp.recent_periods %}
+            <td style="text-align:right;">
+              ${{ '{:,.0f}'.format(ebp.totals_by_period.get(per, 0)) }}
+            </td>
+          {% endfor %}
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if ebp.backfill.present %}
+    {% if ebp.backfill.ok %}
+      <div style="margin-top:10px; padding:8px 12px;
+            background:#fff; border:1px solid #b8d8be;
+            border-radius:4px;">
+        <strong>NCUA 5300 distributed backfill:</strong>
+        wrote <strong>{{ '{:,}'.format(ebp.backfill.rows_written) }}</strong>
+        row(s) across
+        <strong>{{ ebp.backfill.months_filled }}</strong>
+        month-end(s)
+        {% if ebp.backfill.earliest_filled %}
+          ({{ ebp.backfill.earliest_filled }} &rarr;
+          {{ ebp.backfill.latest_filled }})
+        {% endif %}.
+      </div>
+    {% elif ebp.backfill.error %}
+      <div class="flash warning" style="margin-top:10px;">
+        <strong>NCUA 5300 backfill error:</strong>
+        {{ ebp.backfill.error }}
+      </div>
+    {% endif %}
+  {% endif %}
+</div>
+{% elif ebp.get('error') and hist_source in ('annual_balance_sheets', 'monthly_balance_sheets', 'single_workbook') %}
+<div class="card" style="border:1px solid #f5c2c0; background:#fdecea;">
+  <h3 style="margin-top:0; color:#a02020;">
+    Historical balance preview unavailable
+  </h3>
+  <p style="margin-bottom:0;">{{ ebp.error }}</p>
+</div>
+{% endif %}
+
 {# -- 1a. NCUA 5300 backfill (works for ALL three source choices) -- #}
 {% set sb = (state.hist_extracts or {}).get('solr_backfill') or {} %}
 {% set sb_test = sb.get('last_test') %}
 {% set sb_run = sb.get('last_run') %}
-{% set sb_mode = sb.get('mode') or 'per_loan_code' %}
+{% set sb_mode = sb.get('mode') or 'distributed' %}
 {% set cmap = solr_canonical_map or [] %}
 {% set _he_1a = state.hist_extracts or {} %}
 {% set _tp_1a = _he_1a.get('target_period') or '' %}
@@ -3465,6 +3569,15 @@
                       title="Re-read headers from the uploaded workbook">
                 Re-inspect
               </button>
+              {% set _co_cols_for_copy_sw = state.get('co_columns') or {} %}
+              {% if _co_cols_for_copy_sw.get('loan_code') or _co_cols_for_copy_sw.get('amount') %}
+                <button class="btn btn-link" type="submit"
+                        name="action" value="copy_co_mapping_to_recov"
+                        style="margin-left:8px;"
+                        title="Copy the charge-off mapping into recoveries (amount column auto-swapped to recoveries; date column swapped if a recoveries-specific date header exists). Use this when charge-offs and recoveries come from the same file.">
+                  Copy from Charge-Off mapping
+                </button>
+              {% endif %}
             </div>
           </form>
           {% if recov_ins_sw.preview_rows %}
@@ -3868,6 +3981,15 @@
                       title="Re-read headers from the first file">
                 Re-inspect
               </button>
+              {% set _co_cols_for_copy = state.get('co_columns') or {} %}
+              {% if _co_cols_for_copy.get('loan_code') or _co_cols_for_copy.get('amount') %}
+                <button class="btn btn-link" type="submit"
+                        name="action" value="copy_co_mapping_to_recov"
+                        style="margin-left:8px;"
+                        title="Copy the charge-off mapping into recoveries (amount column auto-swapped to recoveries; date column swapped if a recoveries-specific date header exists). Use this when charge-offs and recoveries come from the same file.">
+                  Copy from Charge-Off mapping
+                </button>
+              {% endif %}
             </div>
           </form>
 
@@ -4306,11 +4428,15 @@
      - monthly_loan_extracts -> history_view.row_count > 0
      - annual_balance_sheets -> monthly_bal.year_files
      - monthly_balance_sheets -> monthly_bal.monthly_files (per-month)
-     - single_workbook / legacy folder scan -> hist_scan.monthly_files     Treat the section as complete if ANY of these supplied data. #}
+     - single_workbook / legacy folder scan -> hist_scan.monthly_files
+     - 5300 distributed backfill (NCUA) -> hist_extracts.solr_backfill.last_run.ok
+     Treat the section as complete if ANY of these supplied data. #}
+{% set _sb_last = (((state.hist_extracts or {}).get('solr_backfill') or {}).get('last_run') or {}) %}
 {% set has_balances = hist_scan.get('monthly_files')
       or (history_view and history_view.row_count)
       or _mb_nav.get('year_files')
-      or _mb_nav.get('monthly_files') %}
+      or _mb_nav.get('monthly_files')
+      or (_sb_last.get('ok') and (_sb_last.get('months_filled') or _sb_last.get('rows_written'))) %}
 {% set has_co = hist_scan.get('co_files')
       or hist_scan.get('monthly_co_files')
       or (co_history_view and co_history_view.row_count) %}
