@@ -261,29 +261,49 @@ def _scan_sheet(ws) -> dict[str, Any]:
     if not best:
         return {"ok": False, "error": "No date-like header row found in first 30 rows."}
 
-    # Pool/type label column: scan col A first 60 rows for any string row
-    # below the header.
+    # Pool/type label column: scan EVERY column to the left of the first
+    # date column for the one that yields the most string labels. Many
+    # Vizo-style workbooks have col A = loan-type-code (integer) and
+    # col B = description (the human-readable pool label). Hard-coding
+    # col A would yield zero parsed_pool_labels in that case.
+    first_date_col = best["first_date_col_idx"]
+    candidate_cols = list(range(1, max(2, first_date_col)))  # at least col A
     label_col_idx = 1
     labels: list[str] = []
     seen: set[str] = set()
     acl_row: int | None = None
     acl_label: str = ""
-    for row_idx in range(best["header_row"] + 1, best["header_row"] + 60):
-        cell = ws.cell(row=row_idx, column=label_col_idx)
-        if cell.value is None:
-            continue
-        # ACL row detection (independent of pool-label collection).
-        if acl_row is None and _is_acl_label(cell.value):
-            acl_row = row_idx
-            acl_label = str(cell.value).strip()
-        if not _is_label_row(cell.value):
-            continue
-        s = cell.value.strip()
-        key = s.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        labels.append(s)
+    best_label_count = -1
+    for try_col in candidate_cols:
+        try_labels: list[str] = []
+        try_seen: set[str] = set()
+        try_acl_row: int | None = None
+        try_acl_label: str = ""
+        for row_idx in range(best["header_row"] + 1, best["header_row"] + 60):
+            cell = ws.cell(row=row_idx, column=try_col)
+            if cell.value is None:
+                continue
+            # ACL row detection (independent of pool-label collection).
+            if try_acl_row is None and _is_acl_label(cell.value):
+                try_acl_row = row_idx
+                try_acl_label = str(cell.value).strip()
+            if not _is_label_row(cell.value):
+                continue
+            s = cell.value.strip()
+            key = s.lower()
+            if key in try_seen:
+                continue
+            try_seen.add(key)
+            try_labels.append(s)
+        # Pick the column with the most labels. Tie-break favours the
+        # earlier (leftmost) column to match historical behaviour.
+        if len(try_labels) > best_label_count:
+            best_label_count = len(try_labels)
+            label_col_idx = try_col
+            labels = try_labels
+            seen = try_seen
+            acl_row = try_acl_row
+            acl_label = try_acl_label
 
     # Extract per-date ACL history if a row was identified.
     acl_history: dict[str, float] = {}
