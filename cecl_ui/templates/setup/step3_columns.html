@@ -230,6 +230,46 @@
         </div>
       </div>
 
+      <h3>Pool-code separator</h3>
+      <div class="form-row">
+        <div>
+          {% set _top_split = state.pool_code_split or '/' %}
+          {% set _entry_split = fv.pool_code_split %}
+          <label>How to extract the pool code from this file's raw value
+            <select name="{{ prefix }}pool_code_split" style="width:340px;">
+              <option value="__inherit__"
+                {% if _entry_split is none %}selected{% endif %}>
+                Inherit top-level (currently: split on
+                  &ldquo;{{ _top_split }}&rdquo;)
+              </option>
+              <option value="__none__"
+                {% if _entry_split is not none and _entry_split == '' %}selected{% endif %}>
+                Don&rsquo;t split &mdash; use the raw value as-is
+              </option>
+              <option value="/"
+                {% if _entry_split == '/' %}selected{% endif %}>
+                Split on &ldquo;/&rdquo;
+              </option>
+              <option value="-"
+                {% if _entry_split == '-' %}selected{% endif %}>
+                Split on &ldquo;-&rdquo;
+              </option>
+            </select>
+            <span class="help">Most CUs use the default. Pick
+              <strong>Don&rsquo;t split</strong> when this extract&rsquo;s
+              loan codes legitimately contain the separator character
+              (e.g. CUMA mortgage products like
+              <code>15/15&nbsp;ARM</code>, <code>5/1&nbsp;ARM</code>,
+              <code>10/1&nbsp;ARM</code>). Without this override, the
+              importer would truncate <code>15/15&nbsp;ARM</code> to just
+              <code>15</code> and route it to the default pool
+              (typically <code>Ignore</code>), silently excluding those
+              loans from the report.
+            </span>
+          </label>
+        </div>
+      </div>
+
       <h3>Required</h3>
       <div class="form-row">
         {{ field('current_balance',     'Current balance',         required=True) }}

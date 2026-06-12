@@ -148,6 +148,52 @@ _AIRES_SHARES_RX = re.compile(
     re.IGNORECASE,
 )
 
+# Phase 9.26: filename heuristic for loan-data extracts whose loan codes
+# legitimately contain ``/`` (so the global ``pool_code_split = "/"`` would
+# corrupt them). CUMA / mortgage servicing exports ship codes like
+# ``15/15 ARM``, ``30/30 FIXED`` where the ``/`` is part of the label, not a
+# prefix:description separator. When a loan-extract candidate's filename
+# matches this regex the auto-scan calls ``analyse_sample_file`` with
+# ``split_char=""`` AND records ``pool_code_split=""`` on the staged extract
+# entry so the importer's per-file override (Phase 9.22) takes effect at
+# runtime. Filename keywords: ``CUMA``, ``MTG``, ``Mortgage``, ``Servicing``.
+_NO_SPLIT_FILENAME_RX = re.compile(
+    r"(?:^|[\s_\-])(?:cuma|mtg|mortgage|servicing)(?:[\s_\-]|$|\.)",
+    re.IGNORECASE,
+)
+
+# Phase 9.26: value-shape detector for composite mortgage codes. Matches
+# raw values like ``15/15 ARM``, ``30/30 FIXED``, ``5/1 ARM``, ``15 YR FIXED``
+# — anything where a ``/`` separator is followed by alphabetic content
+# rather than a pure prefix:description split. Used as a fallback when the
+# filename heuristic above misses (some CUs ship CUMA-style data in a
+# generically-named workbook).
+_COMPOSITE_CODE_VALUE_RX = re.compile(
+    r"^\s*\d{1,3}\s*/\s*\d{1,3}\s+[A-Za-z]",
+)
+
+
+def _looks_like_no_split_extract(
+    name: str,
+    sample_values: list[str] | None = None,
+) -> bool:
+    """Return True if this loan-extract candidate carries composite codes
+    where ``/`` is part of the label (CUMA mortgage convention).
+
+    Two independent triggers — either flips it to no-split:
+
+    * Filename matches CUMA/MTG/Mortgage/Servicing regex, OR
+    * ANY of the supplied raw pool-code values matches the
+      ``\\d+/\\d+\\s+[A-Z]`` composite-code shape.
+    """
+    if name and _NO_SPLIT_FILENAME_RX.search(str(name)):
+        return True
+    if sample_values:
+        for val in sample_values:
+            if val and _COMPOSITE_CODE_VALUE_RX.match(str(val)):
+                return True
+    return False
+
 # A consolidated "Balance Sheets <CU>" pool-grouping workbook (Vizo
 # Financial analyst convention). Filename starts with "Balance Sheets"
 # (or "Balance Sheet") followed by a NON-year token (the CU's short
@@ -682,8 +728,18 @@ def scan_folder_for_setup(
         except Exception as exc:  # noqa: BLE001
             out["errors"].append(f"copy failed for {cand['name']}: {exc}")
             continue
+        # Phase 9.26: detect "no-split" CUMA/mortgage extracts BEFORE
+        # analyse_sample_file runs, so the seeded pool_code_suggestions
+        # carry the full composite labels (e.g. ``15/15 ARM``) instead of
+        # being silently truncated to ``"15"`` by the default ``"/"`` split.
+        # First-pass uses filename-only; if that misses we re-check the
+        # actual sample values after analysis and re-run if needed.
+        no_split = _looks_like_no_split_extract(cand["name"])
         try:
-            analysis = sample_parser.analyse_sample_file(str(tmp), cand["name"])
+            analysis = sample_parser.analyse_sample_file(
+                str(tmp), cand["name"],
+                split_char=("" if no_split else "/"),
+            )
         except Exception as exc:  # noqa: BLE001
             out["errors"].append(
                 f"sample_parser failed on {cand['name']}: {exc}"
@@ -695,12 +751,37 @@ def scan_folder_for_setup(
                 f"{cand['name']}: {analysis.get('error')}"
             )
             continue
+        # Second-pass detection on raw sample-rows values (catches CUs
+        # that ship CUMA-style codes in generically-named workbooks).
+        if not no_split:
+            pool_col = (analysis.get("column_suggestions") or {}).get(
+                "loan_pool_code"
+            )
+            sample_rows = analysis.get("sample_rows") or []
+            if pool_col and sample_rows:
+                raw_vals = []
+                for row in sample_rows:
+                    if isinstance(row, dict):
+                        v = row.get(pool_col)
+                        if v is not None:
+                            raw_vals.append(str(v))
+                if _looks_like_no_split_extract(cand["name"], raw_vals):
+                    no_split = True
+                    try:
+                        analysis = sample_parser.analyse_sample_file(
+                            str(tmp), cand["name"], split_char="",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
         analysis["saved_path"] = str(tmp)
-        extracts.append({
+        ex_entry = {
             "name": cand["name"],
             "saved_path": str(tmp),
             "analysis": analysis,
-        })
+        }
+        if no_split:
+            ex_entry["pool_code_split"] = ""
+        extracts.append(ex_entry)
         # Score = #column mappings + #pool codes. Higher = better
         # foothold for the wizard.
         score = (
@@ -1787,6 +1868,10 @@ def _stage_loan_data_extracts(
             "member_account": member_account,
             "file_pattern": analysis.get("file_pattern") or "",
         }
+        # Phase 9.26: per-extract pool_code_split override (CUMA/mortgage
+        # files where ``/`` is part of the label, not a prefix:desc split).
+        if "pool_code_split" in ex:
+            entry["pool_code_split"] = ex.get("pool_code_split") or ""
         bucket.append(entry)
         existing_names.add(name)
         msgs.append(

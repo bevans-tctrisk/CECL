@@ -2456,7 +2456,15 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             if nrr_spec_id == 0 and pool in spec_id_by_pool:
                 nrr_spec_id = sum(spec_id_by_pool[pool].values())
             nrr_calc_bal = nrr_balance - nrr_spec_id
-            nrr_base_rate = warm_total.get('base_rate', 0)
+            # ACL Base Loss Rate: use the freshly computed pool life loss
+            # rate (matches Display Hist Bal column L) — same source the
+            # risk-rated branch uses for its per-grade rates. Falling back
+            # to ``warm_total.get('base_rate')`` produced 0 for any CU
+            # without a prior WARM workbook (e.g. Destinations CU), making
+            # the loss rate that Display Hist Bal renders silently
+            # disappear from the ACL Env tab. WARM's baked-in base rate is
+            # ignored for the same reason its baked-in mgmt_adj is ignored.
+            nrr_base_rate = max(0, pool_ll)
             # NRR pool mgmt adj: resolver + admin default (gated on
             # nrr_base_rate==0). Recompute factor/allow_before so they
             # reflect the resolver's value rather than WARM's baked-in.

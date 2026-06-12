@@ -437,13 +437,21 @@ def _coerce_member_part(v: Any) -> str:
 
 def _build_loan_index(loan_path: str | Path,
                       state: dict[str, Any],
-                      header_row: int | None = None) -> dict[str, dict[str, Any]]:
+                      header_row: int | None = None,
+                      entry: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     """Build {member-suffix: {pool, grade, balance}} from a loan extract.
 
     ``header_row`` is the per-file 1-indexed header row stored on the
     loan_data_files entry (e.g. ``2`` for AIRES extracts whose row 1 is
     column position numbers and row 2 is the real header). When omitted
     or <= 1 we fall back to pandas' default header=0.
+
+    ``entry`` is the loan_data_files entry dict. When provided, its
+    ``column_mappings`` and ``member_account`` override the top-level
+    ``state`` values for THIS file only — required for CUs that ship
+    multiple extracts with different column shapes (e.g. Symitar
+    ceclXX files with ACCTBS/ACTTYP/CURBAL/RISKSC + a CUMA Mortgage
+    workbook with Account/Type/NEW PRINC BALANCE).
     """
     index: dict[str, dict[str, Any]] = {}
     p = Path(str(loan_path))
@@ -482,13 +490,34 @@ def _build_loan_index(loan_path: str | Path,
     if df is None or df.empty:
         return index
 
-    cm = state.get("column_mappings") or {}
-    ma = state.get("member_account") or {}
+    # Phase 9.24c — prefer per-entry column_mappings / member_account over
+    # the top-level state values so multi-extract CUs (Symitar + CUMA
+    # alongside, etc.) honour each file's own configured shape. Falls back
+    # to the top-level dict for any key not overridden by the entry.
+    top_cm = state.get("column_mappings") or {}
+    top_ma = state.get("member_account") or {}
+    if entry is not None:
+        ecm = entry.get("column_mappings") or {}
+        cm = {**top_cm, **{k: v for k, v in ecm.items() if v}}
+        ema = entry.get("member_account") or {}
+        ma = {**top_ma, **{k: v for k, v in ema.items() if v not in (None, "")}}
+    else:
+        cm = top_cm
+        ma = top_ma
     pool_map = state.get("pool_map") or {}
     default_pool = state.get("default_pool") or ""
     grades = state.get("credit_grades") or []
     no_score = state.get("no_score_label") or "Not Reported"
     pool_split = state.get("pool_code_split") or None
+
+    # Build a normalised header lookup once so column-name matches tolerate
+    # leading/trailing whitespace and case differences (Symitar extracts
+    # ship headers like ' CURBAL ' or '   CURBAL   ' that exact-match
+    # against the saved 'CURBAL' would miss).
+    def _norm_header(s: Any) -> str:
+        return " ".join(str(s).split()).strip().lower()
+
+    norm_cols = {_norm_header(c): c for c in df.columns}
 
     def _resolve_col(field_name: str):
         target = cm.get(field_name) or ""
@@ -497,6 +526,10 @@ def _build_loan_index(loan_path: str | Path,
         # If the mapping is a header name, use it directly when has_header.
         if has_header and target in df.columns:
             return target
+        # Whitespace/case-insensitive header lookup (handles ' CURBAL ').
+        nt = _norm_header(target)
+        if nt and nt in norm_cols:
+            return norm_cols[nt]
         # Otherwise treat as 0-based index.
         try:
             idx = int(target)
@@ -577,8 +610,18 @@ def _build_loan_index(loan_path: str | Path,
             else:
                 key = f"{s_raw}-"
 
+        # Phase 9.24b — also carry the raw extract loan_pool_code value
+        # so the impaired-step validation card can surface codes from the
+        # loan extract whose mapping resolved to Ignore (matched-row case).
+        raw_pool_code = ""
+        if pool_col is not None:
+            _rpc = row.get(pool_col)
+            if _rpc is not None:
+                raw_pool_code = str(_rpc).strip()
+
         index[key] = {
             "loan_pool": _pool_for(row.get(pool_col)) if pool_col else default_pool,
+            "loan_pool_code_raw": raw_pool_code,
             "credit_grade": _grade_for(row.get(fico_col)) if fico_col else no_score,
             "balance_from_loan_report": _to_float(row.get(bal_col)) if bal_col else None,
         }
@@ -605,6 +648,8 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
         cb = row.get("current_balance")
         row["loan_pool"] = _resolve_pool_code(
             row.get("loan_type"), pool_map, default_pool, pool_split)
+        # No extract row matched — clear any stale resolved code.
+        row["loan_pool_code_resolved"] = ""
         row["credit_grade"] = no_score
         row["balance_from_loan_report"] = (
             float(cb) if cb is not None else None)
@@ -641,7 +686,7 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
             hr_entry = int(entry.get("header_row") or 0) or None
         except (TypeError, ValueError):
             hr_entry = None
-        sub = _build_loan_index(p, state, header_row=hr_entry)
+        sub = _build_loan_index(p, state, header_row=hr_entry, entry=entry)
         if sub:
             index.update(sub)
             sources.append(entry.get("name") or Path(p).name)
@@ -666,7 +711,21 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
             _fallback_from_data_entry(row)
         else:
             status["matched"] += 1
-            row["loan_pool"] = match.get("loan_pool") or ""
+            # Phase 9.24b — if the extract row's pool_col was blank or
+            # resolved to Ignore, fall back to the impaired row's own
+            # loan_type resolution. Lets the user remap pool_map[loan_type]
+            # via the impaired validation card to fix Ignore-resolving rows
+            # whose loan extract had no useful pool info.
+            extract_pool = match.get("loan_pool") or ""
+            _ep_l = extract_pool.strip().lower()
+            if _ep_l and _ep_l != "ignore":
+                row["loan_pool"] = extract_pool
+            else:
+                row["loan_pool"] = _resolve_pool_code(
+                    row.get("loan_type"), pool_map, default_pool, pool_split)
+            # Propagate the extract's raw loan_pool_code so the wizard's
+            # impaired validation card can offer to remap it when present.
+            row["loan_pool_code_resolved"] = match.get("loan_pool_code_raw") or ""
             row["credit_grade"] = match.get("credit_grade") or ""
             row["balance_from_loan_report"] = match.get("balance_from_loan_report")
             cb = row.get("current_balance") or 0.0

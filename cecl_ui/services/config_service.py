@@ -288,6 +288,14 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             hr_lf = 0
         if hr_lf > 1:
             entry["header_row"] = hr_lf
+        # Phase 9.22: per-extract ``pool_code_split`` override. When the
+        # wizard's Sample step set this on the entry, faithfully emit it
+        # (including the empty string, which signals "do not split" — used
+        # for CUMA mortgage files whose loan codes legitimately contain
+        # ``/``, e.g. ``15/15 ARM``). Absent key inherits the CU-level
+        # ``pool_code_split``.
+        if "pool_code_split" in lf:
+            entry["pool_code_split"] = lf.get("pool_code_split") or ""
         extracts_block.append(entry)
     if extracts_block:
         cfg["loan_data_extracts"] = extracts_block

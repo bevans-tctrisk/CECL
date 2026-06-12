@@ -434,32 +434,40 @@
             file but aren&rsquo;t in the loan-code map yet. Assign each one to a
             pool so its dollars flow into the report.
           </p>
-          <table class="data-table" style="font-size:12px;">
-            <thead>
-              <tr><th>Loan code</th><th>Assign to pool</th><th></th></tr>
-            </thead>
-            <tbody>
-              {% for code in validation.unmapped_codes %}
-                <tr>
-                  <td><code>{{ code }}</code></td>
-                  <td>
-                    <form method="post" style="display:flex; gap:6px; align-items:center; margin:0;">
-                      <input type="hidden" name="action" value="assign_code">
-                      <input type="hidden" name="code" value="{{ code }}">
-                      <select name="new_pool">
+          <form method="post" style="margin:0;">
+            <input type="hidden" name="action" value="assign_codes_bulk">
+            <table class="data-table" style="font-size:12px;">
+              <thead>
+                <tr><th>Loan code</th><th>Assign to pool</th></tr>
+              </thead>
+              <tbody>
+                {% for code in validation.unmapped_codes %}
+                  <tr>
+                    <td>
+                      <code>{{ code }}</code>
+                      <input type="hidden" name="map_code" value="{{ code }}">
+                    </td>
+                    <td>
+                      <select name="map_pool" style="min-width:280px;">
                         <option value="">&mdash; leave unmapped (use default) &mdash;</option>
                         {% for p in pool_choices %}
                           <option value="{{ p }}">{{ p }}</option>
                         {% endfor %}
                       </select>
-                      <button class="btn btn-secondary" type="submit">Save</button>
-                    </form>
-                  </td>
-                  <td></td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <div style="margin-top:10px;">
+              <button class="btn btn-primary" type="submit">
+                Save all mappings
+              </button>
+              <span class="muted" style="margin-left:10px;">
+                Codes left as &ldquo;leave unmapped&rdquo; will use the default pool.
+              </span>
+            </div>
+          </form>
         {% else %}
           <p class="muted" style="margin-top:10px;">
             &#10003; All codes in this file are mapped.

@@ -937,6 +937,7 @@ def analyse_sample_file(
     max_pool_codes: int = 40,
     sample_rows: int = 5,
     header_row: int | None = None,
+    split_char: str | None = "/",
 ) -> dict[str, Any]:
     """Parse the uploaded sample and return wizard suggestions.
 
@@ -1036,7 +1037,13 @@ def analyse_sample_file(
     # Column suggestions
     col_sugg = _match_columns(headers)
 
-    # Pool-code suggestions: distinct values from the pool column, if found
+    # Pool-code suggestions: distinct values from the pool column, if found.
+    # Phase 9.26: ``split_char`` (passed by the caller, default ``"/"``) gates
+    # the prefix-extraction step. Symitar/Episys-style codes ``11/New Car``
+    # need ``"/"`` so the seed becomes ``"11"``; CUMA mortgage codes like
+    # ``15/15 ARM`` need ``split_char=""`` (or ``None``) so the full label
+    # ``"15/15 ARM"`` survives — otherwise the seeded ``"15"`` collides with
+    # any future Symitar loan code 15.
     pool_codes: list[str] = []
     pool_col = col_sugg.get("loan_pool_code")
     if pool_col and pool_col in body.columns:
@@ -1045,8 +1052,8 @@ def analyse_sample_file(
             code = _clean_code(raw_val)
             if not code:
                 continue
-            if "/" in code:
-                code = _clean_code(code.split("/")[0])
+            if split_char and split_char in code:
+                code = _clean_code(code.split(split_char)[0])
             if not code or code in seen:
                 continue
             seen.add(code)

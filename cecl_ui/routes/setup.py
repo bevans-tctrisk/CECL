@@ -8111,6 +8111,43 @@ def step_co_recov():
                 )
             return redirect(url_for("setup.step_co_recov"))
 
+        elif action == "assign_codes_bulk":
+            codes = request.form.getlist("map_code")
+            pools = request.form.getlist("map_pool")
+            if len(codes) != len(pools):
+                flash(
+                    "Bulk save: mismatched code/pool counts; nothing saved.",
+                    "error",
+                )
+            else:
+                pm = state.setdefault("pool_map", {})
+                mapped_n = 0
+                unmapped_n = 0
+                for raw_code, raw_pool in zip(codes, pools):
+                    code = (raw_code or "").strip()
+                    new_pool = (raw_pool or "").strip()
+                    if not code:
+                        continue
+                    pm[code] = new_pool
+                    if new_pool:
+                        mapped_n += 1
+                    else:
+                        unmapped_n += 1
+                if mapped_n or unmapped_n:
+                    _save_state(state)
+                parts = []
+                if mapped_n:
+                    parts.append(f"{mapped_n} code(s) assigned to a pool")
+                if unmapped_n:
+                    parts.append(
+                        f"{unmapped_n} code(s) left unmapped (will use default)"
+                    )
+                if parts:
+                    flash("Saved: " + "; ".join(parts) + ".", "success")
+                else:
+                    flash("Nothing to save.", "info")
+            return redirect(url_for("setup.step_co_recov"))
+
         elif action == "assign_code":
             code = (request.form.get("code") or "").strip()
             new_pool = (request.form.get("new_pool") or "").strip()
@@ -8993,6 +9030,48 @@ def step_impaired():
             )
             return redirect(url_for("setup.step_impaired"))
 
+        elif action == "assign_impaired_codes_bulk":
+            codes = request.form.getlist("map_code")
+            pools = request.form.getlist("map_pool")
+            if len(codes) != len(pools):
+                flash(
+                    "Bulk save: mismatched code/pool counts; nothing saved.",
+                    "error",
+                )
+            else:
+                pm = state.setdefault("pool_map", {})
+                mapped_n = 0
+                unmapped_n = 0
+                for raw_code, raw_pool in zip(codes, pools):
+                    code = (raw_code or "").strip()
+                    new_pool = (raw_pool or "").strip()
+                    if not code:
+                        continue
+                    pm[code] = new_pool
+                    if new_pool:
+                        mapped_n += 1
+                    else:
+                        unmapped_n += 1
+                if mapped_n or unmapped_n:
+                    # Recompute lookup once after all updates so the impaired
+                    # table reflects the new mapping in a single pass.
+                    existing = state.setdefault("impaired", {})
+                    lookup = impaired_parser.recompute_all(existing, state)
+                    existing["lookup_status"] = lookup
+                    _save_state(state)
+                parts = []
+                if mapped_n:
+                    parts.append(f"{mapped_n} code(s) assigned to a pool")
+                if unmapped_n:
+                    parts.append(
+                        f"{unmapped_n} code(s) left unmapped (will use default)"
+                    )
+                if parts:
+                    flash("Saved: " + "; ".join(parts) + ".", "success")
+                else:
+                    flash("Nothing to save.", "info")
+            return redirect(url_for("setup.step_impaired"))
+
         elif action == "assign_impaired_code":
             code = (request.form.get("code") or "").strip()
             new_pool = (request.form.get("new_pool") or "").strip()
@@ -9033,30 +9112,51 @@ def step_impaired():
             "warning",
         )
 
-    # Build loan-code validation summary for impaired rows whose code is
-    # not in pool_map. Only counts rows that had to fall back to the
-    # data-entry loan code (i.e. unmatched_in_loan_data).
+    # Build loan-code validation summary for impaired rows whose resolved
+    # Loan Pool is empty or "Ignore" — regardless of whether the row was
+    # matched in the loan-data extract or fell back to the data-entry code.
+    # This surfaces BOTH (a) codes absent from pool_map (fall through to
+    # default_pool, which is typically "Ignore") AND (b) codes explicitly
+    # mapped to "Ignore" but which the user now wants to re-pool.
     pool_map = state.get("pool_map") or {}
     pool_split = state.get("pool_code_split") or None
-    pool_choices = sorted({v for v in pool_map.values() if v})
+    pool_choices = sorted({
+        v for v in pool_map.values()
+        if v and str(v).strip().lower() not in ("ignore", "exclude")
+    })
+    # Also add named pools from pool_settings so the user can pick a pool
+    # that isn't yet present anywhere in pool_map.
+    for p in state.get("pool_settings") or []:
+        name = (p.get("name") or "").strip() if isinstance(p, dict) else ""
+        if name and name.lower() not in ("ignore", "exclude"):
+            if name not in pool_choices:
+                pool_choices = sorted(set(pool_choices) | {name})
+
+    def _is_ignore_pool(v: Any) -> bool:
+        s = (str(v) if v is not None else "").strip().lower()
+        return s == "" or s == "ignore"
+
     code_counts: dict[str, int] = {}
     for r in impaired.get("data_rows") or []:
-        if not r.get("unmatched_in_loan_data"):
+        # Surface every row whose resolved Loan Pool is blank or "Ignore",
+        # not just those that fell back to the data-entry loan code.
+        if not _is_ignore_pool(r.get("loan_pool")):
             continue
-        raw = r.get("loan_type")
+        # For MATCHED rows (unmatched_in_loan_data=False) the pool came
+        # from the loan extract's pool_code column lookup — so the code
+        # the user needs to remap is the EXTRACT'S raw pool code, not the
+        # impaired row's loan_type. For UNMATCHED rows the impaired row's
+        # loan_type IS the key under pool_map. Prefer the extract code
+        # when present (Phase 9.24b).
+        raw = r.get("loan_pool_code_resolved")
+        if raw is None or str(raw).strip() == "":
+            raw = r.get("loan_type")
         if raw is None or str(raw).strip() == "":
             continue
         code = str(raw).strip()
         if pool_split and pool_split in code:
             code = code.split(pool_split, 1)[0].strip()
-        # Considered "mapped" if the key exists with a non-empty value, OR
-        # if the leading-zero-stripped variant exists.
-        mapped = bool(pool_map.get(code))
-        if not mapped:
-            alt = code.lstrip("0") or code
-            mapped = bool(pool_map.get(alt))
-        if not mapped:
-            code_counts[code] = code_counts.get(code, 0) + 1
+        code_counts[code] = code_counts.get(code, 0) + 1
     impaired_validation = {
         "unmapped_codes": sorted(code_counts.keys(), key=str.lower),
         "counts": code_counts,
@@ -9653,6 +9753,16 @@ def step3_columns():
                 or _default_file_pattern(entry.get("name") or "")
             ),
             "sample_filename": entry.get("name") or "",
+            # Phase 9.22: per-extract pool_code_split override. ``None`` =
+            # inherit top-level; ``""`` (empty string explicitly stored on
+            # the entry) = no split; any other string = split on that
+            # character. The template renders a 4-option dropdown
+            # (inherit, none, "/", "-") based on this value.
+            "pool_code_split": (
+                entry["pool_code_split"]
+                if "pool_code_split" in entry
+                else None
+            ),
         }
 
     if request.method == "POST":
@@ -9882,11 +9992,35 @@ def step3_columns():
                         f"({exc}). Example: (?i)mortgages"
                     )
 
+            # Phase 9.22: per-extract pool_code_split override.
+            # Form value semantics:
+            #   "__inherit__" → no per-entry override (inherit top-level)
+            #   "__none__"    → explicitly disable splitting on this file
+            #   any other str → split on that exact character
+            # CUMA-style mortgage extracts ship loan codes like "15/15 ARM"
+            # where '/' is part of the code itself; splitting on '/' would
+            # truncate them to '15' and route to the default pool (Ignore).
+            pcs_raw = (
+                request.form.get(prefix + "pool_code_split")
+                or "__inherit__"
+            ).strip()
+            if pcs_raw == "__inherit__":
+                entry_pool_split: str | None = None
+                entry_pool_split_set = True  # signal: clear any prior value
+            elif pcs_raw == "__none__":
+                entry_pool_split = ""
+                entry_pool_split_set = True
+            else:
+                entry_pool_split = pcs_raw
+                entry_pool_split_set = True
+
             new_entries.append((entry, {
                 "column_mappings": new_map,
                 "member_account": member_account,
                 "has_header": has_header_flag,
                 "file_pattern": file_pattern,
+                "pool_code_split": entry_pool_split,
+                "pool_code_split_set": entry_pool_split_set,
             }))
 
         # Apply (always, so the form re-renders with the user's edits even
@@ -9896,6 +10030,12 @@ def step3_columns():
             orig_entry["member_account"] = updates["member_account"]
             orig_entry["has_header"] = updates["has_header"]
             orig_entry["file_pattern"] = updates["file_pattern"]
+            if updates.get("pool_code_split_set"):
+                _val = updates.get("pool_code_split")
+                if _val is None:
+                    orig_entry.pop("pool_code_split", None)
+                else:
+                    orig_entry["pool_code_split"] = _val
 
         if all_errors:
             for msg in all_errors:
@@ -9927,60 +10067,153 @@ def step3_columns():
             except Exception:  # noqa: BLE001 - non-fatal
                 pass
 
-        # Pool-code re-derivation: use the first file's saved path and its
-        # newly mapped loan_pool_code column. Preserves the previous
-        # behaviour but driven by the per-file mapping rather than the
-        # state-wide sample.
-        first_entry = new_entries[0][0]
-        new_map = new_entries[0][1]["column_mappings"]
-        saved = first_entry.get("path")
-        first_analysis = first_entry.get("analysis") or {}
-        new_pool_col = new_map.get("loan_pool_code", "")
-        prev_pool_col = (first_analysis.get("column_suggestions") or {}).get(
-            "loan_pool_code", ""
-        )
-        if (
-            saved
-            and new_pool_col
-            and new_pool_col != prev_pool_col
-            and Path(saved).exists()
-        ):
+        # Pool-code re-derivation: rebuild state["pool_map"] as the union
+        # of distinct pool codes across ALL loan-data extracts using each
+        # file's CURRENT loan_pool_code column. Preserves existing pool
+        # assignments for codes that survive the rebuild, drops codes
+        # that no longer appear in any extract, and seeds new codes with
+        # an empty pool name so they surface in the Loan Code Mapping
+        # step (Step 3) AND the Balance Adjustment step (Step 14) for
+        # the user to map.
+        #
+        # Each entry is re-scanned only when its loan_pool_code column
+        # changed since the entry's cached column_suggestions snapshot;
+        # unchanged entries reuse their cached pool_code_suggestions so
+        # the per-file IO cost stays bounded.
+        old_pool_map = dict(state.get("pool_map") or {})
+        codes_by_file: list[tuple[str, list[str], bool]] = []
+        rescan_failures: list[str] = []
+        for orig_entry, updates in new_entries:
+            cm = updates.get("column_mappings") or {}
+            new_pool_col = (cm.get("loan_pool_code") or "").strip()
+            saved = orig_entry.get("path")
+            label = orig_entry.get("name") or "(unnamed file)"
+            analysis = orig_entry.get("analysis") or {}
+            cached_suggestions = list(
+                analysis.get("pool_code_suggestions") or []
+            )
+            cached_col = (
+                (analysis.get("column_suggestions") or {}).get(
+                    "loan_pool_code"
+                )
+                or ""
+            ).strip()
+
+            if not new_pool_col:
+                # Static-code-only entries contribute their static value
+                # via the static-code loop below; nothing to scan here.
+                codes_by_file.append((label, [], False))
+                continue
+
+            col_changed = new_pool_col != cached_col
+            need_rescan = col_changed or not cached_suggestions
+            if not need_rescan:
+                codes_by_file.append((label, cached_suggestions, False))
+                continue
+
+            if not saved or not Path(saved).exists():
+                # Staged file is gone from %TEMP% (e.g. server restart
+                # since upload). Best we can do is keep the cached
+                # suggestions so we don't silently lose codes.
+                codes_by_file.append((label, cached_suggestions, False))
+                continue
+
             try:
                 fresh = sample_parser.extract_pool_codes(
                     saved,
                     column_name=new_pool_col,
-                    header_row=first_entry.get("header_row"),
-                    split_char=state.get("pool_code_split", "/"),
+                    header_row=orig_entry.get("header_row"),
+                    split_char=(
+                        orig_entry["pool_code_split"]
+                        if "pool_code_split" in orig_entry
+                        else state.get("pool_code_split", "/")
+                    ),
                 )
             except Exception:  # noqa: BLE001
                 fresh = []
+                rescan_failures.append(label)
+
             if fresh:
-                first_analysis["pool_code_suggestions"] = fresh
-                first_analysis.setdefault("column_suggestions", {})[
+                analysis["pool_code_suggestions"] = fresh
+            analysis.setdefault("column_suggestions", {})[
+                "loan_pool_code"
+            ] = new_pool_col
+            orig_entry["analysis"] = analysis
+            codes_by_file.append((label, fresh, True))
+
+        # Union all codes across files. Preserves first-seen order for
+        # determinism in flash messages (dict insertion order matches).
+        seen_codes: list[str] = []
+        seen_set: set[str] = set()
+        for _label, codes, _ in codes_by_file:
+            for c in codes:
+                if c and c not in seen_set:
+                    seen_set.add(c)
+                    seen_codes.append(c)
+
+        any_rescanned = any(rescanned for _l, _c, rescanned in codes_by_file)
+
+        if seen_codes:
+            # Rebuild pool_map preserving prior pool assignments for
+            # codes that survive. Codes new to this rebuild get an
+            # empty pool name so they show up on Steps 3/14.
+            new_pool_map = {
+                code: old_pool_map.get(code, "") for code in seen_codes
+            }
+            state["pool_map"] = new_pool_map
+
+            # Mirror first file's fresh data to top-level state["sample"]
+            # (downstream YAML writers / legacy services still read it).
+            first_entry = new_entries[0][0]
+            first_analysis = first_entry.get("analysis") or {}
+            first_fresh = list(first_analysis.get("pool_code_suggestions") or [])
+            first_pool_col = (
+                (first_analysis.get("column_suggestions") or {}).get(
                     "loan_pool_code"
-                ] = new_pool_col
-                first_entry["analysis"] = first_analysis
-                # Keep top-level sample.pool_code_suggestions in sync
+                )
+                or ""
+            ).strip()
+            if first_fresh:
                 sample = state.get("sample") or {}
-                sample["pool_code_suggestions"] = fresh
-                sample.setdefault("column_suggestions", {})[
-                    "loan_pool_code"
-                ] = new_pool_col
+                sample["pool_code_suggestions"] = first_fresh
+                if first_pool_col:
+                    sample.setdefault("column_suggestions", {})[
+                        "loan_pool_code"
+                    ] = first_pool_col
                 state["sample"] = sample
-                old_pool_map = state.get("pool_map") or {}
-                state["pool_map"] = {
-                    code: old_pool_map.get(code, "") for code in fresh
-                }
-                retained = sum(1 for code in fresh if code in old_pool_map)
-                replaced = len(old_pool_map) - retained
-                if replaced > 0:
-                    flash(
-                        f"Re-scanned column '{new_pool_col}' on "
-                        f"{first_entry.get('name', 'first file')} and found "
-                        f"{len(fresh)} distinct codes. Cleared {replaced} "
-                        "codes from the previous column.",
-                        "info",
-                    )
+
+            # Summarise the rebuild for the user. Only flash when
+            # something actually changed (added or dropped codes), or
+            # when at least one file was re-scanned this POST.
+            added = sum(1 for c in seen_codes if c not in old_pool_map)
+            dropped_set = {c for c in old_pool_map if c not in seen_set}
+            dropped = len(dropped_set)
+            if any_rescanned and (added or dropped):
+                parts = []
+                if added:
+                    parts.append(f"added {added} new code(s)")
+                if dropped:
+                    parts.append(f"dropped {dropped} stale code(s)")
+                file_count = sum(
+                    1 for _l, _c, rescanned in codes_by_file if rescanned
+                )
+                flash(
+                    f"Pool-code mapping rebuilt from {file_count} re-scanned "
+                    "extract(s): " + ", ".join(parts) + f" (now {len(seen_codes)} "
+                    "code(s) in scope across all extracts). Visit the "
+                    "<strong>Loan Code Mapping</strong> step to assign "
+                    "pools to any new codes.",
+                    "info",
+                )
+
+        if rescan_failures:
+            flash(
+                "Couldn't re-scan pool codes for: "
+                + ", ".join(f"<code>{n}</code>" for n in rescan_failures)
+                + ". The staged file may have been moved or is locked. "
+                "Re-upload it on the Sample step if needed.",
+                "warning",
+            )
 
         # Warn (non-fatal) if multiple files share the same pattern — they
         # will collide at import time. Two files with no pattern is fine
@@ -12169,16 +12402,23 @@ def _review_warnings(state: dict[str, Any], summary: dict[str, Any]) -> list[str
     if not state.get("short_name"):
         warns.append("Short name is blank — go back to step 1.")
     if not summary["mapped_columns"]:
-        warns.append("No column mappings were configured (step 5).")
+        warns.append("No column mappings were configured (step 13 — Column Mappings).")
     if summary["unnamed_pool_codes"]:
+        codes = summary["unnamed_pool_codes"]
+        # List the actual codes so the user can find them quickly. Cap at
+        # 10 to keep the warning readable when something has gone really
+        # wrong (e.g. all 62 codes blank).
+        shown = ", ".join(repr(c) for c in codes[:10])
+        more = f" (+{len(codes) - 10} more)" if len(codes) > 10 else ""
         warns.append(
-            f"{len(summary['unnamed_pool_codes'])} pool code(s) have no name "
-            f"in step 6 — they'll fall through to '{summary['default_pool']}'."
+            f"{len(codes)} pool code(s) have no name on step 3 (Loan Code "
+            f"Mapping) — they'll fall through to '{summary['default_pool']}'. "
+            f"Codes: {shown}{more}."
         )
     if not summary["selected_reports"]:
-        warns.append("No reports selected (step 11).")
+        warns.append("No reports selected (step 20 — Reports).")
     if not summary["economic_state"]:
-        warns.append("Economic state is blank (step 9) — Q-factor fetch won't work.")
+        warns.append("Economic state is blank (step 18 — Economic Data) — Q-factor fetch won't work.")
     return warns
 
 

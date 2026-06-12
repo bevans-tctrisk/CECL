@@ -13,6 +13,7 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
+from cecl_ui.services import balance_check as balance_check_service
 from cecl_ui.services import config_service, pipeline_service
 
 
@@ -316,11 +317,22 @@ def new_quarter(short_name: str):
         folder_skipped: list[str] = []
         # Fall through to the import + report block.
 
-    folder_raw = _normalize_folder_path(request.form.get("folder_path") or "") if stage != "mapped" else ""
+    if stage == "balance_checked":
+        # User reviewed the per-pool balance comparison and clicked
+        # "Continue → Run Reports". Files were already staged and
+        # imported on the prior submit; jump straight to the report
+        # block. Mirror the ``mapped`` skip pattern.
+        saved = 0
+        copied = 0
+        folder_skipped = []
+        # Fall through to the report block (import is skipped below).
+
+    _skip_stage = stage in ("mapped", "balance_checked")
+    folder_raw = _normalize_folder_path(request.form.get("folder_path") or "") if not _skip_stage else ""
 
     # 1) Save uploaded files
     saved = 0
-    files = request.files.getlist("files") if stage != "mapped" else []
+    files = request.files.getlist("files") if not _skip_stage else []
     for f in files:
         if not f or not f.filename:
             continue
@@ -353,7 +365,7 @@ def new_quarter(short_name: str):
             except OSError as exc:
                 flash(f"Could not copy {entry.name}: {exc}", "error")
 
-    if saved == 0 and copied == 0 and stage != "mapped":
+    if saved == 0 and copied == 0 and not _skip_stage:
         flash(
             "No files were uploaded or copied. Pick at least one file or "
             "supply a folder path.",
@@ -361,7 +373,7 @@ def new_quarter(short_name: str):
         )
         return redirect(url_for("run.new_quarter", short_name=short_name))
 
-    if stage != "mapped":
+    if not _skip_stage:
         flash(
             f"Staged {saved} uploaded + {copied} folder file(s) into Raw_Uploads/{short_name}/.",
             "success",
@@ -395,7 +407,7 @@ def new_quarter(short_name: str):
     # spurious "Ignore" pool. The user fills the form, submits with
     # ``stage="mapped"``, and we land at the top of this handler again
     # to apply the mappings + continue.
-    if stage != "mapped":
+    if not _skip_stage:
         try:
             unmapped = _scan_unmapped_loan_codes(cfg, short_name)
         except Exception:  # noqa: BLE001
@@ -417,46 +429,77 @@ def new_quarter(short_name: str):
                 staged_count=saved + copied,
             )
 
-    # 3) Import
-    try:
-        n_imported = pipeline_service.run_import(short_name)
-        if n_imported:
-            flash(f"Imported {n_imported} loan file(s).", "success")
-        else:
-            # Surface a hint listing which staged spreadsheets did NOT
-            # match the configured file_pattern so the user can spot
-            # version-suffix / spelling drift quickly.
-            unmatched: list[str] = []
-            try:
-                pat = (cfg or {}).get("file_pattern") or ""
-                if pat:
-                    rx = re.compile(pat)
-                    for entry in upload_dir.iterdir():
-                        if not entry.is_file():
-                            continue
-                        if entry.suffix.lower() not in {".xlsx", ".xlsm", ".xls", ".csv"}:
-                            continue
-                        if not rx.match(entry.name):
-                            unmatched.append(entry.name)
-            except (re.error, OSError):
-                unmatched = []
-            base = (
-                "No loan files were imported. Confirm filenames match the "
-                "configured file_pattern and that a snapshot date can be "
-                "parsed."
-            )
-            if unmatched:
-                preview = ", ".join(unmatched[:5])
-                more = f" (+{len(unmatched) - 5} more)" if len(unmatched) > 5 else ""
-                base += (
-                    f" Files staged but not matched by file_pattern: {preview}{more}."
-                    " Re-run the wizard's Sample step (or hand-edit the YAML)"
-                    " to relax the pattern."
+    # 3) Import (skip on balance_checked resubmit — import already ran).
+    if stage == "balance_checked":
+        n_imported = 0  # already imported on prior submit
+    else:
+        try:
+            n_imported = pipeline_service.run_import(short_name)
+            if n_imported:
+                flash(f"Imported {n_imported} loan file(s).", "success")
+            else:
+                # Surface a hint listing which staged spreadsheets did NOT
+                # match the configured file_pattern so the user can spot
+                # version-suffix / spelling drift quickly.
+                unmatched: list[str] = []
+                try:
+                    pat = (cfg or {}).get("file_pattern") or ""
+                    if pat:
+                        rx = re.compile(pat)
+                        for entry in upload_dir.iterdir():
+                            if not entry.is_file():
+                                continue
+                            if entry.suffix.lower() not in {".xlsx", ".xlsm", ".xls", ".csv"}:
+                                continue
+                            if not rx.match(entry.name):
+                                unmatched.append(entry.name)
+                except (re.error, OSError):
+                    unmatched = []
+                base = (
+                    "No loan files were imported. Confirm filenames match the "
+                    "configured file_pattern and that a snapshot date can be "
+                    "parsed."
                 )
-            flash(base, "warning")
-    except Exception as exc:  # noqa: BLE001
-        flash(f"Import failed: {exc}", "error")
-        return redirect(url_for("run.new_quarter", short_name=short_name))
+                if unmatched:
+                    preview = ", ".join(unmatched[:5])
+                    more = f" (+{len(unmatched) - 5} more)" if len(unmatched) > 5 else ""
+                    base += (
+                        f" Files staged but not matched by file_pattern: {preview}{more}."
+                        " Re-run the wizard's Sample step (or hand-edit the YAML)"
+                        " to relax the pattern."
+                    )
+                flash(base, "warning")
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Import failed: {exc}", "error")
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+
+    # 3b) Balance Adjustment intercept — show per-pool monthly-vs-loan
+    # balance comparison so the user can review discrepancies BEFORE
+    # the reports are produced. Mirrors wizard Step 14. On the resubmit
+    # the user clicks "Continue → Run Reports" and we fall through.
+    if stage != "balance_checked":
+        try:
+            comparison = balance_check_service.compare_run(cfg, snapshot)
+        except Exception:  # noqa: BLE001
+            comparison = None
+        # Only intercept when we actually have a populated comparison.
+        # If the loan side failed (empty DB) or both sides are empty,
+        # skip the review and let the report block surface its own
+        # error — we don't want to dead-end the user on a useless page.
+        if comparison and comparison.get("ok") and comparison.get("rows"):
+            report_selection = {
+                r: (request.form.get(r) == "on")
+                for r in ("tct", "vizo", "vizo_supp", "impdet")
+            }
+            return render_template(
+                "run/new_quarter.html",
+                short_name=short_name,
+                cfg=cfg,
+                stage="awaiting_balance_check",
+                comparison=comparison,
+                staged_period=period,
+                staged_reports=report_selection,
+            )
 
     # 4) Run reports — selection comes from form (defaults seeded from cfg)
     selected: list[str] = []

@@ -384,9 +384,30 @@
   {% endif %}
 
   <form method="post" id="step-form">
+    {# Count + locate unmapped rows so we can render an "Unmapped pool
+       codes" callout up top AND drop a #unmapped-row anchor on the
+       first blank row. The Review step links here with that anchor so
+       the user lands on (and can highlight) the offending row. #}
+    {% set _blank_codes = [] %}
+    {% for code, name in state.pool_map.items() %}
+      {% if not (name or '').strip() %}{{ _blank_codes.append(code) or '' }}{% endif %}
+    {% endfor %}
+    {% if _blank_codes %}
+      <div class="flash error" style="margin-bottom:12px;">
+        <strong>{{ _blank_codes|length }} loan code(s) have no pool selected:</strong>
+        {% for c in _blank_codes[:20] %}<code>{{ c }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+        {% if _blank_codes|length > 20 %} (+{{ _blank_codes|length - 20 }} more){% endif %}.
+        Pick a pool name (or <em>Ignore</em>) for each before saving — anything left blank
+        will fall through to <code>{{ state.default_pool or 'Ignore' }}</code>.
+      </div>
+    {% endif %}
     <div id="pool-rows">
+      {% set _ns = namespace(first_blank=true) %}
       {% for code, name in state.pool_map.items() %}
-      <div class="kv-row">
+      {% set _is_blank = not (name or '').strip() %}
+      <div class="kv-row{% if _is_blank %} unmapped-pool-row{% endif %}"
+           {% if _is_blank and _ns.first_blank %}id="unmapped-row"{% endif %}
+           {% if _is_blank %}style="background:#fff4e0; border:1px solid #e0b070; padding:6px; border-radius:4px;"{% endif %}>
         <input type="text" name="pool_code" value="{{ code }}"
                placeholder="Raw code (e.g., AUTO_NEW)">
         <select name="pool_name">
@@ -402,6 +423,7 @@
         <button type="button" class="icon-btn"
                 onclick="this.parentElement.remove()">&times;</button>
       </div>
+      {% if _is_blank %}{% set _ns.first_blank = false %}{% endif %}
       {% endfor %}
     </div>
     <button type="button" class="btn btn-secondary"

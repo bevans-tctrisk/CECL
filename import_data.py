@@ -761,8 +761,24 @@ def _normalize_col_map_for_no_header(col_map):
 
 
 def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
-                warm_acct_scores=None, pull_as_of=None):
-    """Import a single file using the client config. Returns count of imported rows."""
+                warm_acct_scores=None, pull_as_of=None,
+                wiped_snapshots=None):
+    """Import a single file using the client config. Returns count of imported rows.
+
+    ``wiped_snapshots`` (optional ``set[str]``) controls the pre-insert
+    DELETE strategy. When non-None (full-folder imports from
+    ``process_client``), the FIRST file for any given ``snapshot_date``
+    does ONE wholesale ``DELETE WHERE (credit_union, snapshot_date)`` and
+    records the snapshot in the set; subsequent files for the same
+    snapshot just APPEND. This is the correct behavior for multi-extract
+    CUs where two or more files contribute to the same snapshot AND may
+    produce overlapping ``loan_pool`` values (e.g. Destinations CU's
+    ``ceclce`` + ``cecloe`` both producing ``All Other Unsecured Loans/LOC``
+    rows for codes 10/11 vs 34). When None (specific-file CLI re-import
+    via ``--file=X.xlsx``), falls back to the legacy per-pool delete so
+    re-running a single file does not nuke other extracts' rows for the
+    same snapshot.
+    """
     cu_name = config['credit_union']
     col_map = config['column_mappings']
     has_header = config.get('has_header', True)
@@ -1194,23 +1210,48 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
             if 'business_risk_rating' in clean_data.columns:
                 clean_data = clean_data.drop(columns=['business_risk_rating'])
 
-        # Scope the pre-insert delete to only the pools represented in this
-        # file. With multi-file imports (e.g. AIRES extract + a separate
-        # VISA/credit-card extract for the same snapshot), an unconditional
-        # delete by (cu, snapshot_date) would have the second file wipe out
-        # the first file's rows. Deleting only the pools we're about to
-        # re-insert keeps each file's pools refreshable independently.
-        pools_in_file = sorted({str(p) for p in clean_data['loan_pool'].dropna().unique()})
-        if pools_in_file:
-            conn.execute(
-                text(
-                    "DELETE FROM monthly_loan_data "
-                    "WHERE credit_union = :cu "
-                    "AND snapshot_date = :sd "
-                    "AND loan_pool = ANY(:pools)"
-                ),
-                {"cu": cu_name, "sd": snapshot_date, "pools": pools_in_file},
-            )
+        # Two delete strategies, picked by the ``wiped_snapshots``
+        # parameter (controlled by ``process_client``):
+        #
+        #   (a) Full-folder import (``wiped_snapshots`` is a set): the
+        #       FIRST file for a snapshot does ONE wholesale
+        #       ``DELETE WHERE (cu, snap)`` and records the snapshot;
+        #       subsequent files for the same snapshot just APPEND. This
+        #       is the correct behavior for multi-extract CUs where two
+        #       files for the same snapshot may produce overlapping
+        #       ``loan_pool`` values (e.g. Destinations ``ceclce`` and
+        #       ``cecloe`` both producing ``All Other Unsecured Loans/LOC``
+        #       rows). The previous per-pool delete had the second file
+        #       silently wipe the first file's rows for overlapping pools.
+        #
+        #   (b) Specific-file re-import (``wiped_snapshots`` is None,
+        #       e.g. ``--file=X.xlsx``): fall back to the per-pool delete
+        #       so re-running a single file does not nuke other extracts'
+        #       rows for the same snapshot.
+        if wiped_snapshots is not None:
+            snap_key = str(snapshot_date)
+            if snap_key not in wiped_snapshots:
+                conn.execute(
+                    text(
+                        "DELETE FROM monthly_loan_data "
+                        "WHERE credit_union = :cu "
+                        "AND snapshot_date = :sd"
+                    ),
+                    {"cu": cu_name, "sd": snapshot_date},
+                )
+                wiped_snapshots.add(snap_key)
+        else:
+            pools_in_file = sorted({str(p) for p in clean_data['loan_pool'].dropna().unique()})
+            if pools_in_file:
+                conn.execute(
+                    text(
+                        "DELETE FROM monthly_loan_data "
+                        "WHERE credit_union = :cu "
+                        "AND snapshot_date = :sd "
+                        "AND loan_pool = ANY(:pools)"
+                    ),
+                    {"cu": cu_name, "sd": snapshot_date, "pools": pools_in_file},
+                )
         clean_data.to_sql('monthly_loan_data', conn, if_exists='append', index=False)
 
     return len(clean_data)
@@ -1290,6 +1331,16 @@ def process_client(client_name, specific_file=None):
     files_to_process.sort(key=lambda x: os.path.relpath(os.path.join(x[0], x[1]), scan_folder).lower())
 
     files_processed = 0
+    # Per-snapshot wholesale-wipe tracker (see ``import_file`` for full
+    # rationale). On full-folder imports this is an empty set we mutate
+    # as each new snapshot is encountered; the first file for a given
+    # snapshot wipes everything for (cu, snap) then APPENDs, and
+    # subsequent files for the same snapshot just APPEND so multiple
+    # extracts contributing overlapping ``loan_pool`` values all survive.
+    # On specific-file imports (``--file=X.xlsx``) we pass ``None`` to
+    # preserve the legacy per-pool delete semantics so re-running a
+    # single file does not nuke other extracts' rows for the same snap.
+    wiped_snapshots: set[str] | None = None if specific_file else set()
     for root, filename in files_to_process:
         file_path = os.path.join(root, filename)
         if not os.path.isfile(file_path):
@@ -1337,6 +1388,18 @@ def process_client(client_name, specific_file=None):
                     )
                 except (TypeError, ValueError):
                     per_file_cfg['header_row'] = 0
+            # Phase 9.22: per-extract ``pool_code_split`` override. When
+            # present on the matched extract (including ``""`` meaning
+            # "no split"), it wins over the CU-level value. CUMA-style
+            # mortgage files ship loan codes like ``15/15 ARM`` where
+            # ``/`` is part of the code; without an explicit per-file
+            # ``""`` here, ``map_pool_codes`` would truncate to ``15`` and
+            # route to the default pool (typically ``Ignore``), silently
+            # excluding those loans from the report.
+            if 'pool_code_split' in matched_extract:
+                per_file_cfg['pool_code_split'] = (
+                    matched_extract.get('pool_code_split') or ''
+                )
             label_txt = matched_extract.get('label') or '(unlabeled)'
             print(f"    Using extract mapping: {label_txt}")
         elif extracts:
@@ -1412,7 +1475,7 @@ def process_client(client_name, specific_file=None):
             continue
 
         try:
-            count = import_file(file_path, per_file_cfg, snapshot_date, credit_pull_scores, warm_acct_scores, pull_as_of)
+            count = import_file(file_path, per_file_cfg, snapshot_date, credit_pull_scores, warm_acct_scores, pull_as_of, wiped_snapshots=wiped_snapshots)
             if count > 0:
                 if archive_imported and client_archive:
                     archive_target = os.path.join(client_archive, relative_file)

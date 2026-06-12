@@ -256,15 +256,22 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
     remove_chars = state.get("balance_remove_chars") or []
     accounting_negatives = bool(state.get("accounting_negatives", True))
     pool_map = state.get("pool_map") or {}
-    split_char = state.get("pool_code_split") or ""
+    top_split_char = state.get("pool_code_split") or ""
     default_pool = state.get("default_pool") or "Other/Uncategorized"
 
     # Collect candidate file entries: prefer the multi-upload list (so we
     # can honor per-file column_mappings / has_header / header_row), but
     # fall back to the single-sample saved_path if that's all the user
     # provided. Each tuple: (display_name, path, col_map, has_header,
-    # header_row_or_None).
-    files: list[tuple[str, str, dict, bool, int | None]] = []
+    # header_row_or_None, file_split_char).
+    #
+    # Phase 9.22: ``file_split_char`` lets each extract override the
+    # top-level ``pool_code_split``. When the entry has the key
+    # ``pool_code_split`` (including ``""`` to mean "no split"), it wins;
+    # otherwise the top-level value is inherited. CUMA mortgage extracts
+    # with codes like ``15/15 ARM`` need an explicit per-file ``""`` so
+    # the importer doesn't truncate to ``15``.
+    files: list[tuple[str, str, dict, bool, int | None, str]] = []
     uploads = state.get("sample_uploads") or {}
     for entry in (uploads.get("loan_data_files") or []):
         n = entry.get("name") or Path(entry.get("path", "")).name
@@ -282,20 +289,24 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
             hr = int(hr_raw) if hr_raw not in (None, "", 0) else None
         except (TypeError, ValueError):
             hr = None
-        files.append((n, p, cm, hh, hr))
+        if "pool_code_split" in entry:
+            file_split = str(entry.get("pool_code_split") or "")
+        else:
+            file_split = top_split_char
+        files.append((n, p, cm, hh, hr, file_split))
     if not files:
         sample = state.get("sample") or {}
         if sample.get("saved_path"):
             files.append((sample.get("filename") or "sample",
                           sample["saved_path"], top_col_map,
-                          top_has_header, None))
+                          top_has_header, None, top_split_char))
 
     # Fail-fast if NO file (including fallback top-level) has the required
     # column mapping pair. Per-file misses degrade gracefully below.
     if files and not any(
         (cm.get("current_balance")
          and (cm.get("loan_pool_code") or cm.get("loan_pool_code_static")))
-        for _, _, cm, _, _ in files
+        for _, _, cm, _, _, _ in files
     ):
         return {"ok": False, "error":
                 "Set both 'current_balance' and 'loan_pool_code' on the "
@@ -319,12 +330,24 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
     file_summaries: list[dict[str, Any]] = []
     unmapped: dict[str, float] = {}
 
-    for name, path, col_map, has_header, header_row in files:
+    for name, path, col_map, has_header, header_row, file_split in files:
         bal_ref = col_map.get("current_balance")
         pool_ref = col_map.get("loan_pool_code")
         static_pool = (col_map.get("loan_pool_code_static") or "").strip()
+        # The column references chosen for this file — surfaced back to
+        # the UI so users can confirm at a glance which mapping each
+        # file's total is being summed on. ``loan_pool_code_col`` may
+        # carry a sentinel ``"(static: <code>)"`` when a fixed code is
+        # being applied to every row in lieu of a real column.
+        cb_col_display = str(bal_ref) if bal_ref else ""
+        if static_pool:
+            pool_col_display = f"(static: {static_pool})"
+        else:
+            pool_col_display = str(pool_ref) if pool_ref else ""
         if not bal_ref or (not pool_ref and not static_pool):
             file_summaries.append({"name": name, "rows": 0, "total": 0.0,
+                                   "current_balance_col": cb_col_display,
+                                   "loan_pool_code_col": pool_col_display,
                                    "error":
                                    "current_balance / loan_pool_code not "
                                    "mapped for this file"})
@@ -332,6 +355,8 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
         df = _load_loan_extract(path, has_header, header_row)
         if df is None or df.empty:
             file_summaries.append({"name": name, "rows": 0, "total": 0.0,
+                                   "current_balance_col": cb_col_display,
+                                   "loan_pool_code_col": pool_col_display,
                                    "error": "Could not read file"})
             continue
         bal_series = _get_col(df, bal_ref, has_header)
@@ -343,20 +368,22 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
             pool_series = _get_col(df, pool_ref, has_header)
         if bal_series is None or pool_series is None:
             file_summaries.append({"name": name, "rows": 0, "total": 0.0,
+                                   "current_balance_col": cb_col_display,
+                                   "loan_pool_code_col": pool_col_display,
                                    "error":
                                    "Required columns not found in file"})
             continue
 
         balances = _clean_balance(bal_series, remove_chars, accounting_negatives)
-        mapped = _map_pool_codes(pool_series, pool_map, split_char, default_pool)
+        mapped = _map_pool_codes(pool_series, pool_map, file_split, default_pool)
         # Treat NaN balance as 0 for grouping.
         balances = balances.fillna(0.0)
 
         df_calc = pd.DataFrame({"pool": mapped, "bal": balances})
         # Identify raw codes that fell through to default_pool so the user
         # can spot missing mapping rows.
-        if split_char:
-            raw_codes = pool_series.astype(str).str.split(split_char).str[0].str.strip()
+        if file_split:
+            raw_codes = pool_series.astype(str).str.split(file_split).str[0].str.strip()
         else:
             raw_codes = pool_series.astype(str).str.strip()
         raw_codes = raw_codes.apply(_normalize_raw_code)
@@ -379,7 +406,10 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
                 by_pool[pool_name] = by_pool.get(pool_name, 0.0) + v
         total_rows += len(df_calc)
         file_summaries.append({"name": name, "rows": int(len(df_calc)),
-                               "total": file_total, "error": None})
+                               "total": file_total,
+                               "current_balance_col": cb_col_display,
+                               "loan_pool_code_col": pool_col_display,
+                               "error": None})
 
     # Sort each pool's code breakdown by descending balance.
     by_pool_code_sorted: dict[str, list[tuple[str, float]]] = {
@@ -663,4 +693,163 @@ def compare(state: dict[str, Any]) -> dict[str, Any]:
         "monthly_summary": {
             "raw_rows": monthly.get("raw_rows", []),
         },
+    }
+
+
+def compare_run(cfg: dict[str, Any], snapshot_iso: str) -> dict[str, Any]:
+    """Per-pool balance comparison for the Run-New-Quarter intercept.
+
+    Reads loan balances from the ``monthly_loan_data`` DB table (the
+    freshly-imported snapshot) and monthly balances via the same
+    ``generate_report.load_monthly_balances`` loader the report engine
+    uses (so the figures shown match what the reports will use).
+
+    Returns the same dict shape as :func:`compare` so the existing
+    Step-14 template patterns translate cleanly.
+    """
+    cu = (cfg.get("credit_union") or "").strip()
+    if not cu or not snapshot_iso:
+        return {"ok": False,
+                "error": "Missing credit_union or snapshot date.",
+                "period": snapshot_iso or "",
+                "monthly_period": "",
+                "rows": [],
+                "totals": {"monthly": 0.0, "loans": 0.0, "diff": 0.0},
+                "loan_summary": {"file_count": 0, "row_count": 0,
+                                 "files": [], "default_total": 0.0,
+                                 "unmapped_codes": []},
+                "monthly_summary": {"raw_rows": []}}
+
+    # ── Loan side: post-import DB snapshot ───────────────────────────
+    try:
+        from sqlalchemy import create_engine, text
+        from cecl_credentials import get_database_url
+        engine = create_engine(get_database_url())
+        df = pd.read_sql(
+            text("SELECT loan_pool, current_balance "
+                 "FROM monthly_loan_data "
+                 "WHERE credit_union=:c AND snapshot_date=:s"),
+            engine,
+            params={"c": cu, "s": snapshot_iso},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False,
+                "error": f"Could not read loans from DB: {exc}",
+                "period": snapshot_iso,
+                "monthly_period": "",
+                "rows": [],
+                "totals": {"monthly": 0.0, "loans": 0.0, "diff": 0.0},
+                "loan_summary": {"file_count": 0, "row_count": 0,
+                                 "files": [], "default_total": 0.0,
+                                 "unmapped_codes": []},
+                "monthly_summary": {"raw_rows": []}}
+
+    if df is None or df.empty:
+        return {"ok": False,
+                "error": (f"No imported loans found for {cu} at "
+                          f"{snapshot_iso}. Import may have failed."),
+                "period": snapshot_iso,
+                "monthly_period": "",
+                "rows": [],
+                "totals": {"monthly": 0.0, "loans": 0.0, "diff": 0.0},
+                "loan_summary": {"file_count": 0, "row_count": 0,
+                                 "files": [], "default_total": 0.0,
+                                 "unmapped_codes": []},
+                "monthly_summary": {"raw_rows": []}}
+
+    loan_by_pool: dict[str, float] = (
+        df.groupby("loan_pool")["current_balance"].sum().to_dict()
+    )
+    # Drop intentional excludes from the comparison surface.
+    for excl in ("Ignore", "Exclude"):
+        loan_by_pool.pop(excl, None)
+    loan_row_count = int(len(df))
+
+    # ── Monthly side: report-engine loader (handles all 4 modes) ────
+    monthly_by_pool: dict[str, float] = {}
+    monthly_period = ""
+    monthly_err: str | None = None
+    try:
+        import generate_report  # local import keeps service decoupled
+        mb_df, _alll = generate_report.load_monthly_balances(cfg)
+        if mb_df is not None and not mb_df.empty \
+                and {"pool", "date", "balance"}.issubset(mb_df.columns):
+            mb_df = mb_df.copy()
+            mb_df["date"] = pd.to_datetime(mb_df["date"], errors="coerce")
+            mb_df = mb_df.dropna(subset=["date"])
+            snap_ts = pd.to_datetime(snapshot_iso)
+            same = mb_df[mb_df["date"].dt.normalize() == snap_ts.normalize()]
+            if same.empty:
+                eligible = mb_df[mb_df["date"] <= snap_ts]
+                if not eligible.empty:
+                    pick = eligible["date"].max()
+                    same = eligible[eligible["date"] == pick]
+                    monthly_period = pd.Timestamp(pick).date().isoformat()
+            else:
+                monthly_period = snapshot_iso
+            if not same.empty:
+                monthly_by_pool = (
+                    same.groupby("pool")["balance"].sum().to_dict()
+                )
+            else:
+                monthly_err = (
+                    "Monthly balance file is configured but contains no "
+                    f"data on or before {snapshot_iso}."
+                )
+        else:
+            monthly_err = (
+                "Monthly balance file did not yield any per-pool data."
+            )
+    except Exception as exc:  # noqa: BLE001
+        monthly_err = f"Monthly balance read failed: {exc}"
+
+    # ── Build rows ──────────────────────────────────────────────────
+    all_pools = sorted(
+        set(loan_by_pool.keys()) | set(monthly_by_pool.keys()),
+        key=lambda s: s.lower(),
+    )
+    rows: list[dict[str, Any]] = []
+    total_m = 0.0
+    total_l = 0.0
+    for pool in all_pools:
+        m_val = monthly_by_pool.get(pool)
+        l_val = loan_by_pool.get(pool)
+        m_f = float(m_val) if m_val is not None else None
+        l_f = float(l_val) if l_val is not None else None
+        diff = None
+        pct = None
+        if m_f is not None and l_f is not None:
+            diff = l_f - m_f
+            if m_f:
+                pct = (diff / m_f) * 100.0
+        rows.append({
+            "pool": pool,
+            "monthly": m_f,
+            "loans": l_f,
+            "diff": diff,
+            "pct": pct,
+            "loan_codes": [],
+        })
+        total_m += float(m_f or 0.0)
+        total_l += float(l_f or 0.0)
+
+    return {
+        "ok": True,
+        "error": monthly_err,
+        "period": snapshot_iso,
+        "monthly_period": monthly_period,
+        "rows": rows,
+        "totals": {
+            "monthly": total_m,
+            "loans": total_l,
+            "diff": total_l - total_m,
+        },
+        "loan_summary": {
+            "file_count": 0,
+            "row_count": loan_row_count,
+            "files": [],
+            "default_total": 0.0,
+            "unmapped_codes": [],
+        },
+        "monthly_summary": {"raw_rows": []},
     }

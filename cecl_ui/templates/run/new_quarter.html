@@ -83,6 +83,94 @@
       or the wizard.
     </p>
   </form>
+{% elif stage == "awaiting_balance_check" %}
+  <div style="background:#eef6ff; border:1px solid #3a78d8; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#1a4480;">Balance Adjustment Review</h3>
+    <p style="margin:6px 0;">
+      Files were staged and loans imported successfully. Review the
+      per-pool comparison below — monthly balance file vs the freshly
+      imported loan extract — then click <strong>Continue → Run
+      Reports</strong> to produce the reports. Mirrors the wizard's
+      Step 14 (Balance Adjustment).
+    </p>
+    {% if comparison.error %}
+      <p style="margin:6px 0; color:#8a3a00;">
+        <strong>Note:</strong> {{ comparison.error }}
+      </p>
+    {% endif %}
+    {% if comparison.monthly_period and comparison.monthly_period != comparison.period %}
+      <p style="margin:6px 0; color:#5a5a5a;">
+        Monthly balances reflect the latest available period
+        <strong>{{ comparison.monthly_period }}</strong>; loans reflect
+        the snapshot <strong>{{ comparison.period }}</strong>.
+      </p>
+    {% endif %}
+  </div>
+
+  <table class="data-table" style="margin-bottom:18px;">
+    <thead>
+      <tr>
+        <th>Pool</th>
+        <th style="text-align:right;">Monthly Balance</th>
+        <th style="text-align:right;">Loan Extract</th>
+        <th style="text-align:right;">Difference</th>
+        <th style="text-align:right;">% Diff</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in comparison.rows %}
+      <tr>
+        <td>{{ row.pool }}</td>
+        <td style="text-align:right;">
+          {% if row.monthly is not none %}${{ "{:,.2f}".format(row.monthly) }}{% else %}—{% endif %}
+        </td>
+        <td style="text-align:right;">
+          {% if row.loans is not none %}${{ "{:,.2f}".format(row.loans) }}{% else %}—{% endif %}
+        </td>
+        <td style="text-align:right;{% if row.diff is not none and (row.diff > 1 or row.diff < -1) %} color:#b03a2e; font-weight:600;{% endif %}">
+          {% if row.diff is not none %}${{ "{:,.2f}".format(row.diff) }}{% else %}—{% endif %}
+        </td>
+        <td style="text-align:right;{% if row.pct is not none and (row.pct > 1 or row.pct < -1) %} color:#b03a2e;{% endif %}">
+          {% if row.pct is not none %}{{ "{:,.2f}".format(row.pct) }}%{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      <tr style="font-weight:700; background:#f0f4f0; border-top:2px solid #2d662d;">
+        <td>Total</td>
+        <td style="text-align:right;">${{ "{:,.2f}".format(comparison.totals.monthly) }}</td>
+        <td style="text-align:right;">${{ "{:,.2f}".format(comparison.totals.loans) }}</td>
+        <td style="text-align:right;{% if comparison.totals.diff > 1 or comparison.totals.diff < -1 %} color:#b03a2e;{% endif %}">
+          ${{ "{:,.2f}".format(comparison.totals.diff) }}
+        </td>
+        <td style="text-align:right;">
+          {% if comparison.totals.monthly %}{{ "{:,.2f}".format(comparison.totals.diff / comparison.totals.monthly * 100.0) }}%{% else %}—{% endif %}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="muted" style="margin:8px 0;">
+    Loans imported: <strong>{{ comparison.loan_summary.row_count }}</strong>
+    row(s) at <code>{{ comparison.period }}</code>. Per-pool balance
+    adjustments are auto-computed by the report engine at run time —
+    you don't need to enter anything; this view is for confidence.
+  </p>
+
+  <form method="post"
+        action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+    <input type="hidden" name="stage" value="balance_checked">
+    <input type="hidden" name="period" value="{{ staged_period }}">
+    {% for r in ['tct','vizo','vizo_supp','impdet'] %}
+      {% if staged_reports and staged_reports.get(r) %}
+        <input type="hidden" name="{{ r }}" value="on">
+      {% endif %}
+    {% endfor %}
+
+    <div style="display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit">Continue &rarr; Run Reports</button>
+      <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
+    </div>
+  </form>
 {% else %}
   <form method="post"
         enctype="multipart/form-data"
