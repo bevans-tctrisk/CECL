@@ -67,6 +67,32 @@
         Upload &amp; review
       </button>
     </form>
+    {% set _has_pool_map = (state.pool_map or {}) | length > 0 %}
+    {% if _has_pool_map %}
+    <div style="margin-top:14px; padding:10px 12px; background:#fff7f0; border:1px solid #f0c8a0; border-radius:4px;">
+      <strong style="color:#a04a00;">Need to start over?</strong>
+      <span class="muted">
+        If a previously uploaded pool-map file pulled in pool names from a
+        different credit union, you can clear those values here and re-map
+        from scratch. This also deletes any cached upload files on disk.
+      </span>
+      <form method="post" style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+        <label style="display:flex; align-items:center; gap:4px;">
+          <input type="radio" name="clear_scope" value="values" checked>
+          Clear pool names only (keep the {{ (state.pool_map or {}) | length }} code(s))
+        </label>
+        <label style="display:flex; align-items:center; gap:4px;">
+          <input type="radio" name="clear_scope" value="all">
+          Remove all entries
+        </label>
+        <button class="btn btn-secondary" type="submit" name="action" value="clear_pool_map"
+                style="background:#fbe3cc; border-color:#e0a060; color:#7a3a00;"
+                onclick="return confirm('Clear the pool-name on every code and delete cached upload files? This cannot be undone.');">
+          Clear pool mappings
+        </button>
+      </form>
+    </div>
+    {% endif %}
     {% else %}
       <p class="muted">
         Detected: header row <code>{{ upload_review.header_row or 1 }}</code>,

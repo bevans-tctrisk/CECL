@@ -1234,12 +1234,145 @@ _LONG_LOL_HINTS = re.compile(
     re.IGNORECASE,
 )
 
+# Aggregate / total / grand-total row labels that should be excluded
+# when seeding pool_settings from a flat hist-balance workbook (col A
+# typically ends with a "Total" row that sums the pools above it).
+_AGG_LABEL_RX = re.compile(
+    r"^\s*(?:grand[\s_\-]*)?total(?:\s+loans?)?\s*$|"
+    r"^\s*sub[\s_\-]*total\s*$|"
+    r"^\s*all[\s_\-]*loans?\s*$",
+    re.IGNORECASE,
+)
+
 
 def _default_acl_months_for_pool(name: str) -> int:
     """Sensible ACL-months default based on pool-name keywords."""
     if not name:
         return 36
     return 84 if _LONG_LOL_HINTS.search(name) else 36
+
+
+def _purge_stale_pool_map_values(state: dict[str, Any]) -> int:
+    """Rewrite any ``state["pool_map"]`` value that doesn't match a
+    current ``pool_settings`` pool name (or the sentinels ``Ignore`` /
+    ``Exclude``) to ``"Ignore"``.
+
+    Defends against cross-CU pool-map pollution: pool_map entries from a
+    previous CU's pool-map upload survive in the active Flask session
+    after the user starts a new CU (no code path clears them on CU
+    change). When auto-scan replaces ``pool_settings`` with the new
+    CU's pools, leftover values become "unrecognized pool names" on
+    Step 3. Run this AFTER ``pool_settings`` has been populated.
+
+    Returns the number of entries rewritten.
+    """
+    pm = state.get("pool_map")
+    if not isinstance(pm, dict) or not pm:
+        return 0
+    valid_names: set[str] = {
+        (p.get("name") or "").strip()
+        for p in (state.get("pool_settings") or [])
+        if isinstance(p, dict) and p.get("name")
+    }
+    if not valid_names:
+        # No pool_settings yet -> can't validate; do nothing.
+        return 0
+    valid_names |= {"Ignore", "Exclude"}
+    purged = 0
+    for code, value in list(pm.items()):
+        if not value:
+            continue
+        if str(value).strip() in valid_names:
+            continue
+        pm[code] = "Ignore"
+        purged += 1
+    return purged
+
+
+def _apply_flat_pool_labels_to_state(
+    state: dict[str, Any],
+    labels: list[str],
+    src: str,
+) -> dict[str, list[str]]:
+    """Seed Step 2 (pool_settings) + Step 8 (monthly_bal.pool_map) from a
+    FLAT historical-balance workbook (one pool per row in col A; no
+    sub-category hierarchy).
+
+    Mirrors ``_apply_pool_seed_to_state`` but for the flat layout: each
+    label IS a canonical pool name, so ``pool_map`` is seeded with each
+    label mapping to itself. Aggregate rows ("Total", "Grand Total",
+    "Sub-total", "All Loans") are filtered out.
+
+    Never overwrites a user's existing entries: ``pool_settings`` is
+    only populated when empty; ``monthly_bal.pool_map`` entries are
+    only added for labels not yet keyed in the map.
+    """
+    out: dict[str, list[str]] = {}
+    cleaned: list[str] = []
+    seen_norm: set[str] = set()
+    for raw in labels or []:
+        nm = (raw or "").strip()
+        if not nm:
+            continue
+        if _AGG_LABEL_RX.match(nm):
+            continue
+        key = nm.lower()
+        if key in seen_norm:
+            continue
+        seen_norm.add(key)
+        cleaned.append(nm)
+    if not cleaned:
+        return out
+
+    # ---- state["pool_settings"] (Step 2 "Loan Pools" table) ------------
+    if not state.get("pool_settings"):
+        ps_rows: list[dict[str, Any]] = []
+        for nm in cleaned:
+            ps_rows.append({
+                "name": nm,
+                "risk_rated": False,
+                "brr": False,
+                "acl_months": _default_acl_months_for_pool(nm),
+                "use_default_mgmt_adj": False,
+                "excluded": False,
+            })
+        state["pool_settings"] = ps_rows
+        out.setdefault("loan_pools", []).append(
+            f"pool_settings seeded with {len(ps_rows)} pool(s) from {src} "
+            f"(review the risk-rated / ACL-months / excluded toggles)"
+        )
+
+    # Mirror to state.warm.pools so downstream steps and the final YAML
+    # see the same ordered list.
+    warm = state.get("warm") or {}
+    if not warm.get("pools"):
+        warm["pools"] = [p["name"] for p in (state.get("pool_settings") or [])]
+        state["warm"] = warm
+
+    # ---- state["monthly_bal"]["pool_map"] (label -> itself) -----------
+    mb = state.setdefault("monthly_bal", {})
+    pm = mb.setdefault("pool_map", {})
+    added = 0
+    for nm in cleaned:
+        if nm not in pm or not pm.get(nm):
+            pm[nm] = nm
+            added += 1
+    if added:
+        out.setdefault("monthly_bal", []).append(
+            f"pool_map seeded with {added} label -> pool mapping(s) from "
+            f"{src} (each label adopted as its own pool name)"
+        )
+
+    # Defensive: clear any pool_map values left over from a prior CU's
+    # pool-map upload that don't match the freshly-seeded pool_settings.
+    purged = _purge_stale_pool_map_values(state)
+    if purged:
+        out.setdefault("pools", []).append(
+            f"Cleared {purged} stale pool_map value(s) (carried over from "
+            f"a prior CU) — re-map on Step 3."
+        )
+
+    return out
 
 
 def _apply_pool_seed_to_state(
@@ -1344,6 +1477,15 @@ def _apply_pool_seed_to_state(
         "subcategory_to_pool": subcat_to_pool,
         "code_to_pool": seed.get("code_to_pool") or {},
     }
+
+    # Defensive: clear any pool_map values left over from a prior CU's
+    # pool-map upload that don't match the freshly-seeded pool_settings.
+    purged = _purge_stale_pool_map_values(state)
+    if purged:
+        out.setdefault("pools", []).append(
+            f"Cleared {purged} stale pool_map value(s) (carried over from "
+            f"a prior CU) — re-map on Step 3."
+        )
 
     return out
 
@@ -1716,6 +1858,44 @@ def selfheal_hist_scan_from_folder(state: dict[str, Any]) -> list[str]:
     # current value is still the bare default and no single workbook
     # has been uploaded.
     msgs.extend(_auto_flip_hist_source(state))
+    return msgs
+
+
+def selfheal_flat_pool_seed_from_state(state: dict[str, Any]) -> list[str]:
+    """Proactively seed Step 2 ``pool_settings`` + Step 8
+    ``monthly_bal.pool_map`` from a previously-detected flat
+    ``Historical Balance Sheets`` workbook when those state keys are
+    still empty.
+
+    Targets drafts saved BEFORE the flat-pool-labels seeding wired into
+    ``apply_findings_to_state`` for ``single_hist_bal`` findings. Reads
+    only state (``monthly_bal.parsed_pool_labels`` /
+    ``monthly_bal.filename``) — no folder I/O — so it's safe to call
+    from any wizard GET hook.
+
+    Skips silently when:
+      * Auto-scan never completed
+      * ``pool_settings`` already populated (preserves user edits)
+      * The hist-balance source is not the flat single workbook shape
+        (consolidated pool-seed workbooks have their own seeding path)
+      * No pool labels were parsed
+    """
+    if not state.get("_auto_scan_completed"):
+        return []
+    if state.get("pool_settings"):
+        return []
+    mb = state.get("monthly_bal") or {}
+    if (mb.get("source") or "") != "single":
+        return []
+    labels = mb.get("parsed_pool_labels") or []
+    if not labels:
+        return []
+    src = mb.get("filename") or "single historical balance workbook"
+    flat_report = _apply_flat_pool_labels_to_state(state, labels, src)
+    msgs: list[str] = []
+    for key in ("loan_pools", "monthly_bal"):
+        for m in flat_report.get(key, []):
+            msgs.append(m)
     return msgs
 
 
@@ -2092,14 +2272,31 @@ def apply_findings_to_state(
             "hist_balance_source set to monthly_balance_sheets"
         )
     elif findings.get("single_hist_bal"):
-        msgs = _apply_single_hist_bal_to_state(
-            state, findings["single_hist_bal"]
-        )
+        shb = findings["single_hist_bal"]
+        msgs = _apply_single_hist_bal_to_state(state, shb)
         report.setdefault("monthly_bal", []).extend(msgs)
         state["hist_balance_source"] = "single_workbook"
         report.setdefault("historical", []).append(
             "hist_balance_source set to single_workbook"
         )
+        # Seed Step 2 pool_settings + Step 8 pool_map from the workbook's
+        # pool labels when no consolidated 'Balance Sheets <CU>'
+        # pool_seed is also present (flat hist-bal workbooks ARE the
+        # authoritative pool list for CUs that ship them, e.g. TCP CU's
+        # ``Historical Balance Sheets-TCP CU 65384.xlsx``).
+        if not findings.get("pool_seed"):
+            shb_entry = shb.get("entry") or {}
+            shb_src = shb_entry.get("name") or "single historical balance workbook"
+            flat_report = _apply_flat_pool_labels_to_state(
+                state, shb.get("pool_labels") or [], shb_src
+            )
+            for key, fmsgs in flat_report.items():
+                report.setdefault(key, []).extend(fmsgs)
+            # Mirror loan_pools msgs to "pools" stepper bucket too.
+            if "loan_pools" in flat_report:
+                report.setdefault("pools", []).extend(
+                    flat_report["loan_pools"]
+                )
 
     # ----- Consolidated pool-grouping balance workbook --------------------
     # (Vizo Financial 'Balance Sheets <CU>.xlsx' carries the authoritative
@@ -2251,6 +2448,35 @@ def compute_hil_needs(state: dict[str, Any]) -> list[dict[str, Any]]:
         add("economic", "required", "Economic state is blank")
     elif not econ.get("county"):
         add("economic", "recommended", "Economic county is blank")
+
+    # loan_pools / warm (Step 2) — ensure the wizard lands here after
+    # Step 1 auto-scan so the user can confirm or expand the pool list
+    # BEFORE mapping loan codes (Step 3) into those pools. Suppressed
+    # once the user explicitly clicks Save & Next on Step 2 (recorded
+    # in _user_completed_steps via the Phase 9.9 mechanism). Both
+    # keys are emitted; first_hil_step_key filters to whichever step
+    # belongs to the active step list (loan_pools = NO_WARM path,
+    # warm = WARM path).
+    user_done = set(state.get("_user_completed_steps") or [])
+    pool_settings = state.get("pool_settings") or []
+    has_named_pool = any((p.get("name") or "").strip() for p in pool_settings)
+    auto_scan_done = bool(state.get("_auto_scan_completed"))
+    if "loan_pools" not in user_done and "warm" not in user_done:
+        if not has_named_pool:
+            add("loan_pools", "required",
+                "No loan pools defined yet — add at least one pool before "
+                "mapping loan codes")
+            add("warm", "required",
+                "No loan pools defined yet — upload a WARM file or add "
+                "pools manually before mapping loan codes")
+        elif auto_scan_done:
+            n = len(pool_settings)
+            add("loan_pools", "recommended",
+                f"{n} loan pool(s) auto-detected — review names, ACL months, "
+                "and risk-rated flags before continuing")
+            add("warm", "recommended",
+                f"{n} loan pool(s) auto-detected — review names, ACL months, "
+                "and risk-rated flags before continuing")
 
     # pools — ALL seeded codes default to 'Ignore' which means user has not
     # renamed any. That's the most common 'must review' step after a scan.

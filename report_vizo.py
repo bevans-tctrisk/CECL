@@ -1000,13 +1000,9 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
     # Filter: exclude anything with "Hide" in the name. Include WARM-only
     # pools (NRR pools that have no DB rows but appear in WARM/monthly bal).
     visible_grades = [g for g in gl if 'hide' not in g.lower()]
-    _imp_for_pools = (hist or {}).get('impaired', {}) if hist else {}
-    extra = set((_imp_for_pools.get('hist_bal_data') or {}).keys()) \
-            | set((_imp_for_pools.get('pool_bal_detail') or {}).keys())
-    pools_set = set(df['loan_pool'].unique()) | extra
-    pools = sorted(p for p in pools_set
-                   if p and 'hide' not in str(p).lower()
-                   and str(p).strip().lower() not in ('grand total','total','excluded','exclude'))
+    # Use the canonical pool ordering helper so the Impr Deter charts and
+    # data table match every other tab (WARM/wizard order, NRR pools last).
+    pools = _ordered_pools(df, hist)
 
     # ── Column widths (from template) ─────────────────────────────
     ws.column_dimensions['A'].width = 16.71

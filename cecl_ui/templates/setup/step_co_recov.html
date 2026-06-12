@@ -493,6 +493,14 @@
         </div>
       {% endfor %}
     </div>
+    <form method="post" style="margin-top:8px;"
+          onsubmit="return confirm('Remove all {{ su['co_files']|length }} charge-off file(s) from this step? Your column mappings will be preserved.');">
+      <input type="hidden" name="action" value="clear_all_sample_co">
+      <button class="btn btn-link" type="submit"
+              style="color:#a04;">
+        Clear all files
+      </button>
+    </form>
   {% endif %}
 
   <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
@@ -552,6 +560,26 @@
   </label>
 
   <div id="sample-recov-upload" {% if su.get('no_recoveries') %}hidden{% endif %}>
+    {% if su.get('co_files') %}
+      <div style="margin-bottom:12px; padding:10px 12px; border:1px solid #cfe5cf;
+                  border-radius:6px; background:#f4faf4;">
+        <strong>Same files as Charge-Offs?</strong>
+        <p class="muted" style="margin:4px 0 8px;">
+          Many credit unions publish charge-offs and recoveries in the
+          <strong>same workbook(s)</strong>. Click below to copy all
+          {{ su['co_files']|length }} Charge-Off file(s) into the
+          Recoveries list. You can still adjust the Recoveries column
+          mapping (e.g. point to the Recovery&nbsp;Amount column) below.
+        </p>
+        <form method="post" style="margin:0;"
+              onsubmit="return confirm('Copy all {{ su['co_files']|length }} Charge-Off file(s) to the Recoveries list?');">
+          <input type="hidden" name="action" value="use_co_files_for_recov">
+          <button class="btn btn-secondary" type="submit">
+            Use the same files as Charge-Offs
+          </button>
+        </form>
+      </div>
+    {% endif %}
     {% if su.get('recov_files') %}
       <div class="upload-status-list">
         {% for f in su['recov_files'] %}
@@ -569,6 +597,14 @@
           </div>
         {% endfor %}
       </div>
+      <form method="post" style="margin-top:8px;"
+            onsubmit="return confirm('Remove all {{ su['recov_files']|length }} recoveries file(s) from this step? Your column mappings will be preserved.');">
+        <input type="hidden" name="action" value="clear_all_sample_recov">
+        <button class="btn btn-link" type="submit"
+                style="color:#a04;">
+          Clear all files
+        </button>
+      </form>
     {% endif %}
     <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
       <label>Recoveries file

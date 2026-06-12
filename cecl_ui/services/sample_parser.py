@@ -463,9 +463,19 @@ _FNAME_GENERALIZE_RULES: list[tuple[re.Pattern[str], str]] = [
      r"\d{2}[-_](?:0[1-9]|1[0-2])"),
     # Bare 4-digit year (matched after the combined forms above)
     (re.compile(r"(?<!\d)20\d{2}(?!\d)"), r"20\d{2}"),
-    # Bare month name (matched last so combined month+year wins first)
-    (re.compile(rf"(?i)\b{_MONTH_NAME_RX_GROUP}\b"),
+    # Bare month name (matched last so combined month+year wins first).
+    # Use letter-boundary lookarounds rather than ``\b`` so the rule
+    # also fires inside underscore-joined names like
+    # ``December_Loan_File_-_Upload.xlsx`` (``\b`` fails to match
+    # between a letter and an underscore — both are word chars).
+    (re.compile(rf"(?i)(?<![A-Za-z]){_MONTH_NAME_RX_GROUP}(?![A-Za-z])"),
      _MONTH_NAME_RX_GROUP),
+    # Version suffix: "V2", "V3", "v10". Wildcards the digit so next
+    # quarter's "V3" file matches a pattern derived from a "V2" sample.
+    # Restricted to 1-2 digits and an explicit boundary so generic words
+    # like "Vault123" don't get rewritten.
+    (re.compile(r"(?<![A-Za-z0-9])[Vv]\d{1,2}(?![A-Za-z0-9])"),
+     r"[Vv]\d{1,2}"),
 ]
 
 
@@ -500,6 +510,17 @@ def _generalize_filename_pattern(stem: str, ext_part: str) -> str:
     if last < len(stem):
         parts.append(re.escape(stem[last:]))
     body = "".join(parts) if parts else re.escape(stem)
+    # Loosen runs of whitespace (escaped as ``\ ``), underscores, and
+    # escaped dashes (``\-``) so the pattern still matches across common
+    # CU naming variations:
+    #   - ``secure_filename`` rewrites spaces to underscores during upload
+    #     (sample ``December Loan File - Upload.xlsx`` → staged
+    #     ``December_Loan_File_-_Upload.xlsx``).
+    #   - Per-quarter drops sometimes lose the dash entirely
+    #     (``February Loan File Upload.xlsx``).
+    # Collapsing runs of any of {space, underscore, dash} to ``[\s_\-]+``
+    # lets one wizard-derived pattern match all three forms.
+    body = re.sub(r"(?:\\ |_|\\-)+", r"[\\s_\\-]+", body)
     return f"(?i)^{body}\\.{ext_part}$"
 
 

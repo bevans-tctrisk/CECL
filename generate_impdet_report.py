@@ -71,6 +71,35 @@ def load_config(client):
     path = os.path.join(CFG_DIR, f'{client}.yaml')
     with open(path, 'r', encoding='utf-8') as f:
         cfg = yaml.safe_load(f)
+    # Normalize the 'Ignore' sentinel to the canonical 'Exclude' so downstream
+    # filters drop these rows uniformly. Mirrors generate_report.load_config.
+    pm = cfg.get('pool_map') or {}
+    if any(v == 'Ignore' for v in pm.values()):
+        cfg['pool_map'] = {
+            k: ('Exclude' if v == 'Ignore' else v) for k, v in pm.items()
+        }
+    if cfg.get('default_pool') == 'Ignore':
+        cfg['default_pool'] = 'Exclude'
+    # Strip pools literally named 'Ignore' or 'Exclude' from the registries so
+    # pool enumerators don't render an empty bucket.
+    _SENTINELS = {'ignore', 'exclude'}
+    pools_list = cfg.get('pools')
+    if isinstance(pools_list, list):
+        cfg['pools'] = [
+            p for p in pools_list
+            if not (
+                (isinstance(p, dict)
+                 and str(p.get('name', '')).strip().lower() in _SENTINELS)
+                or (isinstance(p, str) and p.strip().lower() in _SENTINELS)
+            )
+        ]
+    for _key in ('risk_rated', 'not_risk_rated', 'pool_order'):
+        _val = cfg.get(_key)
+        if isinstance(_val, list):
+            cfg[_key] = [
+                p for p in _val
+                if not (isinstance(p, str) and p.strip().lower() in _SENTINELS)
+            ]
     excl = set((cfg.get('excluded_pools') or []))
     if excl:
         pm = cfg.get('pool_map') or {}
@@ -93,7 +122,11 @@ def load_loans(cu, snap, config=None):
     if 'business_risk_rating' not in df.columns:
         df['business_risk_rating'] = None
     excl = set((config.get('excluded_pools') or [])) if config else set()
+    # 'Exclude' is the canonical sentinel; 'Ignore' is the legacy synonym
+    # written to monthly_loan_data when default_pool='Ignore' was active at
+    # import time. Drop both.
     excl.add('Exclude')
+    excl.add('Ignore')
     mask = df['loan_pool'].isin(excl)
     if mask.any():
         df = df.loc[~mask].copy()

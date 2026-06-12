@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import calendar
+import re
 import shutil
 from datetime import date
 from pathlib import Path
@@ -276,11 +277,50 @@ def new_quarter(short_name: str):
         flash("Pick a valid reporting period (YYYY-MM).", "error")
         return redirect(url_for("run.new_quarter", short_name=short_name))
 
-    folder_raw = _normalize_folder_path(request.form.get("folder_path") or "")
+    # ``stage`` distinguishes the initial submit ("") from a resubmit after
+    # the user has filled in the new-loan-code mapping form
+    # (``stage="mapped"``). On the resubmit we skip file staging (files are
+    # already on disk from phase 1) and instead apply the user-supplied
+    # mappings to ``cfg["pool_map"]`` before continuing with import +
+    # reports.
+    stage = (request.form.get("stage") or "").strip()
+
+    if stage == "mapped":
+        posted_codes = request.form.getlist("map_code")
+        posted_pools = request.form.getlist("map_pool")
+        posted_new_pools = request.form.getlist("map_pool_new")
+        new_map = dict(cfg.get("pool_map") or {})
+        added = 0
+        for i, code in enumerate(posted_codes):
+            code = (code or "").strip()
+            if not code:
+                continue
+            sel = (posted_pools[i] if i < len(posted_pools) else "").strip()
+            np_name = (posted_new_pools[i] if i < len(posted_new_pools) else "").strip()
+            pool = np_name if sel == "__new__" else sel
+            if not pool:
+                continue
+            new_map[code] = pool
+            added += 1
+        if added:
+            cfg["pool_map"] = new_map
+            try:
+                config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+                flash(f"Mapped {added} new loan code(s) and saved YAML.", "success")
+            except (OSError, ValueError) as exc:
+                flash(f"Could not save pool mappings: {exc}", "error")
+                return redirect(url_for("run.new_quarter", short_name=short_name))
+        # Skip phase-1 staging block; jump to the import step below.
+        saved = 0
+        copied = 0
+        folder_skipped: list[str] = []
+        # Fall through to the import + report block.
+
+    folder_raw = _normalize_folder_path(request.form.get("folder_path") or "") if stage != "mapped" else ""
 
     # 1) Save uploaded files
     saved = 0
-    files = request.files.getlist("files")
+    files = request.files.getlist("files") if stage != "mapped" else []
     for f in files:
         if not f or not f.filename:
             continue
@@ -313,7 +353,7 @@ def new_quarter(short_name: str):
             except OSError as exc:
                 flash(f"Could not copy {entry.name}: {exc}", "error")
 
-    if saved == 0 and copied == 0:
+    if saved == 0 and copied == 0 and stage != "mapped":
         flash(
             "No files were uploaded or copied. Pick at least one file or "
             "supply a folder path.",
@@ -321,10 +361,11 @@ def new_quarter(short_name: str):
         )
         return redirect(url_for("run.new_quarter", short_name=short_name))
 
-    flash(
-        f"Staged {saved} uploaded + {copied} folder file(s) into Raw_Uploads/{short_name}/.",
-        "success",
-    )
+    if stage != "mapped":
+        flash(
+            f"Staged {saved} uploaded + {copied} folder file(s) into Raw_Uploads/{short_name}/.",
+            "success",
+        )
     if folder_skipped:
         flash(
             f"Skipped non-spreadsheet file(s): {', '.join(folder_skipped[:6])}"
@@ -332,18 +373,87 @@ def new_quarter(short_name: str):
             "info",
         )
 
+    # 2b) Update YAML's ``report_period`` to the user-selected period so
+    # the import step targets the correct snapshot. Filenames without a
+    # parseable date (e.g. ``February Loan File Upload.xlsx``) fall back
+    # to ``report_period``'s year inside ``import_data.process_client``;
+    # if we left a stale period in the YAML those files would be
+    # mis-attributed to a previous year.
+    if period and (cfg.get("report_period") or "") != period:
+        try:
+            cfg["report_period"] = period
+            config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+        except (OSError, ValueError) as exc:
+            flash(f"Could not persist report_period={period}: {exc}", "warning")
+
+    # 2c) On the initial submit, scan the staged files for any new
+    # ``loan_pool_code`` values that aren't yet in ``cfg["pool_map"]``.
+    # If any are found, re-render the page with a mapping section so the
+    # user can assign each new code to an existing pool BEFORE we run
+    # import/reports — otherwise those codes would silently fall through
+    # to ``default_pool`` (often "Ignore") and the report would show a
+    # spurious "Ignore" pool. The user fills the form, submits with
+    # ``stage="mapped"``, and we land at the top of this handler again
+    # to apply the mappings + continue.
+    if stage != "mapped":
+        try:
+            unmapped = _scan_unmapped_loan_codes(cfg, short_name)
+        except Exception:  # noqa: BLE001
+            unmapped = []
+        if unmapped:
+            report_selection = {
+                r: (request.form.get(r) == "on")
+                for r in ("tct", "vizo", "vizo_supp", "impdet")
+            }
+            return render_template(
+                "run/new_quarter.html",
+                short_name=short_name,
+                cfg=cfg,
+                stage="awaiting_mappings",
+                unmapped_codes=unmapped,
+                all_pools=_all_known_pools(cfg, short_name),
+                staged_period=period,
+                staged_reports=report_selection,
+                staged_count=saved + copied,
+            )
+
     # 3) Import
     try:
         n_imported = pipeline_service.run_import(short_name)
         if n_imported:
             flash(f"Imported {n_imported} loan file(s).", "success")
         else:
-            flash(
+            # Surface a hint listing which staged spreadsheets did NOT
+            # match the configured file_pattern so the user can spot
+            # version-suffix / spelling drift quickly.
+            unmatched: list[str] = []
+            try:
+                pat = (cfg or {}).get("file_pattern") or ""
+                if pat:
+                    rx = re.compile(pat)
+                    for entry in upload_dir.iterdir():
+                        if not entry.is_file():
+                            continue
+                        if entry.suffix.lower() not in {".xlsx", ".xlsm", ".xls", ".csv"}:
+                            continue
+                        if not rx.match(entry.name):
+                            unmatched.append(entry.name)
+            except (re.error, OSError):
+                unmatched = []
+            base = (
                 "No loan files were imported. Confirm filenames match the "
                 "configured file_pattern and that a snapshot date can be "
-                "parsed.",
-                "warning",
+                "parsed."
             )
+            if unmatched:
+                preview = ", ".join(unmatched[:5])
+                more = f" (+{len(unmatched) - 5} more)" if len(unmatched) > 5 else ""
+                base += (
+                    f" Files staged but not matched by file_pattern: {preview}{more}."
+                    " Re-run the wizard's Sample step (or hand-edit the YAML)"
+                    " to relax the pattern."
+                )
+            flash(base, "warning")
     except Exception as exc:  # noqa: BLE001
         flash(f"Import failed: {exc}", "error")
         return redirect(url_for("run.new_quarter", short_name=short_name))

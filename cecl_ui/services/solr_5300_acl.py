@@ -3,15 +3,17 @@
 Companion to ``solr_5300_backfill`` and friends. Used by the report
 runtime as a *fallback* source when the credit union's monthly-balance
 file does not include an ACL row for a given quarter end (or includes
-$0). Pre-CECL adopters report the value in ``A719`` ("ALLL"); CECL
-adopters use ``A718A3`` (ACL on Loans) and ``A718A5`` (Total ACL =
-loans + other assets). This module probes all three and returns the
-first non-zero match so it works for both reporting regimes.
+$0). Modern post-CECL filers (both 5300 long form and 5300SF short
+form) report the value in ``A007``; older ``A718A3`` / ``A718A5`` /
+``A719`` fields are probed as backstops for legacy quarters and
+institutions that still file under the pre-2023 Schedule A layout.
+This module probes all four and returns the first non-zero match so
+it works for both reporting regimes.
 
 Public API:
     ``fetch_acl_for_period(charter, period_iso, *, solr_url, core)``
-    -> ``{"value": float, "field": "A718A3"|"A718A5"|"A719", ...}`` or
-    ``None`` when no doc / all candidate fields are zero/missing.
+    -> ``{"value": float, "field": "A007"|"A718A3"|"A718A5"|"A719", ...}``
+    or ``None`` when no doc / all candidate fields are zero/missing.
 
 This is read-only and idempotent. Callers should treat any transport
 error as a soft miss (the report engine continues with whatever
@@ -32,14 +34,19 @@ DEFAULT_SOLR_URL = "http://searchserver1.tctrisk.com:8983/solr"
 DEFAULT_CORE = "ncua"
 
 # Field probe order:
-#   1. A718A3 — ACL on Loans (CECL, post-2023). Matches the 5300 line
-#      labeled "Allowance for Credit Losses on Loans".
-#   2. A718A5 — Total ACL (loans + other assets). For CECL adopters
-#      whose A718A3 is rolled into A718A5 only.
-#   3. A719   — Legacy ALLL (pre-CECL adopters / state-charter CUs
-#      that still file under the old form).
+#   1. A007   — ACL on Loans (current 5300 / 5300SF unified field used
+#      by virtually every CU since the post-CECL form revisions).
+#      Empirically populated for both small ($15M asset) and large
+#      ($300M+) filers. This is the canonical post-2023 location.
+#   2. A718A3 — ACL on Loans (legacy long-form CECL field, retained
+#      for older quarters / institutions that still report under the
+#      historical Schedule A layout).
+#   3. A718A5 — Total ACL (loans + other assets). For CECL adopters
+#      whose ACL on Loans is rolled into the total only.
+#   4. A719   — Legacy ALLL (pre-CECL adopters / state-charter CUs
+#      that still file under the pre-2023 form).
 # First non-zero positive match wins.
-_ACL_FIELD_ORDER: tuple[str, ...] = ("A718A3", "A718A5", "A719")
+_ACL_FIELD_ORDER: tuple[str, ...] = ("A007", "A718A3", "A718A5", "A719")
 
 
 def _quarter_end_iso(period_iso: str) -> str | None:

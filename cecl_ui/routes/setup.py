@@ -569,6 +569,18 @@ def _wizard_ctx(active: str) -> dict[str, Any]:
             except Exception:  # noqa: BLE001
                 # Self-heal is best-effort; never break the wizard.
                 pass
+            # Flat pool-seed self-heal: drafts saved before the
+            # flat-hist-bal pool seeding shipped have populated
+            # parsed_pool_labels but empty pool_settings. Read-only on
+            # state (no folder I/O) so it's cheap to run on every GET.
+            try:
+                _flat_msgs = auto_setup.selfheal_flat_pool_seed_from_state(st)
+                if _flat_msgs:
+                    _save_state(st)
+                    for _m in _flat_msgs:
+                        flash(f"Auto-scan: {_m}", "success")
+            except Exception:  # noqa: BLE001
+                pass
             hil_needs = auto_setup.compute_hil_needs(st)
             need_keys = {n["step_key"] for n in hil_needs}
             # Severity-aware HIL set: any 'required' entry blocks the
@@ -6676,6 +6688,29 @@ def step3_historical():
             if name:
                 flash(f"Removed {name}.", "success")
 
+        elif action in ("clear_all_co_monthly", "clear_all_recov_monthly"):
+            kind = "co" if action == "clear_all_co_monthly" else "recov"
+            list_key = (
+                "monthly_co_files" if kind == "co" else "monthly_recov_files"
+            )
+            kind_label = "charge-off" if kind == "co" else "recoveries"
+            hs = state.get("hist_scan") or {}
+            prev_n = len(hs.get(list_key) or [])
+            hs[list_key] = []
+            state["hist_scan"] = hs
+            # Also drop any cached scan-results table so the page redraws clean.
+            state.pop(_co_recov_scan_state_key(kind, "monthly"), None)
+            if prev_n:
+                flash(
+                    f"Cleared {prev_n} monthly {kind_label} file(s).",
+                    "success",
+                )
+            else:
+                flash(
+                    f"No monthly {kind_label} files to clear.",
+                    "info",
+                )
+
         elif action == "process_co_monthly":
             res = monthly_co_recov_aggregator.aggregate_all(state, "co")
             state["monthly_co_aggregate"] = res
@@ -7941,6 +7976,89 @@ def step_co_recov():
             else:
                 flash("Choose a recoveries file to upload.", "error")
 
+        elif action == "use_co_files_for_recov":
+            # Many CUs publish a single workbook that holds both charge-off
+            # rows AND recovery rows (e.g. Destinations CU's
+            # "Recoveries-Chg-offs.xls" files). Mirror the Charge-Off file
+            # list into the Recoveries list so the user doesn't have to
+            # re-upload or re-scan.
+            import shutil
+            from pathlib import Path as _P
+            uploads = state.setdefault("sample_uploads", {})
+            co_entries = list(uploads.get("co_files") or [])
+            if not co_entries:
+                flash(
+                    "No Charge-Off files to copy. Upload or scan some first.",
+                    "error",
+                )
+            else:
+                existing_recov = list(uploads.get("recov_files") or [])
+                existing_names = {e.get("name") for e in existing_recov}
+                dest_dir = _SAMPLE_DIR / "sample_recov"
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                copied = 0
+                skipped = 0
+                for entry in co_entries:
+                    name = entry.get("name") or ""
+                    src = entry.get("path") or ""
+                    if not name:
+                        continue
+                    if name in existing_names:
+                        skipped += 1
+                        continue
+                    target = dest_dir / name
+                    try:
+                        src_p = _P(src)
+                        if src_p.exists() and target.resolve() != src_p.resolve():
+                            shutil.copy2(src_p, target)
+                    except Exception:  # noqa: BLE001
+                        # If the staged CO copy is missing, fall back to
+                        # registering the same path so the entry still has
+                        # something to point at. The reader will surface a
+                        # clear "missing file" error if it's truly gone.
+                        target = _P(src) if src else (dest_dir / name)
+                    existing_recov.append({"name": name, "path": str(target)})
+                    existing_names.add(name)
+                    copied += 1
+                uploads["recov_files"] = existing_recov
+                # Clear the "no recoveries" flag if the user previously
+                # checked it — they now have files to process.
+                if copied:
+                    uploads["no_recoveries"] = False
+                # Seed Recoveries column-mapping suggestions if still empty.
+                rc = state.get("recov_columns") or {}
+                if not (rc.get("code_col") or rc.get("amount_col") or rc.get("date_col")):
+                    try:
+                        sug = co_recov_parser._suggest_columns(
+                            existing_recov[-1]["path"]
+                        )
+                        existing = state.get("recov_columns") or {}
+                        existing.update({
+                            k: v for k, v in sug.items()
+                            if k not in existing or existing.get(k) in (None, "")
+                        })
+                        state["recov_columns"] = existing
+                    except Exception:  # noqa: BLE001
+                        pass
+                if copied and skipped:
+                    flash(
+                        f"Copied {copied} file(s) from Charge-Offs "
+                        f"({skipped} already in the Recoveries list).",
+                        "success",
+                    )
+                elif copied:
+                    flash(
+                        f"Copied {copied} file(s) from Charge-Offs to Recoveries.",
+                        "success",
+                    )
+                else:
+                    flash(
+                        "All Charge-Off files were already in the Recoveries list.",
+                        "info",
+                    )
+                _save_state(state)
+            return redirect(url_for("setup.step_co_recov"))
+
         elif action in ("save_co_columns", "save_recov_columns"):
             kind = "co" if action == "save_co_columns" else "recov"
             cfg_key = "co_columns" if kind == "co" else "recov_columns"
@@ -8110,6 +8228,41 @@ def step_co_recov():
                     except Exception:  # noqa: BLE001
                         pass
                 flash(f"Removed {target_name}.", "success")
+            _save_state(state)
+            return redirect(url_for("setup.step_co_recov"))
+
+        elif action in ("clear_all_sample_co", "clear_all_sample_recov"):
+            kind = "co" if action == "clear_all_sample_co" else "recov"
+            list_key = "co_files" if kind == "co" else "recov_files"
+            kind_label = "charge-off" if kind == "co" else "recoveries"
+            uploads = state.setdefault("sample_uploads", {})
+            current = uploads.get(list_key) or []
+            prev_n = len(current)
+            # Best-effort: delete each staged copy from %TEMP%.
+            for entry in current:
+                p = entry.get("path") or ""
+                if not p:
+                    continue
+                try:
+                    from pathlib import Path as _P
+                    _p = _P(p)
+                    if _p.exists() and _SAMPLE_DIR in _p.parents:
+                        _p.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+            uploads[list_key] = []
+            # Also drop the cached scan-results table so the page redraws clean.
+            state.pop(_co_recov_scan_state_key(kind, "sample"), None)
+            if prev_n:
+                flash(
+                    f"Cleared {prev_n} {kind_label} file(s).",
+                    "success",
+                )
+            else:
+                flash(
+                    f"No {kind_label} files to clear.",
+                    "info",
+                )
             _save_state(state)
             return redirect(url_for("setup.step_co_recov"))
 
@@ -10057,6 +10210,79 @@ def step4_pools():
             else:
                 flash("No new raw codes to add &mdash; all sample codes are "
                       "already in the map.", "info")
+            return redirect(url_for("setup.step4_pools"))
+
+        # ---- Clear pool mappings (undo a polluted upload) ----------
+        # Wipes all values in state["pool_map"] back to empty so the
+        # user can re-map from scratch. Drops any staged upload review
+        # AND deletes saved poolmap_*.xlsx files in the samples dir
+        # so a stale file from a prior CU can't leak again.
+        if action == "clear_pool_map":
+            scope = (request.form.get("clear_scope") or "values").strip().lower()
+            pool_map = state.get("pool_map") or {}
+            cleared_count = 0
+            if scope == "all":
+                # Drop every code -> pool entry entirely
+                cleared_count = len(pool_map)
+                state["pool_map"] = {}
+            else:
+                # Keep the codes (so the user doesn't lose the list);
+                # just blank the pool-name values.
+                for code in list(pool_map.keys()):
+                    if pool_map.get(code):
+                        cleared_count += 1
+                    pool_map[code] = ""
+                state["pool_map"] = pool_map
+            # Drop staged upload review + saved poolmap files in TEMP
+            staged = state.pop("pool_map_upload", None)
+            removed_files: list[str] = []
+            try:
+                if _SAMPLE_DIR.exists():
+                    for p in _SAMPLE_DIR.glob("poolmap_*.xlsx"):
+                        try:
+                            p.unlink()
+                            removed_files.append(p.name)
+                        except OSError:
+                            pass
+                    for p in _SAMPLE_DIR.glob("poolmap_*.xls"):
+                        try:
+                            p.unlink()
+                            removed_files.append(p.name)
+                        except OSError:
+                            pass
+                    for p in _SAMPLE_DIR.glob("poolmap_*.csv"):
+                        try:
+                            p.unlink()
+                            removed_files.append(p.name)
+                        except OSError:
+                            pass
+            except Exception:  # noqa: BLE001
+                pass
+            _save_state(state)
+            parts = []
+            if cleared_count:
+                if scope == "all":
+                    parts.append(
+                        f"removed {cleared_count} code &rarr; pool entries"
+                    )
+                else:
+                    parts.append(
+                        f"cleared pool name on {cleared_count} code(s)"
+                    )
+            if staged:
+                parts.append("discarded staged upload review")
+            if removed_files:
+                parts.append(
+                    f"deleted {len(removed_files)} cached upload file(s)"
+                )
+            if parts:
+                flash(
+                    "Pool mappings reset: " + ", ".join(parts) + ".",
+                    "success",
+                )
+            else:
+                flash("Nothing to clear &mdash; pool map was already empty.",
+                      "info")
             return redirect(url_for("setup.step4_pools"))
 
         # ---- Upload a code -> pool-name map file -------------------
@@ -12075,6 +12301,17 @@ def step10_review():
                     # Non-fatal: completion stamp is best-effort and
                     # must not block the redirect to the run flow.
                     pass
+                # Auto-run the importer so the user doesn't have to make
+                # an extra click on the run page after finishing setup.
+                # Best-effort: any failure flashes an error but still
+                # delivers the user to the run dashboard so they can
+                # diagnose / re-run from there.
+                n_imported = 0
+                import_error: str | None = None
+                try:
+                    n_imported = pipeline_service.run_import(sn)
+                except Exception as exc:  # noqa: BLE001
+                    import_error = str(exc) or exc.__class__.__name__
                 # Done — wipe wizard state, send user to the run flow for this CU.
                 session.pop(STATE_KEY, None)
                 msg = f"Saved {target.name}. Raw_Uploads/{sn}/ folder created."
@@ -12084,6 +12321,26 @@ def step10_review():
                         preview += f", … (+{n_copied - 4} more)"
                     msg += f" Copied {n_copied} sample file(s): {preview}."
                 flash(msg, "success")
+                if import_error:
+                    flash(
+                        f"Setup saved, but the auto-import failed: "
+                        f"{import_error}. You can re-run the importer "
+                        f"from the run page.",
+                        "error",
+                    )
+                elif n_imported:
+                    flash(
+                        f"Imported {n_imported} loan(s) from "
+                        f"Raw_Uploads/{sn}/.",
+                        "success",
+                    )
+                else:
+                    flash(
+                        "No loan files were imported automatically. "
+                        "Use the run page to upload or re-scan once "
+                        "files are available.",
+                        "info",
+                    )
                 return redirect(
                     url_for("run.client_dashboard", short_name=sn)
                 )

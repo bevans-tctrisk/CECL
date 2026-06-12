@@ -9,21 +9,22 @@
       "curbal": 18,
       "curr bal": 1,
       "current bal": 3,
-      "current balance": 2,
+      "current balance": 3,
       "current balance amount": 8,
       "current loan bal": 4,
-      "current loan balance": 6,
+      "current loan balance": 10,
       "currupb": 8,
       "loan balance": 29,
       "original balance as of 11/30/21": 5
     },
     "current_fico_score": {
-      "credit score": 5
+      "credit score": 9
     },
     "days_delinquent": {
       "acctbs": 13,
       "col_x": 4,
-      "days delinquent": 6,
+      "day delinquent": 4,
+      "days delinquent": 7,
       "days deliquent": 2,
       "days dq": 3,
       "days past due": 2,
@@ -41,11 +42,11 @@
       "cash annual interest rate": 8,
       "int rate": 4,
       "int_rate": 2,
-      "interest rate": 16,
+      "interest rate": 20,
       "interest rate (apr)": 6,
       "interest rate code": 3,
       "noteintrate": 5,
-      "rate": 8
+      "rate": 9
     },
     "loan_pool_code": {
       "acct type": 2,
@@ -56,7 +57,7 @@
       "loan collateral code": 5,
       "loan purpose": 8,
       "loan type": 38,
-      "loan type code": 8,
+      "loan type code": 13,
       "mbr state code": 6,
       "type": 12,
       "type of mortgage": 1
@@ -67,13 +68,15 @@
       "card account number": 8,
       "cc note last 4": 10,
       "ln_sfx": 2,
+      "loan number": 1,
       "pool": 8,
       "type": 5
     },
     "member_number": {
       "account": 6,
       "account #": 7,
-      "account number": 20,
+      "account number": 21,
+      "acct #": 4,
       "acct nbr": 10,
       "acctbs": 18,
       "acctnbr": 5,
@@ -87,20 +90,20 @@
     "open_date": {
       "card open date": 8,
       "contractdate": 5,
-      "date of loan": 6,
+      "date of loan": 10,
       "loan date": 2,
       "loan original date": 29,
       "open date": 6,
       "opendat": 18,
       "orig_ln_dt": 2,
-      "original date": 3,
+      "original date": 4,
       "original loan date": 4,
       "origination date": 2
     },
     "original_fico_score": {
       "application_creditscore": 5,
-      "credit score": 49,
-      "fico": 3,
+      "credit score": 53,
+      "fico": 4,
       "inv": 8,
       "risksc": 8,
       "user_defined_field_7": 2
@@ -113,15 +116,16 @@
       "loan#": 8,
       "orig nbr pymts": 13,
       "orig_ln_amt": 2,
+      "original amount": 1,
       "original date": 3,
-      "original loan amount": 26
+      "original loan amount": 30
     },
     "total_available_credit": {
-      "credit limit": 51,
+      "credit limit": 55,
       "credit line amount": 8,
       "creditlimitamt": 5,
       "dblimt": 9,
-      "limit": 3,
+      "limit": 4,
       "ln_limit": 2
     }
   },
@@ -129,6 +133,7 @@
     "account": "Account",
     "account #": "Account #",
     "account number": "Account Number",
+    "acct #": "Acct #",
     "acct nbr": "ACCT NBR",
     "acct number": "ACCT NUMBER",
     "acct type": "Acct Type",
@@ -166,6 +171,7 @@
     "currupb": "CURRUPB",
     "customer #": "CUSTOMER #",
     "date of loan": "Date of Loan",
+    "day delinquent": "Day Delinquent",
     "days delinquent": "Days Delinquent",
     "days deliquent": "Days Deliquent",
     "days dq": "Days DQ",
@@ -193,6 +199,7 @@
     "loan balance": "LOAN BALANCE",
     "loan collateral code": "Loan Collateral Code",
     "loan date": "Loan Date",
+    "loan number": "Loan Number",
     "loan original amnt": "LOAN ORIGINAL AMNT",
     "loan original date": "LOAN ORIGINAL DATE",
     "loan purpose": "Loan Purpose",
@@ -210,6 +217,7 @@
     "orig nbr pymts": "ORIG NBR PYMTS",
     "orig_ln_amt": "orig_ln_amt",
     "orig_ln_dt": "orig_ln_dt",
+    "original amount": "Original Amount",
     "original balance as of 11/30/21": "Original Balance As of 11/30/21",
     "original date": "Original Date",
     "original loan amount": "Original Loan Amount",
@@ -223,6 +231,6 @@
     "type of mortgage": "Type of Mortgage",
     "user_defined_field_7": "User_Defined_Field_7"
   },
-  "updated_at": "2026-06-10T22:09:33",
+  "updated_at": "2026-06-11T20:42:27",
   "version": 1
 }

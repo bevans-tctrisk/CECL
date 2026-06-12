@@ -211,6 +211,10 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
     # NCUA charter number — only emit when present.
     if state.get("charter_number"):
         cfg["charter_number"] = str(state["charter_number"])
+    # Report period (YYYY-MM) — used as a snapshot fallback when a
+    # loan-data filename has a month name but no year.
+    if state.get("report_period"):
+        cfg["report_period"] = str(state["report_period"]).strip()
     cfg.update({
         "file_pattern": state["file_pattern"],
         "date_pattern": state["date_pattern"],

@@ -2680,6 +2680,14 @@
             </div>
           {% endfor %}
         </div>
+        <form method="post" style="margin-top:8px;"
+              onsubmit="return confirm('Remove all {{ co_monthly|length }} monthly charge-off file(s) from this step? Your column mappings will be preserved if you re-add them.');">
+          <input type="hidden" name="action" value="clear_all_co_monthly">
+          <button class="btn btn-link" type="submit"
+                  style="color:#a04;">
+            Clear all files
+          </button>
+        </form>
       </details>
     {% else %}
       <p class="muted" style="margin-top:8px;">
@@ -3698,6 +3706,14 @@
               </div>
             {% endfor %}
           </div>
+          <form method="post" style="margin-top:8px;"
+                onsubmit="return confirm('Remove all {{ recov_monthly|length }} monthly recoveries file(s) from this step? Your column mappings will be preserved if you re-add them.');">
+            <input type="hidden" name="action" value="clear_all_recov_monthly">
+            <button class="btn btn-link" type="submit"
+                    style="color:#a04;">
+              Clear all files
+            </button>
+          </form>
         </details>
       {% else %}
         <p class="muted" style="margin-top:8px;">

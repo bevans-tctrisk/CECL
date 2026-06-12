@@ -215,7 +215,12 @@ def _apply_excluded_pools(df, config):
     if df is None or df.empty or 'loan_pool' not in df.columns:
         return df
     excl = set((config.get('excluded_pools') or [])) if config else set()
+    # 'Exclude' is the canonical sentinel; 'Ignore' is the legacy/wizard
+    # synonym (load_config rewrites Ignore -> Exclude in pool_map and
+    # default_pool, but historical DB rows imported under default_pool='Ignore'
+    # still carry loan_pool='Ignore' verbatim). Treat both as drops.
     excl.add('Exclude')
+    excl.add('Ignore')
     mask = df['loan_pool'].isin(excl)
     if not mask.any():
         return df
@@ -10622,10 +10627,12 @@ def generate_report(client_name, snapshot_date=None, reports=None):
     # report engine can pull the value directly from NCUA Form 5300.
     # Opt-in per CU via ``cfg['acl']['use_5300_fallback']``; requires
     # ``cfg['charter_number']`` to know which CU to query. The fetcher
-    # probes A718A3 (CECL ACL on Loans) → A718A5 (Total ACL) → A719
-    # (legacy ALLL) so it works for both reporting regimes. Only
-    # missing or zero quarter-end values are filled — explicit user
-    # values from the file / YAML history always win.
+    # probes A007 (current 5300 / 5300SF unified ACL on Loans) →
+    # A718A3 (legacy CECL Schedule A) → A718A5 (Total ACL) → A719
+    # (legacy ALLL) so it works for every reporting regime since the
+    # 2023 form revision. Only missing or zero quarter-end values are
+    # filled — explicit user values from the file / YAML history
+    # always win.
     acl_cfg = config.get('acl') or {}
     if acl_cfg.get('use_5300_fallback') and config.get('charter_number'):
         try:
@@ -10674,6 +10681,11 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 print(f"    5300 ACL fallback: filled {filled} quarter(s) "
                       f"for charter {config['charter_number']} "
                       f"(field {field_used or 'mixed'})")
+            else:
+                print(f"    5300 ACL fallback: no non-zero ACL value "
+                      f"found in Solr for charter {config['charter_number']} "
+                      f"across {len(wanted)} quarter(s) "
+                      f"(probed A007, A718A3, A718A5, A719)")
         except Exception as _e:  # noqa: BLE001
             print(f"    5300 ACL fallback skipped: {_e}")
 

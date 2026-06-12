@@ -308,6 +308,13 @@ def map_pool_codes(series, config):
     raw = raw.apply(lambda x: str(int(float(x))) if x.replace('.', '', 1).isdigit() else x)
     pool_map = {str(k): v for k, v in config['pool_map'].items()}
     default = config.get('default_pool', 'Other/Uncategorized')
+    # Normalize the legacy 'Ignore' sentinel to the canonical 'Exclude' so
+    # downstream report filters (generate_report._apply_excluded_pools) drop
+    # these rows uniformly. Future re-imports will write 'Exclude' to the DB
+    # and old 'Ignore'-tagged rows are also filtered at report time.
+    pool_map = {k: ('Exclude' if v == 'Ignore' else v) for k, v in pool_map.items()}
+    if default == 'Ignore':
+        default = 'Exclude'
     return raw.map(pool_map).fillna(default)
 
 
@@ -1355,6 +1362,51 @@ def process_client(client_name, specific_file=None):
         if not snapshot_date and date_source != relative_file:
             # Fallback: allow a filename regex to match a dated folder segment in recursive paths.
             snapshot_date = extract_snapshot_date(relative_file, config)
+        if not snapshot_date:
+            # Final fallback: filename has no parseable date but the config
+            # has an explicit ``report_period``. Two cases handled:
+            #   (a) filename mentions the report_period's own month — use
+            #       that month-end (e.g. ``December Loan File - Upload``
+            #       against ``report_period: 2025-12``).
+            #   (b) filename mentions ANY month name (Jan-Dec) — use that
+            #       month with the report_period's YEAR. Covers monthly
+            #       drops within a quarterly run (e.g. ``February Loan
+            #       File Upload`` and ``March Loan File Upload`` staged
+            #       alongside the Jan file when running ``2026-03``).
+            # The report_period month is preferred if present, falling
+            # through to the first other month name otherwise.
+            rp = str(config.get('report_period') or '').strip()
+            rp_match = re.match(r'^(20\d{2})-(0[1-9]|1[0-2])$', rp)
+            if rp_match:
+                rp_year = int(rp_match.group(1))
+                rp_month = int(rp_match.group(2))
+                src_lower = str(date_source).lower()
+                candidate_month: int | None = None
+                rp_names = (
+                    calendar.month_name[rp_month].lower(),
+                    calendar.month_abbr[rp_month].lower(),
+                )
+                if any(name and re.search(rf'(?<![a-z]){name}(?![a-z])', src_lower)
+                       for name in rp_names if name):
+                    candidate_month = rp_month
+                else:
+                    for m in range(1, 13):
+                        if m == rp_month:
+                            continue
+                        names = (
+                            calendar.month_name[m].lower(),
+                            calendar.month_abbr[m].lower(),
+                        )
+                        if any(name and re.search(rf'(?<![a-z]){name}(?![a-z])', src_lower)
+                               for name in names if name):
+                            candidate_month = m
+                            break
+                if candidate_month is not None:
+                    last_day = calendar.monthrange(rp_year, candidate_month)[1]
+                    snapshot_date = date(rp_year, candidate_month, last_day).isoformat()
+                    matched_name = calendar.month_name[candidate_month].lower()
+                    print(f"    Fallback: matched month name '{matched_name}' to "
+                          f"report_period year {rp_year} -> {snapshot_date}")
         if not snapshot_date:
             print(f"    SKIPPED: Could not extract date from filename")
             continue

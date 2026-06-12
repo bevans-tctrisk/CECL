@@ -8,6 +8,82 @@
     import them, and generate reports in one pass.
   </p>
 
+{% if stage == "awaiting_mappings" %}
+  <div style="background:#fff8e7; border:1px solid #d6940a; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#8a5a00;">⚠ New loan code(s) detected</h3>
+    <p style="margin:6px 0;">
+      Staged {{ staged_count }} file(s). Found
+      <strong>{{ unmapped_codes|length }} loan code(s)</strong>
+      in the new data that aren't yet in this CU's pool map. Without a
+      mapping they would silently fall through to
+      <code>{{ cfg.default_pool or 'Ignore' }}</code> and create a spurious
+      pool in the report.
+    </p>
+    <p style="margin:6px 0;">
+      Pick a pool for each new code below. Pick
+      <em>{{ cfg.default_pool or 'Ignore' }}</em> intentionally if you want
+      that code excluded from the analysis.
+    </p>
+  </div>
+
+  <form method="post"
+        action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+    <input type="hidden" name="stage" value="mapped">
+    <input type="hidden" name="period" value="{{ staged_period }}">
+    {% for r in ['tct','vizo','vizo_supp','impdet'] %}
+      {% if staged_reports and staged_reports.get(r) %}
+        <input type="hidden" name="{{ r }}" value="on">
+      {% endif %}
+    {% endfor %}
+
+    <table class="data-table" style="margin-bottom:18px;">
+      <thead>
+        <tr>
+          <th>Loan Code</th>
+          <th>Occurrences</th>
+          <th>Map to Pool</th>
+          <th>or New Pool Name</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in unmapped_codes %}
+        <tr>
+          <td>
+            <code>{{ u.code }}</code>
+            <input type="hidden" name="map_code" value="{{ u.code }}">
+          </td>
+          <td>{{ u.count }}</td>
+          <td>
+            <select name="map_pool">
+              <option value="" selected>— choose pool —</option>
+              {% for p in all_pools %}
+                <option value="{{ p }}">{{ p }}</option>
+              {% endfor %}
+              <option value="{{ cfg.default_pool or 'Ignore' }}">{{ cfg.default_pool or 'Ignore' }}</option>
+              <option value="__new__">+ New pool…</option>
+            </select>
+          </td>
+          <td>
+            <input type="text" name="map_pool_new" placeholder="(only if “New pool…” above)" style="width:240px;">
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div style="display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit">Save mappings &amp; Run</button>
+      <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
+    </div>
+    <p class="muted" style="margin-top:8px;">
+      Selecting <em>+ New pool…</em> creates a fresh pool. Reporting
+      conventions (risk-rated, life-of-loan, ACL months) for new pools
+      can be configured later on the
+      <a href="{{ url_for('run.edit_pool_map', short_name=short_name) }}">Pool Map editor</a>
+      or the wizard.
+    </p>
+  </form>
+{% else %}
   <form method="post"
         enctype="multipart/form-data"
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
@@ -59,5 +135,6 @@
       <a class="btn" href="{{ url_for('run.select_cu') }}">&larr; Back</a>
     </div>
   </form>
+{% endif %}
 </div>
 {% endblock %}
