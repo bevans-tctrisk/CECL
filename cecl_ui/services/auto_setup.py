@@ -1946,6 +1946,327 @@ def selfheal_hist_scan_from_folder(state: dict[str, Any]) -> list[str]:
     return msgs
 
 
+def selfheal_single_hist_bal_layout(state: dict[str, Any]) -> list[str]:
+    """Re-run ``monthly_bal_parser.analyse_file`` on
+    ``monthly_bal.saved_path`` when a draft has
+    ``monthly_bal.source == 'single'`` + a saved file path but
+    ``parsed_pool_labels`` is empty (or ``pool_name_col`` points at a
+    column that yields no labels). Targets two stale-draft cases:
+
+      * Older drafts seeded by an earlier ``analyse_file`` whose
+        column-election heuristic picked column A on a workbook with
+        loan codes in A and descriptive labels in B (e.g. Emergency
+        Responders CU's Vizo-style ``Historical Balances`` workbook).
+      * Drafts saved before a parser fix landed.
+
+    Always runs (no auto-scan gate) so user-uploaded single workbooks
+    self-repair too. Read-only on the workbook (load_workbook
+    read_only=True). Never overwrites user-entered ``pool_map``
+    entries — only fills in blanks for newly-discovered labels.
+    """
+    mb = state.get("monthly_bal") or {}
+    if (mb.get("source") or "") != "single":
+        return []
+    saved_path = mb.get("saved_path") or ""
+    if not saved_path:
+        return []
+    # Only heal when there's actually nothing useful in state already.
+    labels = mb.get("parsed_pool_labels") or []
+    if labels:
+        return []
+    try:
+        from pathlib import Path as _Path
+        if not _Path(saved_path).exists():
+            return []
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        from cecl_ui.services import monthly_bal_parser as _mbp
+        an = _mbp.analyse_file(saved_path)
+    except Exception:  # noqa: BLE001
+        return []
+    if not an.get("ok"):
+        return []
+    new_labels = an.get("parsed_pool_labels") or []
+    if not new_labels:
+        return []
+    msgs: list[str] = []
+    prior_pnc = mb.get("pool_name_col") or ""
+    new_pnc = an.get("pool_name_col") or ""
+    new_sheet = an.get("sheet") or ""
+    new_hdr = int(an.get("header_row") or 0)
+    new_fdc = an.get("first_date_col") or ""
+    if new_sheet:
+        mb["sheet"] = new_sheet
+    if new_hdr:
+        mb["header_row"] = new_hdr
+    if new_pnc:
+        mb["pool_name_col"] = new_pnc
+    if new_fdc:
+        mb["first_date_col"] = new_fdc
+    mb["parsed_pool_labels"] = new_labels
+    if an.get("dates"):
+        mb["parsed_dates"] = an.get("dates") or []
+    # Seed pool_map for the newly-parsed labels without overwriting
+    # any user selection. Use seed_pool_map to fuzzy-match against
+    # WARM balance_title_map + historical hist_pool_map so common
+    # labels get auto-mapped where possible.
+    existing = mb.get("pool_map") or {}
+    try:
+        from cecl_ui.services import monthly_bal_parser as _mbp2
+        _combined: dict[str, str] = {}
+        for _k, _v in (state.get("balance_title_map") or {}).items():
+            if _k:
+                _combined[_k] = (_v or "")
+        _hpm = state.get("hist_pool_map") or {}
+        for _k, _v in (_hpm.get("mapping") or {}).items():
+            if _k and _k not in _combined:
+                _combined[_k] = (_v or "")
+        _seeded, _status = _mbp2.seed_pool_map(new_labels, _combined)
+        mb["label_status"] = _status
+    except Exception:  # noqa: BLE001
+        _seeded = {lab: "" for lab in new_labels}
+    seed_changed = False
+    for lab, val in _seeded.items():
+        if lab and lab not in existing:
+            existing[lab] = val or ""
+            seed_changed = True
+    if seed_changed:
+        mb["pool_map"] = existing
+    state["monthly_bal"] = mb
+    if prior_pnc and new_pnc and prior_pnc.upper() != new_pnc.upper():
+        msgs.append(
+            f"Historical balance layout: re-detected label column "
+            f"{new_pnc} (was {prior_pnc}); recovered {len(new_labels)} "
+            f"pool label(s) from "
+            f"{mb.get('filename') or _Path(saved_path).name}."
+        )
+    else:
+        msgs.append(
+            f"Historical balance layout: recovered "
+            f"{len(new_labels)} pool label(s) from "
+            f"{mb.get('filename') or _Path(saved_path).name} "
+            f"(label column {new_pnc or 'A'})."
+        )
+    return msgs
+
+
+# ---------------------------------------------------------------------------
+# Heuristic auto-mapping of balance labels to pool_settings names
+# ---------------------------------------------------------------------------
+
+# Category keyword patterns. Order in ``_CATEGORY_ORDER`` matters:
+# more specific categories are evaluated first so that, e.g.,
+# "new recreational vehicle" classifies as ``recreational``, not
+# ``new_vehicle``. Vehicle handling is special-cased after the
+# recreational check (see ``_classify_label_category``) so labels
+# with truncated suffixes (e.g. ``AUTO SPECIAL - USED A``) still
+# resolve correctly via ``new``/``used`` qualifier detection.
+_LABEL_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "credit_card": (
+        r"\b(credit\s*card|ccard|visa\s*card|mastercard)\b",
+    ),
+    "real_estate": (
+        r"\b(mortgage|first\s*lien|1st\s*lien|junior\s*lien|"
+        r"2nd\s*lien|home\s*equity|heloc|real\s*estate|residential|"
+        r"1-4\s*family|unimproved|construction\s*loan|land\s*loan)\b",
+    ),
+    "share_secured": (
+        r"\b(share\s*secured|share\s*draft|share\s*pledge|"
+        r"cd\s*secured|certificate\s*secured|shr\s*sec)\b",
+    ),
+    "recreational": (
+        r"\b(motorcycle|motor\s*cycle|atv|snowmobile|boat|marine|"
+        r"recreational|equipment|trailer|jet\s*ski|camper|rv)\b",
+    ),
+    "unsecured": (
+        r"\b(signature|unsecured|personal\s*loan|christmas\s*loan|"
+        r"holiday\s*loan|short[\s\-]*term|rapid|cosigner|"
+        r"co[\s\-]?signer)\b",
+        r"\bline\s*of\s*credit\b",
+        r"\bloc\b",
+    ),
+    "commercial": (
+        r"\b(business\s*loan|commercial|sba|business\s*line)\b",
+    ),
+    "aggregate": (
+        r"\b(totals?|subtotals?|grand[\s_\-]*totals?|"
+        r"all[\s_\-]*loans?|loan[\s_\-]*account[\s_\-]*totals?)\b",
+    ),
+    "other_consumer": (
+        r"\b(other\s+consumer|miscellaneous|misc\s+loan|"
+        r"consumer\s+loan)\b",
+    ),
+}
+
+_VEHICLE_KEYWORDS_RX = re.compile(
+    r"\b(vehicles?|vehciles?|auto|autos|car|cars|truck|trucks|van|vans)\b",
+    re.IGNORECASE,
+)
+_NEW_QUALIFIER_RX = re.compile(r"\bnew\b", re.IGNORECASE)
+_USED_QUALIFIER_RX = re.compile(r"\bused\b", re.IGNORECASE)
+
+# Categories evaluated BEFORE vehicle-context detection so e.g.
+# "new recreational vehicle" picks recreational over new_vehicle.
+_CATEGORY_ORDER_HIGH: tuple[str, ...] = (
+    "credit_card",
+    "real_estate",
+    "share_secured",
+    "recreational",
+)
+# Categories evaluated AFTER vehicle-context detection.
+_CATEGORY_ORDER_LOW: tuple[str, ...] = (
+    "unsecured",
+    "commercial",
+    "aggregate",
+    "other_consumer",
+)
+
+
+def _classify_label_category(text: str) -> str:
+    """Return the first matching category for ``text``, or ``""``.
+
+    Vehicle classification is special-cased: any label with a vehicle
+    keyword (``auto``/``vehicle``/``car``/``truck``/etc, including the
+    common typo ``vehciles``) plus a ``new``/``used`` qualifier
+    anywhere in the string resolves to ``new_vehicle`` /
+    ``used_vehicle`` even when the qualifier is truncated (e.g.
+    ``AUTO SPECIAL - USED A`` from a 20-char-truncated Symitar export).
+    """
+    if not text:
+        return ""
+    s = str(text).strip().lower()
+    if not s:
+        return ""
+    # Pass 1: high-specificity categories (recreational beats vehicle).
+    for cat in _CATEGORY_ORDER_HIGH:
+        for pat in _LABEL_KEYWORDS.get(cat, ()):
+            try:
+                if re.search(pat, s):
+                    return cat
+            except re.error:  # pragma: no cover
+                continue
+    # Pass 2: vehicle context with new/used qualifier.
+    if _VEHICLE_KEYWORDS_RX.search(s):
+        has_new = bool(_NEW_QUALIFIER_RX.search(s))
+        has_used = bool(_USED_QUALIFIER_RX.search(s))
+        if has_used and not has_new:
+            return "used_vehicle"
+        if has_new and not has_used:
+            return "new_vehicle"
+        if has_new and has_used:
+            # Ambiguous; prefer used (more conservative provisioning).
+            return "used_vehicle"
+        return "vehicle_unspecified"
+    # Pass 3: low-specificity categories.
+    for cat in _CATEGORY_ORDER_LOW:
+        for pat in _LABEL_KEYWORDS.get(cat, ()):
+            try:
+                if re.search(pat, s):
+                    return cat
+            except re.error:  # pragma: no cover
+                continue
+    return ""
+
+
+def _build_pool_category_index(
+    pool_settings: list[dict[str, Any]] | None,
+) -> dict[str, str]:
+    """Return ``{category: pool_name}`` for the configured pools.
+
+    Pools without a category match are skipped. If multiple pools share
+    a category the first one wins (preserves user ordering on Step 2).
+    """
+    out: dict[str, str] = {}
+    for ps in (pool_settings or []):
+        nm = (ps.get("name") if isinstance(ps, dict) else "") or ""
+        nm = nm.strip()
+        if not nm:
+            continue
+        cat = _classify_label_category(nm)
+        if cat and cat not in out:
+            out[cat] = nm
+    return out
+
+
+def _suggest_pool_for_label(
+    label: str,
+    pool_index: dict[str, str],
+) -> str:
+    """Best-effort pool-name suggestion for ``label``.
+
+    Returns ``""`` when no confident match. Vehicle labels missing
+    new/used qualifiers are routed to whichever vehicle pool exists,
+    preferring ``other_consumer`` as a last-resort fallback. Aggregate
+    rows (``Total``/``Subtotal``/``Loan Account Totals``) are
+    intentionally left blank.
+    """
+    cat = _classify_label_category(label)
+    if not cat or cat == "aggregate":
+        return ""
+    if cat in pool_index:
+        return pool_index[cat]
+    # Soft fallbacks: route niche categories to a general pool when the
+    # exact match isn't configured on Step 2.
+    if cat == "vehicle_unspecified":
+        for alt in ("new_vehicle", "used_vehicle", "other_consumer"):
+            if alt in pool_index:
+                return pool_index[alt]
+    if cat == "recreational":
+        if "other_consumer" in pool_index:
+            return pool_index["other_consumer"]
+    if cat == "commercial":
+        if "other_consumer" in pool_index:
+            return pool_index["other_consumer"]
+    return ""
+
+
+def selfheal_auto_map_balance_labels(state: dict[str, Any]) -> list[str]:
+    """Auto-map blank ``monthly_bal.pool_map`` entries to configured
+    ``pool_settings`` using keyword heuristics.
+
+    Targets workbook-source CUs without a WARM ``balance_title_map``
+    (the typical state for any CU that auto-detected a single
+    historical balance workbook). Only fills BLANK entries so user
+    edits are preserved. Idempotent: subsequent calls re-evaluate
+    blanks and either fill or leave them — never overwrites a
+    non-empty mapping.
+    """
+    mb = state.get("monthly_bal") or {}
+    if not isinstance(mb, dict):
+        return []
+    labels = mb.get("parsed_pool_labels") or []
+    if not labels:
+        return []
+    pool_settings = state.get("pool_settings") or []
+    pool_index = _build_pool_category_index(pool_settings)
+    if not pool_index:
+        return []
+    pool_map = mb.get("pool_map") or {}
+    if not isinstance(pool_map, dict):
+        pool_map = {}
+    filled = 0
+    for lab in labels:
+        if not lab:
+            continue
+        existing = (pool_map.get(lab) or "").strip()
+        if existing:
+            continue
+        suggestion = _suggest_pool_for_label(lab, pool_index)
+        if suggestion:
+            pool_map[lab] = suggestion
+            filled += 1
+    if not filled:
+        return []
+    mb["pool_map"] = pool_map
+    state["monthly_bal"] = mb
+    return [
+        f"Auto-mapped {filled} balance label(s) to configured pool(s) "
+        f"based on keyword match. Review on Step 8 (Monthly Balance "
+        f"File) and adjust any mismatches."
+    ]
+
+
 def selfheal_flat_pool_seed_from_state(state: dict[str, Any]) -> list[str]:
     """Proactively seed Step 2 ``pool_settings`` + Step 8
     ``monthly_bal.pool_map`` from a previously-detected flat

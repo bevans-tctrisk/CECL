@@ -581,6 +581,34 @@ def _wizard_ctx(active: str) -> dict[str, Any]:
                         flash(f"Auto-scan: {_m}", "success")
             except Exception:  # noqa: BLE001
                 pass
+            # Single-hist-bal layout self-heal: when monthly_bal.source is
+            # 'single' with a saved_path but parsed_pool_labels is empty
+            # (e.g. label column was mis-elected on a Vizo-style workbook
+            # with loan codes in col A and descriptive labels in col B),
+            # re-run analyse_file to recover the correct layout.
+            try:
+                _layout_msgs = auto_setup.selfheal_single_hist_bal_layout(st)
+                if _layout_msgs:
+                    _save_state(st)
+                    for _m in _layout_msgs:
+                        flash(f"Auto-scan: {_m}", "success")
+            except Exception:  # noqa: BLE001
+                pass
+            # Heuristic auto-mapping of balance labels to pool_settings
+            # names. Targets workbook-source CUs without a WARM
+            # balance_title_map: matches each parsed_pool_label to a
+            # configured pool by keyword category (credit_card,
+            # real_estate, share_secured, recreational, new_vehicle,
+            # used_vehicle, unsecured, etc). Only fills BLANK entries
+            # so user edits are preserved across refreshes.
+            try:
+                _automap_msgs = auto_setup.selfheal_auto_map_balance_labels(st)
+                if _automap_msgs:
+                    _save_state(st)
+                    for _m in _automap_msgs:
+                        flash(f"Auto-scan: {_m}", "success")
+            except Exception:  # noqa: BLE001
+                pass
             hil_needs = auto_setup.compute_hil_needs(st)
             need_keys = {n["step_key"] for n in hil_needs}
             # Severity-aware HIL set: any 'required' entry blocks the
@@ -4467,9 +4495,40 @@ def _earliest_month_pool_distribution(state: dict) -> dict:
     pos = {p: float(b) for p, b in by_pool.items() if float(b or 0) > 0}
     total = sum(pos.values())
     if total <= 0:
+        # Source-aware guidance: workbook-based sources (single/annual/per-month)
+        # need the user to map parsed labels to canonical pool names on
+        # Step 8 (Monthly Balance File). The monthly_loan_extracts source
+        # uses Step 3 (Loan Code Mapping).
+        if source == "monthly_loan_extracts":
+            _hint = "Check the Loan-Code Mapping on Step 3."
+        else:
+            _mb_state = state.get("monthly_bal") or {}
+            _label_n = len(_mb_state.get("parsed_pool_labels") or [])
+            _mapped_n = sum(
+                1 for v in (_mb_state.get("pool_map") or {}).values()
+                if str(v or "").strip()
+            )
+            if _label_n and _mapped_n == 0:
+                _hint = (
+                    f"{_label_n} balance label(s) detected but none are "
+                    "mapped to a pool yet. Open Step 8 (Monthly Balance "
+                    "File) and map each label to a configured pool."
+                )
+            elif _label_n and _mapped_n < _label_n:
+                _hint = (
+                    f"{_mapped_n} of {_label_n} balance label(s) mapped on "
+                    "Step 8 (Monthly Balance File). Map the remaining "
+                    f"{_label_n - _mapped_n} label(s) so their balances "
+                    "flow into the right pools."
+                )
+            else:
+                _hint = (
+                    "Check the balance label-to-pool mapping on Step 8 "
+                    "(Monthly Balance File)."
+                )
         out["error"] = (
             f"Earliest month ({earliest}) had no positive pool balances. "
-            f"Check the pool mapping on Step 3."
+            + _hint
         )
         out["period"] = earliest
         return out
