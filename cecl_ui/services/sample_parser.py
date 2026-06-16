@@ -500,16 +500,6 @@ def _generalize_filename_pattern(stem: str, ext_part: str) -> str:
             continue
         chosen.append((s, e, r))
         cursor = e
-    parts: list[str] = []
-    last = 0
-    for s, e, r in chosen:
-        if s > last:
-            parts.append(re.escape(stem[last:s]))
-        parts.append(r)
-        last = e
-    if last < len(stem):
-        parts.append(re.escape(stem[last:]))
-    body = "".join(parts) if parts else re.escape(stem)
     # Loosen runs of whitespace (escaped as ``\ ``), underscores, and
     # escaped dashes (``\-``) so the pattern still matches across common
     # CU naming variations:
@@ -520,7 +510,30 @@ def _generalize_filename_pattern(stem: str, ext_part: str) -> str:
     #     (``February Loan File Upload.xlsx``).
     # Collapsing runs of any of {space, underscore, dash} to ``[\s_\-]+``
     # lets one wizard-derived pattern match all three forms.
-    body = re.sub(r"(?:\\ |_|\\-)+", r"[\\s_\\-]+", body)
+    #
+    # CRITICAL: this collapse must run ONLY on escaped literal stem
+    # fragments — never on rule replacement strings. Rule replacements
+    # contain ``_`` and ``\-`` literals inside character classes like
+    # ``[\s_\-\.]+`` (combined month+year rule) and ``[-_]`` (date-format
+    # rules); applying the collapse to the whole body corrupts those
+    # classes into malformed nested classes (``[\s[\s_\-]+\.]+``) that
+    # silently never match any real filename.
+    _SEP_COLLAPSE_RX = re.compile(r"(?:\\ |_|\\-)+")
+    _SEP_REPL = r"[\\s_\\-]+"
+
+    def _collapse(s: str) -> str:
+        return _SEP_COLLAPSE_RX.sub(_SEP_REPL, s)
+
+    parts: list[str] = []
+    last = 0
+    for s, e, r in chosen:
+        if s > last:
+            parts.append(_collapse(re.escape(stem[last:s])))
+        parts.append(r)
+        last = e
+    if last < len(stem):
+        parts.append(_collapse(re.escape(stem[last:])))
+    body = "".join(parts) if parts else _collapse(re.escape(stem))
     return f"(?i)^{body}\\.{ext_part}$"
 
 

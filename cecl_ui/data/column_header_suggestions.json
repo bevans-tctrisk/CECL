@@ -9,7 +9,7 @@
       "curbal": 48,
       "curr bal": 1,
       "current bal": 3,
-      "current balance": 3,
+      "current balance": 4,
       "current balance amount": 8,
       "current loan bal": 4,
       "current loan balance": 10,
@@ -26,7 +26,7 @@
       "acctbs": 29,
       "col_x": 4,
       "day delinquent": 4,
-      "days delinquent": 7,
+      "days delinquent": 8,
       "days deliquent": 2,
       "days dq": 3,
       "days past due": 2,
@@ -47,7 +47,7 @@
       "cash annual interest rate": 8,
       "int rate": 4,
       "int_rate": 2,
-      "interest rate": 40,
+      "interest rate": 41,
       "interest rate (apr)": 6,
       "interest rate code": 3,
       "noteintrate": 5,
@@ -63,7 +63,7 @@
       "loan collateral code": 5,
       "loan purpose": 8,
       "loan type": 48,
-      "loan type code": 23,
+      "loan type code": 24,
       "mbr state code": 6,
       "newcolb": 1,
       "oldcola": 1,
@@ -85,7 +85,7 @@
     "member_number": {
       "account": 16,
       "account #": 7,
-      "account number": 21,
+      "account number": 22,
       "acct #": 4,
       "acct nbr": 10,
       "acctbs": 48,
@@ -101,7 +101,7 @@
     "open_date": {
       "card open date": 8,
       "contractdate": 5,
-      "date of loan": 10,
+      "date of loan": 11,
       "loan date": 2,
       "loan original date": 29,
       "open date": 16,
@@ -114,7 +114,7 @@
     "original_fico_score": {
       "application_creditscore": 5,
       "credit score": 53,
-      "fico": 4,
+      "fico": 5,
       "inv": 8,
       "risksc": 28,
       "user_defined_field_7": 2
@@ -128,11 +128,12 @@
       "orig nbr pymts": 13,
       "orig_ln_amt": 2,
       "original amount": 1,
+      "original balance": 1,
       "original date": 3,
       "original loan amount": 40
     },
     "total_available_credit": {
-      "credit limit": 55,
+      "credit limit": 56,
       "credit line amount": 8,
       "creditlimitamt": 5,
       "dblimt": 29,
@@ -237,6 +238,7 @@
     "orig_ln_amt": "orig_ln_amt",
     "orig_ln_dt": "orig_ln_dt",
     "original amount": "Original Amount",
+    "original balance": "Original Balance",
     "original balance as of 11/30/21": "Original Balance As of 11/30/21",
     "original date": "Original Date",
     "original loan amount": "Original Loan Amount",
@@ -250,6 +252,6 @@
     "type of mortgage": "Type of Mortgage",
     "user_defined_field_7": "User_Defined_Field_7"
   },
-  "updated_at": "2026-06-12T19:03:22",
+  "updated_at": "2026-06-16T14:55:30",
   "version": 1
 }
