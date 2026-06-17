@@ -5672,6 +5672,14 @@ def _load_dq_history_from_db(config):
 
     # Collect contributions per (year, pool).
     by_yp: dict[tuple[int, str], dict[str, float]] = {}
+    # Track which (date, pool) total_balance rows we have already added
+    # so multiple NCUA codes resolving to the same pool don't multiply
+    # the pool's denominator. loan_code_history is keyed by pool name
+    # (5300-distributed source) while loan_code_delinquency_history is
+    # keyed by NCUA canonical loan-code label; the lookup must use the
+    # resolved pool, and each pool's total can only contribute once per
+    # (date, pool) regardless of how many DQ codes map to it.
+    seen_pool_totals: set[tuple[str, str]] = set()
     for r in rows:
         d = r[0].isoformat() if hasattr(r[0], 'isoformat') else str(r[0])
         try:
@@ -5691,15 +5699,27 @@ def _load_dq_history_from_db(config):
         pct = float(r[4]) if r[4] is not None else None
         # Backfill missing total_balance from loan_code_history when
         # available (the 5300 DQ backfill leaves total_balance NULL).
+        # CRITICAL: lookup by RESOLVED POOL NAME, not by the NCUA code
+        # — loan_code_history rows from the 5300-distributed backfill
+        # are keyed by CU pool name (e.g. "Used Vehicle Loan"), while
+        # the DQ table is keyed by NCUA canonical labels (e.g. "Used
+        # Vehicles"). Using `code` would never match and every cell
+        # would collapse to None.
         if tot is None:
-            tot = bal_lookup.get((d, code))
+            tot = bal_lookup.get((d, pool))
         agg = by_yp.setdefault((yr, pool), {
             'amount': 0.0, 'total': 0.0, 'pct_sum': 0.0,
             'pct_weight': 0.0, 'pct_count': 0,
         })
         agg['amount'] += amt
         if tot is not None:
-            agg['total'] += tot
+            # Only add the pool-level total once per (date, pool) so
+            # codes that resolve to the same pool don't multiply the
+            # denominator.
+            key = (d, pool)
+            if key not in seen_pool_totals:
+                agg['total'] += tot
+                seen_pool_totals.add(key)
         if pct is not None:
             w = tot if tot is not None else 1.0
             agg['pct_sum'] += pct * w
