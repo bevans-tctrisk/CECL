@@ -10756,6 +10756,9 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 wb, fname = compose_vizo_main_new(client_name, snapshot_date, df, config, grades, hist)
             elif rpt_type == 'vizo_supp':
                 wb, fname = compose_vizo_supp_new(client_name, snapshot_date, df, config, grades, hist)
+            elif rpt_type == 'mgmt_adj_napkin':
+                from report_mgmt_adj_napkin import compose_mgmt_adj_napkin
+                wb, fname = compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist)
             else:
                 print(f"  Unknown report type: {rpt_type}")
                 continue

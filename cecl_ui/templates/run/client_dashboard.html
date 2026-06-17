@@ -74,6 +74,9 @@
       Vizo Supplemental Report</label>
     <label><input type="checkbox" name="impdet" {% if cfg.reports and cfg.reports.impdet %}checked{% endif %}>
       Improved / Deteriorated Loans Report</label>
+    <label><input type="checkbox" name="mgmt_adj_napkin"
+        {% if cfg.reports is not defined or cfg.reports.get('mgmt_adj_napkin', True) %}checked{% endif %}>
+      Management Adjustment Worksheet</label>
 
     <div class="btn-row">
       <a class="btn btn-secondary" href="{{ url_for('run.select_cu') }}">&larr; CU list</a>

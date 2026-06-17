@@ -30,7 +30,7 @@
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
     <input type="hidden" name="stage" value="mapped">
     <input type="hidden" name="period" value="{{ staged_period }}">
-    {% for r in ['tct','vizo','vizo_supp','impdet'] %}
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
       {% if staged_reports and staged_reports.get(r) %}
         <input type="hidden" name="{{ r }}" value="on">
       {% endif %}
@@ -160,7 +160,7 @@
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
     <input type="hidden" name="stage" value="balance_checked">
     <input type="hidden" name="period" value="{{ staged_period }}">
-    {% for r in ['tct','vizo','vizo_supp','impdet'] %}
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
       {% if staged_reports and staged_reports.get(r) %}
         <input type="hidden" name="{{ r }}" value="on">
       {% endif %}
@@ -215,7 +215,10 @@
       Vizo Supplemental Report</label><br>
     <label><input type="checkbox" name="impdet"
            {% if cfg.reports and cfg.reports.impdet %}checked{% endif %}>
-      Improved / Deteriorated Loans Report</label>
+      Improved / Deteriorated Loans Report</label><br>
+    <label><input type="checkbox" name="mgmt_adj_napkin"
+           {% if cfg.reports is not defined or cfg.reports.get('mgmt_adj_napkin', True) %}checked{% endif %}>
+      Management Adjustment Worksheet</label>
 
     <div style="margin-top:24px; display:flex; gap:12px; align-items:center;">
       <button class="btn btn-success" type="submit">Stage, Import &amp; Run</button>

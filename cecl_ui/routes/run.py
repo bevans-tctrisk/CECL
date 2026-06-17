@@ -162,7 +162,7 @@ def import_data(short_name: str):
 def reports(short_name: str):
     snap = request.form.get("snapshot_date") or None
     selected: list[str] = []
-    for r in ("tct", "vizo", "vizo_supp"):
+    for r in ("tct", "vizo", "vizo_supp", "mgmt_adj_napkin"):
         if request.form.get(r) == "on":
             selected.append(r)
     impdet = request.form.get("impdet") == "on"
@@ -415,7 +415,7 @@ def new_quarter(short_name: str):
         if unmapped:
             report_selection = {
                 r: (request.form.get(r) == "on")
-                for r in ("tct", "vizo", "vizo_supp", "impdet")
+                for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
             }
             return render_template(
                 "run/new_quarter.html",
@@ -489,7 +489,7 @@ def new_quarter(short_name: str):
         if comparison and comparison.get("ok") and comparison.get("rows"):
             report_selection = {
                 r: (request.form.get(r) == "on")
-                for r in ("tct", "vizo", "vizo_supp", "impdet")
+                for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
             }
             return render_template(
                 "run/new_quarter.html",
@@ -503,7 +503,7 @@ def new_quarter(short_name: str):
 
     # 4) Run reports — selection comes from form (defaults seeded from cfg)
     selected: list[str] = []
-    for r in ("tct", "vizo", "vizo_supp"):
+    for r in ("tct", "vizo", "vizo_supp", "mgmt_adj_napkin"):
         if request.form.get(r) == "on":
             selected.append(r)
     impdet = request.form.get("impdet") == "on"
