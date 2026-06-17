@@ -5674,11 +5674,12 @@ def _load_dq_history_from_db(config):
     by_yp: dict[tuple[int, str], dict[str, float]] = {}
     # Track which (date, pool) total_balance rows we have already added
     # so multiple NCUA codes resolving to the same pool don't multiply
-    # the pool's denominator. loan_code_history is keyed by pool name
-    # (5300-distributed source) while loan_code_delinquency_history is
-    # keyed by NCUA canonical loan-code label; the lookup must use the
-    # resolved pool, and each pool's total can only contribute once per
-    # (date, pool) regardless of how many DQ codes map to it.
+    # the pool's denominator -- BUT only when the balance came from the
+    # POOL-LEVEL fallback (bal_lookup, keyed by user pool name from the
+    # 5300-distributed backfill). Per-NCUA-code balances (Phase 9.30,
+    # stored on the DQ row itself) are independent quantities and must
+    # be summed without dedupe. seen_pool_totals tracks only the fallback
+    # contributions.
     seen_pool_totals: set[tuple[str, str]] = set()
     for r in rows:
         d = r[0].isoformat() if hasattr(r[0], 'isoformat') else str(r[0])
@@ -5697,14 +5698,16 @@ def _load_dq_history_from_db(config):
         amt = float(r[2] or 0.0)
         tot = float(r[3]) if r[3] is not None else None
         pct = float(r[4]) if r[4] is not None else None
-        # Backfill missing total_balance from loan_code_history when
-        # available (the 5300 DQ backfill leaves total_balance NULL).
-        # CRITICAL: lookup by RESOLVED POOL NAME, not by the NCUA code
-        # — loan_code_history rows from the 5300-distributed backfill
-        # are keyed by CU pool name (e.g. "Used Vehicle Loan"), while
-        # the DQ table is keyed by NCUA canonical labels (e.g. "Used
-        # Vehicles"). Using `code` would never match and every cell
-        # would collapse to None.
+        # Phase 9.30: prefer the per-NCUA-code total_balance written by
+        # solr_5300_delq_backfill (column r[3]). Each DQ row carries the
+        # balance for its own NCUA code, so summing them per resolved
+        # pool produces a denominator that stays in lockstep with the
+        # numerator (dq_amount) -- both aggregated LIVE under the user's
+        # current pool_map, eliminating the stale-frozen-balance class
+        # of bug. Fallback to the pool-level bal_lookup only when r[3]
+        # is NULL (older rows from before Phase 9.30 or rows written by
+        # non-5300 sources).
+        used_per_code_balance = tot is not None
         if tot is None:
             tot = bal_lookup.get((d, pool))
         agg = by_yp.setdefault((yr, pool), {
@@ -5713,13 +5716,17 @@ def _load_dq_history_from_db(config):
         })
         agg['amount'] += amt
         if tot is not None:
-            # Only add the pool-level total once per (date, pool) so
-            # codes that resolve to the same pool don't multiply the
-            # denominator.
-            key = (d, pool)
-            if key not in seen_pool_totals:
+            if used_per_code_balance:
+                # Per-code balance: sum unconditionally (each NCUA code
+                # contributes its own distinct balance).
                 agg['total'] += tot
-                seen_pool_totals.add(key)
+            else:
+                # Pool-level fallback: dedupe so codes resolving to the
+                # same pool don't multiply the denominator.
+                key = (d, pool)
+                if key not in seen_pool_totals:
+                    agg['total'] += tot
+                    seen_pool_totals.add(key)
         if pct is not None:
             w = tot if tot is not None else 1.0
             agg['pct_sum'] += pct * w
