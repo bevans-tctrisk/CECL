@@ -476,6 +476,15 @@ _FNAME_GENERALIZE_RULES: list[tuple[re.Pattern[str], str]] = [
     # like "Vault123" don't get rewritten.
     (re.compile(r"(?<![A-Za-z0-9])[Vv]\d{1,2}(?![A-Za-z0-9])"),
      r"[Vv]\d{1,2}"),
+    # Trailing numeric suffix like ".01" / ".001" / ".10" that Symitar
+    # / Vizo IDLR exports sometimes append to the baseline file
+    # (e.g. "airesln V2 DEC 2025.01.xlsx"). Wildcard as an OPTIONAL
+    # group so a pattern derived from a ".01"-suffixed baseline also
+    # matches the subsequent unsuffixed monthly drops. Anchored to
+    # end-of-stem so middle-of-name dotted tokens (e.g. ".v2.") aren't
+    # affected; restricted to 1-3 digits to avoid eating obvious
+    # non-suffix sequences.
+    (re.compile(r"\.\d{1,3}$"), r"(?:\.\d{1,3})?"),
 ]
 
 
