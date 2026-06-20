@@ -92,6 +92,11 @@ tmp_*.html
 /scripts/run_test_*.py
 /scripts/run_census_baseline*.py
 /scripts/run_census_scratch*.py
+/scripts/audit_*.py
+/scripts/probe_*.py
+/scripts/smoke_*.py
+/scripts/list_*.py
+/scripts/track_*.py
 
 # Old/backup source files kept locally but not versioned
 /generate_report_old.py

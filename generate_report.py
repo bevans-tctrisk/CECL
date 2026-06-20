@@ -10493,8 +10493,26 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 _hv = _dqp.history_matrix(config['credit_union'])
                 _existing_dq = set((_hv or {}).get('months') or [])
             except Exception:  # noqa: BLE001
+                _hv = {}
                 _existing_dq = set()
-            if not _existing_dq:
+            # Detect stale-zero rows: a prior backfill run wrote DQ
+            # rows for every expected quarter but with dq_amount=0
+            # across the board (e.g. the canonical CSV was incomplete
+            # when the backfill ran, or the wrong Solr core was used).
+            # Without this check the auto-trigger silently no-ops on
+            # subsequent runs because rows exist -- exactly Central
+            # Keystone FCU / Census FCU's symptom (2026-06-19).
+            _dq_total = 0.0
+            for _m, _cells in (_hv or {}).get('cells', {}).items():
+                for _cd, _cell in (_cells or {}).items():
+                    _dq_total += float((_cell or {}).get('amount') or 0.0)
+                    if _dq_total > 0:
+                        break
+                if _dq_total > 0:
+                    break
+            _stale_zero = bool(_existing_dq) and _dq_total == 0.0
+            _needs_refill = (not _existing_dq) or _stale_zero
+            if _needs_refill:
                 from cecl_ui.services import (
                     solr_5300_delq_backfill as _solr_dq,
                 )
@@ -10505,11 +10523,18 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                     or 'http://searchserver1.tctrisk.com:8983/solr'
                 )
                 _solr_core = dq_cfg.get('solr_core') or 'ncua'
+                if _stale_zero:
+                    print(
+                        f"    5300 DQ backfill: existing rows total "
+                        f"$0 across {len(_existing_dq)} quarter(s); "
+                        f"re-running with overwrite=True to recover."
+                    )
                 _res = _solr_dq.backfill_missing_delinquency_quarters(
                     config['credit_union'],
                     int(config['charter_number']),
                     _solr_url, _solr_core,
                     _snap_iso, _months_back,
+                    overwrite=_stale_zero,
                 )
                 if _res.get('ok'):
                     _filled = len(_res.get('months_filled') or [])
@@ -10544,6 +10569,25 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         n_cells = sum(len(v) for v in db_dq.values())
         print(f"    Overlaid DQ% from loan_code_delinquency_history: "
               f"{len(db_dq)} year(s), {n_cells} pool-year cell(s).")
+    else:
+        # Soft-miss diagnostic. If the CU has a charter number on file
+        # and the DQ overlay returned nothing, the Display CO-Recov-DQ
+        # tab's DQ% column will render blank/zero for every pool/year.
+        # Surface a clear warning so the user can tell the difference
+        # between "genuinely no DQ history" and "the data pipeline is
+        # silently failing". Typical causes: stale-zero rows blocked
+        # the auto-trigger (now fixed by overwrite=_stale_zero above);
+        # Solr was unreachable; the canonical CSV is missing fields
+        # for this CU's 5300 form variant.
+        if config.get('charter_number'):
+            print(
+                f"    WARNING: DQ% overlay produced no cells for "
+                f"{config.get('credit_union')!r}. Display CO-Recov-DQ "
+                f"tab will show blank DQ% across all pools/years. "
+                f"Inspect loan_code_delinquency_history for this CU "
+                f"and verify the 5300 Solr fetch is returning non-zero "
+                f"values for the canonical DQ field codes."
+            )
 
     # ── Fallback: load impaired data from prior TCT baseline ──
     # When the source WARM has no 'Impaired Loans' tab and there's no
