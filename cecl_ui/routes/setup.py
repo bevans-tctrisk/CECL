@@ -11667,6 +11667,39 @@ def step6_credit_pull():
                 if s_col:
                     cp["score_column"] = s_col
                 flash(f"Credit-pull file saved: {saved.name}", "success")
+                # A fresh credit-pull replacement is the canonical trigger
+                # for "I want my reports re-run with new scores."  If the
+                # CU is already set up (YAML + Archive folder exist) the
+                # previously-imported loan extracts are sitting in
+                # Archive/<short>/ — restore them so the next run_import
+                # has something to chew on.  No-op for first-time setup.
+                sn = (state.get("short_name") or "").strip()
+                if sn:
+                    try:
+                        res = pipeline_service.restore_archived_files(sn)
+                        n_restored = len(res.get("restored") or [])
+                        if n_restored:
+                            preview = ", ".join((res.get("restored") or [])[:3])
+                            if n_restored > 3:
+                                preview += f", … (+{n_restored - 3} more)"
+                            flash(
+                                f"Restored {n_restored} archived loan file(s) "
+                                f"into Raw_Uploads/{sn}/ so the next import "
+                                f"will re-score them: {preview}.",
+                                "info",
+                            )
+                        errs = res.get("errors") or []
+                        if errs:
+                            flash(
+                                f"Archive restore had {len(errs)} error(s); "
+                                f"first: {errs[0]}",
+                                "warning",
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        flash(
+                            f"Archive restore skipped (non-fatal): {exc}",
+                            "warning",
+                        )
             else:
                 flash("Please choose a credit-pull file to upload.", "warning")
             _save_state(state)

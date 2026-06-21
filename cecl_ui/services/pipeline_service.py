@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import io
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,99 @@ def _client_configs_dir() -> Path:
     return root / "client_configs"
 
 
-def run_import(client_short_name: str, specific_file: str | None = None) -> int:
-    """Invoke import_data.process_client; returns row count."""
+def _workspace_root() -> Path:
+    """Return the workspace root used by import_data.BASE_FOLDER."""
+    ws = os.environ.get("CECL_WORKSPACE_ROOT", "").strip()
+    if ws:
+        return Path(ws)
+    # Fall back to the historical layout (sibling of cecl_ui/).
+    return Path(__file__).resolve().parents[2]
+
+
+def restore_archived_files(client_short_name: str) -> dict[str, list[str]]:
+    """Copy files from ``Archive/<short>/`` back into ``Raw_Uploads/<short>/``.
+
+    Use case: ``archive_imported_files: true`` (the default for most YAMLs)
+    sweeps successfully-imported loan extracts out of ``Raw_Uploads`` and into
+    ``Archive`` so a subsequent ``run_import`` call is a no-op.  When the user
+    drops a fresh credit-pull file and wants the prior quarters re-imported
+    against the new scores, ``Raw_Uploads`` is effectively empty — restoring
+    from ``Archive`` brings the files back so the importer has something to
+    chew on.
+
+    Uses ``shutil.copy2`` (NOT ``shutil.move``) so the archive copy survives
+    as a safety net.  Files already present in the destination are skipped to
+    avoid overwriting any in-flight uploads the user just made.
+
+    Returns ``{restored: [names], skipped_existing: [names], errors: [strs]}``.
+    Silently no-ops when the Archive folder doesn't exist (first-time setup).
+    """
+    out: dict[str, list[str]] = {
+        "restored": [],
+        "skipped_existing": [],
+        "errors": [],
+    }
+    ws = _workspace_root()
+    archive_dir = ws / "Archive" / client_short_name
+    upload_dir = ws / "Raw_Uploads" / client_short_name
+    if not archive_dir.exists() or not archive_dir.is_dir():
+        return out
+    try:
+        upload_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # pragma: no cover - filesystem race
+        out["errors"].append(f"cannot create {upload_dir}: {exc}")
+        return out
+    # Walk recursively because import_data preserves relative paths when
+    # archiving (e.g. nested folders for per-extract subdirectories).
+    for src in archive_dir.rglob("*"):
+        if not src.is_file():
+            continue
+        try:
+            rel = src.relative_to(archive_dir)
+        except ValueError:
+            continue
+        dst = upload_dir / rel
+        if dst.exists():
+            out["skipped_existing"].append(str(rel))
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            out["restored"].append(str(rel))
+        except OSError as exc:
+            out["errors"].append(f"{rel}: {exc}")
+    return out
+
+
+def run_import(
+    client_short_name: str,
+    specific_file: str | None = None,
+    *,
+    restore_archive: bool = True,
+) -> int:
+    """Invoke import_data.process_client; returns row count.
+
+    When ``restore_archive`` is ``True`` (the default), any files previously
+    swept into ``Archive/<short>/`` are first copied back into
+    ``Raw_Uploads/<short>/`` so a fresh credit-pull replacement automatically
+    re-imports the historical quarters.  See ``restore_archived_files`` for
+    details — the call is a no-op when the Archive folder doesn't exist.
+    """
+    if restore_archive and not specific_file:
+        try:
+            res = restore_archived_files(client_short_name)
+            if res["restored"]:
+                names = ", ".join(res["restored"][:4])
+                more = (
+                    f" (+{len(res['restored']) - 4} more)"
+                    if len(res["restored"]) > 4 else ""
+                )
+                print(
+                    f"Restored {len(res['restored'])} archived file(s) into "
+                    f"Raw_Uploads/{client_short_name}/: {names}{more}"
+                )
+        except Exception as exc:  # noqa: BLE001 - never block import on this
+            print(f"Archive restore skipped (non-fatal): {exc}")
     import_data = importlib.import_module("import_data")
     return import_data.process_client(client_short_name, specific_file=specific_file)
 
