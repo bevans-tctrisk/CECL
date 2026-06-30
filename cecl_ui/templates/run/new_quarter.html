@@ -120,7 +120,32 @@
     <tbody>
       {% for row in comparison.rows %}
       <tr>
-        <td>{{ row.pool }}</td>
+        <td>
+          {{ row.pool }}
+          {% if row.loan_codes %}
+            <details style="margin-top:6px;">
+              <summary class="muted" style="cursor:pointer; font-size:90%;">
+                Loan codes in this pool ({{ row.loan_codes|length }}) — click to reassign
+              </summary>
+              <table style="margin-top:6px; font-size:90%; border-collapse:collapse;">
+                <thead>
+                  <tr style="background:#f6f6f6;">
+                    <th style="text-align:left; padding:4px 8px; border:1px solid #ddd;">Raw code</th>
+                    <th style="text-align:right; padding:4px 8px; border:1px solid #ddd;">Balance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for code, bal in row.loan_codes %}
+                  <tr>
+                    <td style="padding:4px 8px; border:1px solid #ddd;"><code>{{ code }}</code></td>
+                    <td style="padding:4px 8px; border:1px solid #ddd; text-align:right;">${{ "{:,.2f}".format(bal) }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </details>
+          {% endif %}
+        </td>
         <td style="text-align:right;">
           {% if row.monthly is not none %}${{ "{:,.2f}".format(row.monthly) }}{% else %}—{% endif %}
         </td>
@@ -155,6 +180,74 @@
     adjustments are auto-computed by the report engine at run time —
     you don't need to enter anything; this view is for confidence.
   </p>
+
+  {# --- Inline loan-code remap form (Phase 9.35f) -------------------------
+       Lists every raw loan code currently sitting in any pool, with a
+       dropdown to reassign to a different pool. On submit we patch
+       cfg["pool_map"], save YAML, and re-import so the comparison
+       refreshes with the new totals. Mirrors the wizard's Step 14
+       per-code remap UX. -------------------------------------------------- #}
+  {% set remap_codes = [] %}
+  {% for row in comparison.rows %}
+    {% for code, bal in (row.loan_codes or []) %}
+      {% set _ = remap_codes.append((code, bal, row.pool)) %}
+    {% endfor %}
+  {% endfor %}
+  {% if remap_codes %}
+    <div style="background:#fff8e6; border:1px solid #b88a00; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+      <h4 style="margin-top:0; color:#7a5c00;">Reassign loan codes to a different pool</h4>
+      <p class="muted" style="margin:6px 0;">
+        Spot a code that's in the wrong pool? Pick a new pool below and
+        click <strong>Save mapping changes &amp; re-check balances</strong>.
+        The tool will update the pool map, re-import the snapshot, and
+        redraw this page with the new totals.
+      </p>
+      <form method="post"
+            action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+        <input type="hidden" name="stage" value="balance_remapped">
+        <input type="hidden" name="period" value="{{ staged_period }}">
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+          {% if staged_reports and staged_reports.get(r) %}
+            <input type="hidden" name="{{ r }}" value="on">
+          {% endif %}
+        {% endfor %}
+        <table class="data-table" style="margin:8px 0;">
+          <thead>
+            <tr>
+              <th>Raw loan code</th>
+              <th>Current pool</th>
+              <th style="text-align:right;">Balance</th>
+              <th>Reassign to</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for code, bal, pool in remap_codes %}
+            <tr>
+              <td><code>{{ code }}</code><input type="hidden" name="map_code" value="{{ code }}"></td>
+              <td>{{ pool }}</td>
+              <td style="text-align:right;">${{ "{:,.2f}".format(bal) }}</td>
+              <td>
+                <select name="map_pool" style="min-width:240px;">
+                  <option value="{{ pool }}" selected>(keep: {{ pool }})</option>
+                  {% for p in (pool_choices or []) %}
+                    {% if p != pool %}
+                    <option value="{{ p }}">{{ p }}</option>
+                    {% endif %}
+                  {% endfor %}
+                  <option value="Ignore">Ignore</option>
+                </select>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <button class="btn btn-primary" type="submit"
+                onclick="return confirm('Save pool mapping changes and re-import the snapshot? This will rewrite monthly_loan_data with the new pool assignments.');">
+          Save mapping changes &amp; re-check balances
+        </button>
+      </form>
+    </div>
+  {% endif %}
 
   <form method="post"
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">

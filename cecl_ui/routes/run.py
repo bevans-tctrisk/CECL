@@ -327,7 +327,54 @@ def new_quarter(short_name: str):
         folder_skipped = []
         # Fall through to the report block (import is skipped below).
 
-    _skip_stage = stage in ("mapped", "balance_checked")
+    if stage == "balance_remapped":
+        # User adjusted one or more loan-code → pool mappings on the
+        # Balance Adjustment Review page. Apply the new mappings to
+        # cfg["pool_map"], persist to YAML, and re-run import so the
+        # ``monthly_loan_data`` snapshot re-stamps each row with the
+        # new pool name. Then fall through to the balance-check
+        # intercept again so the user sees updated totals and can
+        # either keep editing or click Continue → Run Reports.
+        posted_codes = request.form.getlist("map_code")
+        posted_pools = request.form.getlist("map_pool")
+        new_map = dict(cfg.get("pool_map") or {})
+        changed = 0
+        for i, code in enumerate(posted_codes):
+            code = (code or "").strip()
+            if not code:
+                continue
+            new_pool = (posted_pools[i] if i < len(posted_pools) else "").strip()
+            old_pool = new_map.get(code, "")
+            if new_pool == old_pool:
+                continue
+            new_map[code] = new_pool
+            changed += 1
+        if changed:
+            cfg["pool_map"] = new_map
+            try:
+                config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+            except (OSError, ValueError) as exc:
+                flash(f"Could not save pool mappings: {exc}", "error")
+                return redirect(url_for("run.new_quarter", short_name=short_name))
+            # Re-import so the DB snapshot reflects the new pool_map.
+            try:
+                pipeline_service.run_import(short_name)
+                flash(
+                    f"Reassigned {changed} loan code(s) and re-imported. "
+                    "Review the updated balances below.",
+                    "success",
+                )
+            except Exception as exc:  # noqa: BLE001
+                flash(f"Re-import after remap failed: {exc}", "error")
+                return redirect(url_for("run.new_quarter", short_name=short_name))
+        else:
+            flash("No mapping changes detected.", "info")
+        saved = 0
+        copied = 0
+        folder_skipped = []
+        # Fall through; import block is skipped via _skip_stage below.
+
+    _skip_stage = stage in ("mapped", "balance_checked", "balance_remapped")
     folder_raw = _normalize_folder_path(request.form.get("folder_path") or "") if not _skip_stage else ""
 
     # 1) Save uploaded files
@@ -429,8 +476,9 @@ def new_quarter(short_name: str):
                 staged_count=saved + copied,
             )
 
-    # 3) Import (skip on balance_checked resubmit — import already ran).
-    if stage == "balance_checked":
+    # 3) Import (skip on balance_checked / balance_remapped resubmits —
+    # import already ran on the prior submit or inside the remap branch).
+    if stage in ("balance_checked", "balance_remapped"):
         n_imported = 0  # already imported on prior submit
     else:
         try:
@@ -479,7 +527,8 @@ def new_quarter(short_name: str):
     # the user clicks "Continue → Run Reports" and we fall through.
     if stage != "balance_checked":
         try:
-            comparison = balance_check_service.compare_run(cfg, snapshot)
+            comparison = balance_check_service.compare_run(
+                cfg, snapshot, short_name=short_name)
         except Exception:  # noqa: BLE001
             comparison = None
         # Only intercept when we actually have a populated comparison.
@@ -491,6 +540,11 @@ def new_quarter(short_name: str):
                 r: (request.form.get(r) == "on")
                 for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
             }
+            # Build the pool-name dropdown for the inline remap UI.
+            try:
+                pool_choices = _all_known_pools(cfg, short_name)
+            except Exception:  # noqa: BLE001
+                pool_choices = []
             return render_template(
                 "run/new_quarter.html",
                 short_name=short_name,
@@ -499,6 +553,7 @@ def new_quarter(short_name: str):
                 comparison=comparison,
                 staged_period=period,
                 staged_reports=report_selection,
+                pool_choices=pool_choices,
             )
 
     # 4) Run reports — selection comes from form (defaults seeded from cfg)

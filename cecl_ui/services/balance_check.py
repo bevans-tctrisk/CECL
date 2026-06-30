@@ -696,7 +696,8 @@ def compare(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def compare_run(cfg: dict[str, Any], snapshot_iso: str) -> dict[str, Any]:
+def compare_run(cfg: dict[str, Any], snapshot_iso: str,
+                short_name: str | None = None) -> dict[str, Any]:
     """Per-pool balance comparison for the Run-New-Quarter intercept.
 
     Reads loan balances from the ``monthly_loan_data`` DB table (the
@@ -833,6 +834,21 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str) -> dict[str, Any]:
         total_m += float(m_f or 0.0)
         total_l += float(l_f or 0.0)
 
+    # Per-pool per-code breakdown — derived by re-reading the loan
+    # extracts in Raw_Uploads via the same engine used in wizard Step 14.
+    # Used by the run-flow inline pool-mapping editor so users can see
+    # which raw loan codes currently sit in each pool and reassign them
+    # without leaving the Balance Adjustment page.
+    try:
+        adapter_state = _build_state_for_run(cfg, short_name)
+        by_code = loan_balances_by_pool(adapter_state)
+        if by_code.get("ok"):
+            code_map = by_code.get("by_pool_code") or {}
+            for r in rows:
+                r["loan_codes"] = list(code_map.get(r["pool"]) or [])
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "ok": True,
         "error": monthly_err,
@@ -852,4 +868,113 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str) -> dict[str, Any]:
             "unmapped_codes": [],
         },
         "monthly_summary": {"raw_rows": []},
+    }
+
+
+def _build_state_for_run(cfg: dict[str, Any],
+                         short_name: str | None) -> dict[str, Any]:
+    """Construct a minimal state-like dict suitable for
+    :func:`loan_balances_by_pool` from a runtime YAML ``cfg`` plus the
+    staged ``Raw_Uploads/<short>/`` folder.
+
+    Walks the workspace's ``Raw_Uploads/<short_name>/`` directory and
+    matches each spreadsheet against the configured ``file_pattern``
+    (per-extract first, then the top-level fallback). The resulting
+    ``sample_uploads.loan_data_files`` list mirrors the wizard's shape
+    so the existing per-code aggregation works without modification.
+    """
+    from cecl_ui.services import config_service  # local: avoid cycles
+    raw_dir = None
+    archive_dir = None
+    if short_name:
+        try:
+            from flask import current_app
+            ws = current_app.config["WORKSPACE_ROOT"]
+            raw_dir = config_service.raw_uploads_dir(ws) / short_name
+            # Phase 9.35f: also scan Archive/<short>/ so the per-code
+            # breakdown still works AFTER import has archived the files.
+            from pathlib import Path
+            archive_dir = Path(ws) / "Archive" / short_name
+        except Exception:  # noqa: BLE001 — best-effort outside Flask
+            raw_dir = None
+            archive_dir = None
+
+    loan_files: list[dict[str, Any]] = []
+    # Compile patterns once.
+    per_extract: list[tuple[re.Pattern, dict]] = []
+    for ex in (cfg.get("loan_data_extracts") or []):
+        pat = (ex or {}).get("file_pattern") or ""
+        if not pat:
+            continue
+        try:
+            per_extract.append((re.compile(pat), ex or {}))
+        except re.error:
+            continue
+    top_pat = cfg.get("file_pattern") or ""
+    try:
+        top_rx = re.compile(top_pat) if top_pat else None
+    except re.error:
+        top_rx = None
+
+    allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+    seen_names: set[str] = set()
+
+    def _norm(name: str) -> str:
+        # Normalize underscore/space + case so the Phase 9.35 auto-restore
+        # copies (which secure_filename'd spaces into underscores) don't
+        # double-count next to the original filenames.
+        return re.sub(r"[\s_]+", " ", name).strip().lower()
+
+    def _collect_from(dir_path) -> None:
+        if not dir_path or not dir_path.is_dir():
+            return
+        # rglob handles Archive's nested-per-extract subdirs cleanly
+        # and is a no-op extra cost on flat Raw_Uploads layouts.
+        for entry in dir_path.rglob("*"):
+            if not entry.is_file() or entry.name.startswith("~$"):
+                continue
+            if entry.suffix.lower() not in allowed:
+                continue
+            key = _norm(entry.name)
+            if key in seen_names:
+                continue
+            matched_ex: dict | None = None
+            for rx, ex in per_extract:
+                if rx.search(entry.name):
+                    matched_ex = ex
+                    break
+            if matched_ex is None and top_rx is not None and \
+                    not top_rx.search(entry.name):
+                continue
+            ex_src = matched_ex or {}
+            file_entry: dict[str, Any] = {
+                "name": entry.name,
+                "path": str(entry),
+            }
+            if "column_mappings" in ex_src:
+                file_entry["column_mappings"] = ex_src.get(
+                    "column_mappings") or {}
+            if "has_header" in ex_src:
+                file_entry["has_header"] = ex_src.get("has_header")
+            if "header_row" in ex_src:
+                file_entry["header_row"] = ex_src.get("header_row")
+            if "pool_code_split" in ex_src:
+                file_entry["pool_code_split"] = ex_src.get(
+                    "pool_code_split") or ""
+            seen_names.add(key)
+            loan_files.append(file_entry)
+
+    # Raw_Uploads first so any duplicate name in Archive is skipped.
+    _collect_from(raw_dir)
+    _collect_from(archive_dir)
+
+    return {
+        "column_mappings": cfg.get("column_mappings") or {},
+        "has_header": bool(cfg.get("has_header", True)),
+        "pool_map": cfg.get("pool_map") or {},
+        "pool_code_split": cfg.get("pool_code_split") or "",
+        "default_pool": cfg.get("default_pool") or "Other/Uncategorized",
+        "balance_remove_chars": cfg.get("balance_remove_chars") or [],
+        "accounting_negatives": bool(cfg.get("accounting_negatives", True)),
+        "sample_uploads": {"loan_data_files": loan_files},
     }
