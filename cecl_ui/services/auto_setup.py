@@ -2284,6 +2284,39 @@ def selfheal_adopt_yaml_schema_into_state(state: dict[str, Any]) -> list[str]:
     """
     msgs: list[str] = []
 
+    # ---- Phase 9.35d: seed missing top-level scalar defaults --------
+    #
+    # Adopted drafts hydrate from YAML and may be missing top-level
+    # scalars that `_default_state()` would otherwise provide. Each
+    # entry is a (key, default) pair mirroring the canonical default in
+    # `cecl_ui/routes/setup.py _default_state()`. Uses `setdefault` so
+    # existing values (including legitimate user-zero/empty values like
+    # `accounting_negatives=False`) are preserved.
+    _scalar_defaults: list[tuple[str, Any]] = [
+        ("file_pattern", r"LOANDATA.*\.(xlsx|xls|csv)$"),
+        ("date_pattern", r"(\d{4})-(\d{2})"),
+        ("date_format", "YYYY-MM"),
+        ("pool_code_split", "/"),
+        ("default_pool", "Ignore"),
+        ("balance_remove_chars", ["$", ","]),
+        ("accounting_negatives", True),
+        ("has_header", True),
+        ("account_suffix_length", 3),
+        ("no_score_label", "Not Reported"),
+        ("raw_data_folder", ""),
+        ("report_period", ""),
+    ]
+    _seeded: list[str] = []
+    for _k, _default in _scalar_defaults:
+        if _k not in state:
+            state[_k] = _default
+            _seeded.append(_k)
+    if _seeded:
+        msgs.append(
+            f"Seeded {len(_seeded)} missing top-level default(s) from the "
+            f"adopted YAML config: {', '.join(_seeded)}."
+        )
+
     # ---- pools (YAML) -> pool_settings (wizard) ----------------------
     if not state.get("pool_settings"):
         yaml_pools = state.get("pools")

@@ -9432,13 +9432,24 @@ def step2_files():
     # Form values to render with: usually pulled from state, but on a "test"
     # action we re-render with the just-typed (unsaved) values so the preview
     # reflects them.
+    # Phase 9.35d: defensive `.get(..., default)` for top-level scalars.
+    # Adopted drafts (created via "Edit setup" from an existing YAML in
+    # `cecl_ui/routes/home.py adopt_config_to_completed`) hydrate the wizard
+    # state directly from the YAML schema and do NOT pass through
+    # `_default_state()`. Top-level scalars like `pool_code_split` that exist
+    # in `_default_state()` but not in every YAML would otherwise raise
+    # KeyError when the user navigates to this step. The companion structural
+    # fix is in `selfheal_adopt_yaml_schema_into_state` which proactively
+    # seeds these defaults on every wizard GET — these defensive `.get()`
+    # calls are belt-and-suspenders so the page still renders even if a
+    # future code path bypasses the self-heal.
     form_values: dict[str, Any] = {
-        "file_pattern": state["file_pattern"],
-        "date_pattern": state["date_pattern"],
+        "file_pattern": state.get("file_pattern") or r"LOANDATA.*\.(xlsx|xls|csv)$",
+        "date_pattern": state.get("date_pattern") or r"(\d{4})-(\d{2})",
         "date_format": state.get("date_format") or "YYYY-MM",
-        "pool_code_split": state["pool_code_split"],
-        "balance_remove_chars": state["balance_remove_chars"],
-        "accounting_negatives": state["accounting_negatives"],
+        "pool_code_split": state.get("pool_code_split", "/"),
+        "balance_remove_chars": state.get("balance_remove_chars", ["$", ","]),
+        "accounting_negatives": state.get("accounting_negatives", True),
     }
     scan: dict[str, Any] | None = None
 
