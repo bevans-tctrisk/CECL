@@ -105,6 +105,19 @@ def adopt_config_to_completed(
     state = dict(cfg)
     state["short_name"] = short_name
     state["model"] = "migration"
+    # Translate YAML-config schema (``pools`` / ``monthly_balance`` /
+    # ``acl`` / ``historical_file_formats``) into wizard-state schema
+    # (``pool_settings`` / ``monthly_bal`` / ``acl_balance`` / ``co_columns``)
+    # so an adopted draft renders correctly when the user clicks "Edit
+    # setup". Without this, Step 2 (Loan Pools) shows an empty table
+    # even though the YAML has every pool defined. Best-effort: any
+    # translation failure leaves the field untranslated and the
+    # wizard's GET-time self-heal will catch it on the next render.
+    try:
+        from cecl_ui.services import auto_setup as _auto_setup_adopt
+        _auto_setup_adopt.selfheal_adopt_yaml_schema_into_state(state)
+    except Exception:  # noqa: BLE001
+        pass
     state[wizard_drafts.DRAFT_META_KEY] = {
         "model": "migration",
         "active_step": "review",

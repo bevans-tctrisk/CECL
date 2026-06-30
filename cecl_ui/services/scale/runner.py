@@ -21,14 +21,16 @@ from pathlib import Path
 from typing import Any
 import re
 import shutil
+import xml.etree.ElementTree as _ET
 import zipfile
 
 import openpyxl
 
 from . import (
-    env_factor_writer, excel_recalc, impaired_loader, lol_writer,
-    mapping_loader, mgmt_adj_writer, qfactor_loader, runs_service,
-    solr_fetcher, template_loader, vizo_explanation_formatter,
+    acl_history_db, env_factor_writer, excel_recalc, impaired_loader,
+    lol_writer, mapping_loader, mgmt_adj_writer, qfactor_loader,
+    runs_service, solr_fetcher, template_loader,
+    vizo_explanation_formatter,
 )
 
 
@@ -895,6 +897,9 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         workspace_root, short, period, variant_result["outputs"]
     )
     recalc_results = _recalc_outputs(variant_result["outputs"])
+    db_captures = _capture_current_period_to_db(
+        short, period, variant_result["outputs"]
+    )
 
     return {
         "ok": True,
@@ -905,6 +910,7 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         "charter": charter,
         "prior_acl": prior_acl,
         "recalc": recalc_results,
+        "db_captures": db_captures,
         "template_path": tmpl["path"],
         "template_source": tmpl["source"],
         "template_message": tmpl.get("message", ""),
@@ -1059,7 +1065,39 @@ def run_multi_quarter(
             skipped.append({"period": p, "reason": f"Map load failed: {exc}"})
             continue
 
-        fill = fill_template(current_template, out_path, rows, doc)
+        try:
+            fill = fill_template(current_template, out_path, rows, doc)
+        except (_ET.ParseError, zipfile.BadZipFile) as exc:
+            # The XLSX we tried to read had malformed inner XML or zip
+            # structure. On iter 1 this is the canonical/override
+            # template; on later iters it's the accumulating out_path
+            # (corrupted by a prior writer or external editor). Skip
+            # this quarter, preserve current_template so the next
+            # iteration retries from the last known-good source.
+            _bad = Path(current_template).name
+            skipped.append({
+                "period": p,
+                "reason": (
+                    f"Workbook read failed ({type(exc).__name__}: {exc}). "
+                    f"Offending file: {_bad}. "
+                    "Re-run the wizard or replace the template; "
+                    "remaining quarters will continue with the last "
+                    "known-good workbook."
+                ),
+            })
+            continue
+        except OSError as exc:
+            skipped.append({
+                "period": p,
+                "reason": f"Workbook I/O failed: {exc}",
+            })
+            continue
+        except Exception as exc:  # noqa: BLE001
+            skipped.append({
+                "period": p,
+                "reason": f"Fill failed ({type(exc).__name__}: {exc})",
+            })
+            continue
         successes += 1
         iterations.append({
             "period": p,
@@ -1123,6 +1161,12 @@ def run_multi_quarter(
         _recalc_outputs(variant_result.get("outputs") or [])
         if successes > 0 else []
     )
+    db_captures = (
+        _capture_current_period_to_db(
+            short, start_period, variant_result.get("outputs") or []
+        )
+        if successes > 0 else []
+    )
     return {
         "ok": successes > 0,
         "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1161,20 +1205,37 @@ def run_multi_quarter(
         "report_variant": variant_result["variant"],
         "report_variant_hidden": variant_result["hidden"],
         "prior_acl": prior_acl,
+        "recalc": recalc_results,
+        "db_captures": db_captures,
         "errors": [] if successes > 0 else ["No quarters were successfully written."],
     }
 
 
 def _inject_prior_acl(workspace_root: str, short: str, period: str,
                       output_files: list[dict]) -> dict:
-    """Hard-code Prior ACL values from the previous quarter's report
-    into Historical Data!AY2..AY5 of every output file.
+    """Hard-code Prior ACL values into Historical Data!AY2..AY5 of
+    every output file.
 
-    Looks up `Generated_Reports/<short>/<prev_quarter>/` for the
-    newest SCALE workbook (prefers Vizo variant) and copies its
-    Total Expected Losses / ACL Balance / Adjustment / ACL Ratio
-    cells. Silently no-ops when the prior report is missing -- e.g.
-    first ever run for this CU.
+    Resolution priority:
+
+    1. **DB lookup**: ``scale_acl_history`` is the canonical store.
+       When a row exists for ``(short, prior_quarter_end)`` we use it
+       directly -- no Excel dependency, no formula evaluation, no
+       pywin32. This is the path that survives across machines and
+       across "user never opened the prior workbook in Excel" scenarios.
+    2. **Prior-workbook read** (legacy): if no DB row exists for the
+       prior period, fall back to reading cached formula values from
+       ``Generated_Reports/<short>/<prev_quarter>/`` via openpyxl.
+       Triggers pywin32 COM recalc when cached values are missing.
+       On success the values are also UPSERTed back into the DB so
+       future runs hit the DB cache.
+    3. **Defensive zero**: when neither source yielded usable numbers
+       we write literal 0 to AY2..AY5 so the "prior column duplicates
+       current column" formula leak is visible to the analyst (zeros
+       instead of duplicated current numbers).
+
+    Silently no-ops when this is the first ever run for this CU (no
+    prior report on disk AND no DB row).
     """
     result: dict[str, Any] = {
         "prior_period": "", "prior_path": "",
@@ -1186,6 +1247,44 @@ def _inject_prior_acl(workspace_root: str, short: str, period: str,
         result["error"] = f"Could not compute prior quarter: {exc}"
         return result
     result["prior_period"] = prev
+
+    # --- Path 1: DB lookup for the exact prior quarter. ---
+    db_hit = None
+    try:
+        db_hit = acl_history_db.lookup(short, prev)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"DB lookup failed: {exc}"
+    if db_hit is None:
+        # Soft fallback: latest row older than the target period.
+        # Covers "analyst skipped a quarter" and "previous run failed
+        # before DB capture" scenarios.
+        try:
+            db_hit = acl_history_db.lookup_latest_before(short, period)
+        except Exception:  # noqa: BLE001
+            pass
+        if db_hit is not None:
+            # Update the period we'll surface in flash messages.
+            pe = db_hit.get("period_end")
+            if hasattr(pe, "strftime"):
+                result["prior_period"] = pe.strftime("%Y-%m")
+
+    if db_hit is not None:
+        values = db_hit.get("values") or {}
+        result["source"] = f"db:{db_hit.get('source') or 'scale_acl_history'}"
+        for entry in output_files or []:
+            path = entry.get("path") or ""
+            if not path:
+                continue
+            write = runs_service.write_prior_acl_values(path, values)
+            result["applied"].append({
+                "path": path,
+                "ok": write["ok"],
+                "written": write["written"],
+                "error": write["error"],
+            })
+        return result
+
+    # --- Path 2: Read from the prior workbook. ---
     prior_path = runs_service.find_prior_report(workspace_root, short, prev)
     if prior_path is None:
         # Fallback: newest report strictly older than target period.
@@ -1209,9 +1308,33 @@ def _inject_prior_acl(workspace_root: str, short: str, period: str,
         if recalc.get("ok"):
             read = runs_service.read_prior_acl_values(prior_path)
     if not read["ok"]:
+        # --- Path 3: Defensive zero. ---
+        # Write literal 0 to AY2..AY5 to break the formula leak. The
+        # fresh template AND prior-quarter carry-history workbooks
+        # ship those cells as formulas like
+        # `='Scale Calculation'!U29..U33` -- if we silently no-op here,
+        # the carry-history workflow leaves the OLD column's formulas
+        # pointing into the SHIFTED Scale Calculation rows, which now
+        # resolve to the CURRENT-period values. The visible symptom
+        # is "prior column shows the same numbers as current column".
         result["error"] = read["error"]
-        return result
-    values = read["values"]
+        result["fallback_used"] = True
+        values = {"AY2": 0.0, "AY3": 0.0, "AY4": 0.0, "AY5": 0.0}
+        result["source"] = "fallback-zero"
+    else:
+        values = read["values"]
+        result["source"] = "prior-workbook"
+        # Opportunistically persist what we just learned so future
+        # runs hit the DB cache instead of re-reading the workbook.
+        try:
+            persisted = acl_history_db.upsert(
+                short, prev, values,
+                source=f"backfill-from:{Path(prior_path).name}",
+            )
+            result["db_persist"] = persisted
+        except Exception as exc:  # noqa: BLE001
+            result["db_persist"] = {"ok": False, "error": str(exc)}
+
     for entry in output_files or []:
         path = entry.get("path") or ""
         if not path:
@@ -1224,6 +1347,41 @@ def _inject_prior_acl(workspace_root: str, short: str, period: str,
             "error": write["error"],
         })
     return result
+
+
+def _capture_current_period_to_db(
+    short: str,
+    period: str,
+    output_files: list[dict],
+) -> list[dict]:
+    """Attempt to read U29..U33 cached values from each just-written
+    output file and persist them to ``scale_acl_history`` for the
+    CURRENT period. Feeds the next quarter's DB-first lookup.
+
+    Best-effort: silently skips files whose cached values are still
+    unevaluated (typical when pywin32 is unavailable and Excel hasn't
+    opened the file yet). The wizard surfaces a separate flash warning
+    when the post-run recalc is skipped.
+    """
+    out: list[dict] = []
+    if not short or not period:
+        return out
+    for entry in output_files or []:
+        path = entry.get("path") or ""
+        if not path:
+            continue
+        try:
+            res = acl_history_db.capture_from_workbook(
+                short, period, path,
+                source="captured-after-run",
+            )
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "wrote": 0, "skipped": False,
+                   "error": str(exc)}
+        res["path"] = path
+        out.append(res)
+    return out
+
 
 
 def _recalc_outputs(output_files: list[dict]) -> list[dict]:
@@ -1439,6 +1597,9 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         workspace_root, short, period, variant_result["outputs"]
     )
     recalc_results = _recalc_outputs(variant_result["outputs"])
+    db_captures = _capture_current_period_to_db(
+        short, period, variant_result["outputs"]
+    )
 
     return {
         "ok": True,
@@ -1451,6 +1612,7 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "carry_from_period": prev_period,
         "carry_from_path": str(prior_path),
         "recalc": recalc_results,
+        "db_captures": db_captures,
         "map_path": mp["path"],
         "map_source": mp["source"],
         "applied": fill["applied"],

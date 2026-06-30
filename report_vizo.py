@@ -107,6 +107,12 @@ V12R  = Font(name='Calibri', size=12, color='FF0000')
 V12BR = Font(name='Calibri', bold=True, size=12, color='FF0000')
 V10R  = Font(name='Calibri', size=10, color='FF0000')
 
+# ── White fonts (for cells with non-white fill) ──────────────────
+V12W  = Font(name='Calibri', size=12, color='FFFFFF')
+V12BW = Font(name='Calibri', bold=True, size=12, color='FFFFFF')
+V11W  = Font(name='Calibri', size=11, color='FFFFFF')
+V11BW = Font(name='Calibri', bold=True, size=11, color='FFFFFF')
+
 # ── Header fills (Vizo Color Theme 1) ────────────────────────────
 HDR_FILL = PatternFill('solid', fgColor='0D4D5E')   # accent1 teal
 HDR_FONT = Font(name='Calibri', bold=True, size=12, color='FFFFFF')
@@ -1612,8 +1618,10 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
                     pass  # unchanged
                 else:
                     cell.fill = DET_FILL
+                    cell.font = V12W  # white text on dark maroon
             elif i < j:
                 cell.fill = IMP_FILL
+                cell.font = V12W  # white text on dark olive
         gt_cell = ws.cell(row=r, column=ncol, value=rtotal)
         gt_cell.number_format = ACCT
         gt_cell.font = V12BR if _is_hidden(g) else V12B
@@ -1769,8 +1777,10 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
                     pass  # unchanged
                 else:
                     cell.fill = DET_FILL
+                    cell.font = V11W  # white text on dark maroon
             elif i < j:
                 cell.fill = IMP_FILL
+                cell.font = V11W  # white text on dark olive
             rtotal += v
         gt_pct = rtotal / total if total else 0
         ws.cell(row=r, column=ncol, value=gt_pct).number_format = PCT

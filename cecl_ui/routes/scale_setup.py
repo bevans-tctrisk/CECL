@@ -172,6 +172,163 @@ def _ensure_scale_mode(state: dict[str, Any]) -> None:
     _scale(state)
 
 
+def _flash_recalc_warnings(result: dict[str, Any]) -> None:
+    """Surface any ``_recalc_outputs`` skips/failures as user-visible
+    flash warnings. The runner's post-write Excel recalc is
+    best-effort and silent on failure; without this, a missing
+    ``pywin32`` install (or any other recalc failure) leaves every
+    output workbook with stale template-cached formula values and the
+    analyst sees identical numbers across periods until they open
+    each file in Excel and trigger a manual recalc (F9 / Save).
+    """
+    recalc = result.get("recalc") or []
+    if not isinstance(recalc, list):
+        return
+    skipped: list[str] = []
+    failed: list[str] = []
+    skip_reason = ""
+    for entry in recalc:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        name = Path(path).name if path else "(unknown)"
+        if entry.get("skipped"):
+            skipped.append(name)
+            if not skip_reason:
+                skip_reason = str(entry.get("error") or "").strip()
+        elif not entry.get("ok"):
+            err = str(entry.get("error") or "").strip()
+            failed.append(f"{name}: {err}" if err else name)
+    if skipped:
+        n = len(skipped)
+        sample = ", ".join(skipped[:3])
+        more = f" (+{n - 3} more)" if n > 3 else ""
+        detail = f" — {skip_reason}" if skip_reason else ""
+        flash(
+            f"Workbook formulas were NOT auto-recalculated for {n} "
+            f"file(s){detail}. Open each file in Excel and press F9 "
+            f"(or Save) so cached values refresh; otherwise viewers "
+            f"that don't recompute (SharePoint preview, Outlook "
+            f"preview, Excel set to manual calc) will show stale "
+            f"template values that may look identical across "
+            f"periods. Files: {sample}{more}.",
+            "warning",
+        )
+    if failed:
+        n = len(failed)
+        sample = "; ".join(failed[:3])
+        more = f" (+{n - 3} more)" if n > 3 else ""
+        flash(
+            f"Excel recalc failed for {n} file(s): {sample}{more}. "
+            "Open the file(s) in Excel manually so cached values "
+            "refresh before reviewing the ACL numbers.",
+            "warning",
+        )
+
+
+def _flash_prior_acl_warnings(result: dict[str, Any]) -> None:
+    """Surface ``_inject_prior_acl`` fallbacks as user-visible flash
+    warnings, and announce DB hits / captures as success info.
+
+    Resolution order in the runner:
+
+    * Path 1 (preferred) -- read from ``scale_acl_history`` PostgreSQL
+      table. No Excel dependency, no pywin32.
+    * Path 2 -- read cached values from the prior workbook (best
+      effort; requires Excel to have saved cached values).
+    * Path 3 -- write literal 0 to AY2..AY5 to break the formula leak.
+
+    This helper surfaces:
+
+    * The DB-hit case as an info-level confirmation.
+    * The Path-2 capture-into-DB success so the user knows the next
+      quarter will be automatic.
+    * The Path-3 fallback as a warning with actionable remediation.
+    * Any ``db_captures`` from the just-finished run so the user can
+      see whether the current period's values are now persisted.
+    """
+    prior = result.get("prior_acl") or {}
+    if not isinstance(prior, dict):
+        prior = {}
+    source = str(prior.get("source") or "")
+    fallback_used = bool(prior.get("fallback_used"))
+    prev_period = str(prior.get("prior_period") or "")
+
+    # Case A: DB hit -- no Excel dependency.
+    if source.startswith("db:") and not fallback_used:
+        flash(
+            f"Prior ACL values were loaded from the database "
+            f"(scale_acl_history) for {prev_period}; no Excel "
+            f"dependency required.",
+            "info",
+        )
+
+    # Case B: read from prior workbook and persisted to DB.
+    db_persist = prior.get("db_persist") or {}
+    if source == "prior-workbook" and db_persist.get("ok"):
+        flash(
+            f"Prior ACL values were read from the prior-quarter "
+            f"workbook for {prev_period} and persisted to the "
+            f"database. Next quarter's run will use the DB copy "
+            f"and won't require Excel access.",
+            "info",
+        )
+
+    # Case C: fallback to zero -- analyst needs to act.
+    if fallback_used:
+        reason = str(prior.get("error") or "").strip()
+        prior_path = str(prior.get("prior_path") or "")
+        prior_name = Path(prior_path).name if prior_path else "(unknown)"
+        applied = prior.get("applied") or []
+        n_written = sum(
+            1 for a in applied if isinstance(a, dict) and a.get("ok")
+        )
+        detail = f" — {reason}" if reason else ""
+        flash(
+            f"Prior ACL values for {prev_period} could NOT be loaded "
+            f"from the database OR read from the prior-quarter "
+            f"workbook ({prior_name}); wrote 0 to "
+            f"Historical Data!AY2..AY5 on {n_written} output file(s) "
+            f"to prevent the 'prior column duplicates current column' "
+            f"leak{detail}. To populate the database for this period: "
+            f"(1) open the prior workbook in Excel and Save so cached "
+            f"values populate, then run "
+            f"`scripts/scale_acl_backfill.py` to harvest them; or "
+            f"(2) install pywin32 in the wizard Python environment so "
+            f"the runner can headlessly recalc prior workbooks. After "
+            f"either, re-run this report and the DB will be populated "
+            f"automatically.",
+            "warning",
+        )
+
+    # Always surface DB captures for the CURRENT period.
+    db_captures = result.get("db_captures") or []
+    if isinstance(db_captures, list) and db_captures:
+        ok_count = sum(1 for c in db_captures if isinstance(c, dict) and c.get("ok"))
+        skipped_count = sum(
+            1 for c in db_captures
+            if isinstance(c, dict) and c.get("skipped")
+        )
+        if ok_count:
+            flash(
+                f"Persisted ACL values for the current period to the "
+                f"database ({ok_count} file(s)); next quarter's run "
+                f"will read them automatically.",
+                "info",
+            )
+        elif skipped_count:
+            flash(
+                f"Could not persist ACL values for the current period "
+                f"to the database: {skipped_count} output file(s) have "
+                f"no cached formula values yet (Excel hasn't evaluated "
+                f"them). Open the workbook in Excel + Save, then run "
+                f"`scripts/scale_acl_backfill.py` to populate the DB. "
+                f"Or install pywin32 so the runner can do this "
+                f"automatically.",
+                "warning",
+            )
+
+
 # -------------------------------------------------------------------
 # Entry — model_select POSTs model=scale here
 # -------------------------------------------------------------------
@@ -797,6 +954,8 @@ def step_run():
                     f"{result.get('quarters_requested', 32)} quarter(s) filled.",
                     "success",
                 )
+                _flash_recalc_warnings(result)
+                _flash_prior_acl_warnings(result)
             else:
                 for err in result.get("errors", []):
                     flash(err, "error")
@@ -814,6 +973,8 @@ def step_run():
                     f"of {result['total_rows']} cells.",
                     "success",
                 )
+                _flash_recalc_warnings(result)
+                _flash_prior_acl_warnings(result)
             else:
                 for err in result.get("errors", []):
                     flash(err, "error")

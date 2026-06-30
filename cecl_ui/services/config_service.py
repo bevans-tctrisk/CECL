@@ -227,7 +227,7 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         }),
         "has_header": bool(state.get("has_header", True)),
         "column_mappings": state["column_mappings"],
-        "credit_pull": state["credit_pull"],
+        "credit_pull": state.get("credit_pull") or {},
         "balance_format": {
             "remove_chars": state.get("balance_remove_chars", ["$", ","]),
             "accounting_negatives": bool(

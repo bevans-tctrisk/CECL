@@ -2267,6 +2267,109 @@ def selfheal_auto_map_balance_labels(state: dict[str, Any]) -> list[str]:
     ]
 
 
+def selfheal_adopt_yaml_schema_into_state(state: dict[str, Any]) -> list[str]:
+    """Translate YAML-config schema keys into wizard-state schema keys
+    in-place when a draft was created via ``adopt_config_to_completed``
+    (or any path that writes the raw YAML dict as the wizard state).
+
+    The adoption path in ``cecl_ui/routes/home.py`` writes the YAML
+    config verbatim as the draft payload. That works for run-time
+    report generation (which reads YAML keys) but the wizard renders
+    every step from a DIFFERENT schema (``pool_settings``, ``monthly_bal``,
+    ...). Without translation, the wizard's Loan Pools table is empty
+    even though the YAML's ``pools`` block has every pool definition.
+
+    Idempotent. Safe to call on every GET. Only fills empty wizard-side
+    fields — never overwrites user edits.
+    """
+    msgs: list[str] = []
+
+    # ---- pools (YAML) -> pool_settings (wizard) ----------------------
+    if not state.get("pool_settings"):
+        yaml_pools = state.get("pools")
+        if isinstance(yaml_pools, list) and yaml_pools:
+            ps_rows: list[dict[str, Any]] = []
+            for p in yaml_pools:
+                if not isinstance(p, dict):
+                    continue
+                nm = str(p.get("name") or "").strip()
+                if not nm:
+                    continue
+                ps_rows.append({
+                    "name": nm,
+                    "risk_rated": bool(p.get("risk_rated", True)),
+                    "brr": bool(p.get("brr", False)),
+                    "acl_months": p.get("acl_months"),
+                    "use_default_mgmt_adj": bool(
+                        p.get("use_default_mgmt_adj", False)
+                    ),
+                    "excluded": bool(p.get("excluded", False)),
+                })
+            if ps_rows:
+                state["pool_settings"] = ps_rows
+                # Mirror to warm.pools so downstream steps see the same list.
+                warm = state.get("warm") or {}
+                if not warm.get("pools"):
+                    warm["pools"] = [r["name"] for r in ps_rows]
+                    state["warm"] = warm
+                msgs.append(
+                    f"Recovered {len(ps_rows)} loan pool(s) from the adopted "
+                    f"YAML config — review on Step 2 (Loan Pools)."
+                )
+
+    # ---- monthly_balance (YAML) -> monthly_bal (wizard) -------------
+    mb = state.setdefault("monthly_bal", {})
+    yaml_mbal = state.get("monthly_balance")
+    if (
+        isinstance(yaml_mbal, dict)
+        and yaml_mbal
+        and not (mb.get("saved_path") or mb.get("parsed_pool_labels"))
+    ):
+        src_raw = str(yaml_mbal.get("source") or "").strip().lower()
+        # Map YAML source name -> wizard source name.
+        src_map = {
+            "single_workbook": "single",
+            "single": "single",
+            "per_year": "per_year",
+            "annual": "per_year",
+            "per_month": "per_month",
+            "monthly": "per_month",
+            "monthly_loan_extracts": "monthly_loan_extracts",
+        }
+        wizard_src = src_map.get(src_raw, src_raw or "single")
+        mb["source"] = wizard_src
+        if yaml_mbal.get("saved_path"):
+            mb["saved_path"] = str(yaml_mbal["saved_path"])
+        if yaml_mbal.get("filename"):
+            mb["filename"] = str(yaml_mbal["filename"])
+        layout = yaml_mbal.get("layout") or {}
+        if isinstance(layout, dict):
+            if layout.get("sheet"):
+                mb["sheet"] = str(layout["sheet"])
+            if layout.get("label_col"):
+                mb["pool_name_col"] = str(layout["label_col"])
+            if layout.get("first_date_col"):
+                mb["first_date_col"] = str(layout["first_date_col"])
+            if layout.get("header_row") is not None:
+                try:
+                    mb["header_row"] = int(layout["header_row"])
+                except (TypeError, ValueError):
+                    pass
+        ypm = yaml_mbal.get("pool_map")
+        if isinstance(ypm, dict) and ypm and not mb.get("pool_map"):
+            mb["pool_map"] = dict(ypm)
+            if not mb.get("parsed_pool_labels"):
+                mb["parsed_pool_labels"] = list(ypm.keys())
+        state["monthly_bal"] = mb
+        if msgs or src_raw:
+            msgs.append(
+                "Recovered Monthly Balance File layout from the adopted YAML "
+                "config — review on Step 8 (Monthly Balance File)."
+            )
+
+    return msgs
+
+
 def selfheal_flat_pool_seed_from_state(state: dict[str, Any]) -> list[str]:
     """Proactively seed Step 2 ``pool_settings`` + Step 8
     ``monthly_bal.pool_map`` from a previously-detected flat

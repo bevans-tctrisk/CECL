@@ -551,6 +551,23 @@ def _wizard_ctx(active: str) -> dict[str, Any]:
     step_status: dict[str, str] = {}
     hil_needs: list[dict[str, Any]] = []
     next_hil_key: str | None = None
+    # YAML-schema → wizard-schema self-heal: drafts created via
+    # ``home.adopt_config_to_completed`` carry the raw YAML config as
+    # the draft payload (``pools`` / ``monthly_balance`` / ``acl`` /
+    # ``historical_file_formats``). The wizard renders from a different
+    # schema (``pool_settings`` / ``monthly_bal`` / ``acl_balance`` /
+    # ``co_columns``), so without translation Step 2 shows zero pools
+    # even though the YAML has every pool defined. Runs OUTSIDE the
+    # ``_auto_scan_completed`` gate because adopted drafts skip auto-scan.
+    try:
+        from cecl_ui.services import auto_setup as _auto_setup_adopt
+        _adopt_msgs = _auto_setup_adopt.selfheal_adopt_yaml_schema_into_state(st)
+        if _adopt_msgs:
+            _save_state(st)
+            for _m in _adopt_msgs:
+                flash(f"Recovered from adopted config: {_m}", "success")
+    except Exception:  # noqa: BLE001
+        pass
     if st.get("_auto_scan_completed"):
         try:
             from cecl_ui.services import auto_setup

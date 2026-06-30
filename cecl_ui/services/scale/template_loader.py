@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import xml.etree.ElementTree as _ET
+import zipfile
 
 from flask import current_app
 
@@ -27,6 +29,35 @@ def _data_dir(kind: str) -> Path:
 def _period_to_prefix(period: str) -> str:
     """``2025-12`` -> ``2025_12``."""
     return period.replace("-", "_")
+
+
+def _probe_xlsx_integrity(path: Path) -> tuple[bool, str]:
+    """Cheap pre-flight check that ``path`` is a readable XLSX.
+
+    Returns ``(ok, error_message)``. Catches the two failure modes that
+    bite ``openpyxl.load_workbook`` deep in the SCALE runner: corrupt
+    zip container, and malformed inner sheet/styles/shared-strings XML.
+    Surfaces a clean, actionable message at template-resolve time
+    instead of a raw ``xml.etree.ElementTree.ParseError`` from inside
+    ``fill_template``.
+    """
+    try:
+        with zipfile.ZipFile(str(path), "r") as zf:
+            for name in zf.namelist():
+                if not name.startswith("xl/") or not name.endswith(".xml"):
+                    continue
+                try:
+                    _ET.fromstring(zf.read(name))
+                except _ET.ParseError as exc:
+                    return (
+                        False,
+                        f"Corrupt XML inside {path.name} -> {name}: {exc}",
+                    )
+    except zipfile.BadZipFile as exc:
+        return False, f"{path.name} is not a valid .xlsx (zip) file: {exc}"
+    except OSError as exc:
+        return False, f"Could not open {path.name}: {exc}"
+    return True, ""
 
 
 # ---------- template ----------
@@ -50,12 +81,20 @@ def resolve_template(period: str, override_path: Optional[str] = None) -> dict:
     if override_path:
         p = Path(override_path)
         if p.is_file():
+            ok, err = _probe_xlsx_integrity(p)
+            if not ok:
+                return {"ok": False, "path": str(p), "source": "override",
+                        "message": err}
             return {"ok": True, "path": str(p), "source": "override",
                     "message": ""}
     d = _data_dir("templates")
     prefix = _period_to_prefix(period)
     exact = d / f"{prefix}_CECL_SCALE_template.xlsx"
     if exact.is_file():
+        ok, err = _probe_xlsx_integrity(exact)
+        if not ok:
+            return {"ok": False, "path": str(exact), "source": "canonical",
+                    "message": err}
         return {"ok": True, "path": str(exact), "source": "canonical",
                 "message": ""}
     # Fallback: newest available template <= requested period.
@@ -64,6 +103,10 @@ def resolve_template(period: str, override_path: Optional[str] = None) -> dict:
     if candidates:
         chosen = max(candidates)
         p = d / f"{_period_to_prefix(chosen)}_CECL_SCALE_template.xlsx"
+        ok, err = _probe_xlsx_integrity(p)
+        if not ok:
+            return {"ok": False, "path": str(p),
+                    "source": "canonical_fallback", "message": err}
         return {
             "ok": True,
             "path": str(p),
