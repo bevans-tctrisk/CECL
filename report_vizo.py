@@ -1368,9 +1368,13 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
             w=0.92135835567470958, h=0.72857142857142854,
         )
     )
-    # catAx (x_axis): orientation=minMax, axPos=r, tickLblPos=high
+    # catAx (x_axis): orientation=maxMin so the first category in the data
+    # range (top of the pools list, matching WARM/wizard order on every other
+    # tab) renders at the TOP of the horizontal bar chart. Default 'minMax'
+    # would put the first category at the bottom (Excel's bar-chart default),
+    # which surfaces as the pools appearing in reverse order on this tab.
     c0.x_axis.delete = False
-    c0.x_axis.scaling.orientation = 'minMax'
+    c0.x_axis.scaling.orientation = 'maxMin'
     c0.x_axis.majorTickMark = 'out'
     c0.x_axis.minorTickMark = 'none'
     c0.x_axis.tickLblPos = 'high'
@@ -1429,9 +1433,10 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
             w=0.92135835567470958, h=0.72857142857142854,
         )
     )
-    # catAx (x_axis): orientation=minMax, axPos=r, tickLblPos=high
+    # catAx (x_axis): orientation=maxMin so the first category in the data
+    # range renders at the TOP (see matching note on Chart 3 above).
     c3.x_axis.delete = False
-    c3.x_axis.scaling.orientation = 'minMax'
+    c3.x_axis.scaling.orientation = 'maxMin'
     c3.x_axis.majorTickMark = 'out'
     c3.x_axis.minorTickMark = 'none'
     c3.x_axis.tickLblPos = 'high'
