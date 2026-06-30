@@ -445,6 +445,103 @@ def new_quarter(short_name: str):
         except (OSError, ValueError) as exc:
             flash(f"Could not persist report_period={period}: {exc}", "warning")
 
+    # 2b-2) ACL Balance override — Phase 9.36. The user can override the
+    # default ACL source for this run from the new-quarter form:
+    #
+    #   * ``acl_mode="manual"`` → record ``acl_manual_value`` as the
+    #     ACL Balance for this quarter, written to
+    #     ``cfg['acl']['history'][snapshot]`` so ``_merge_acl_history``
+    #     picks it up at report time. The YAML history entry persists
+    #     so subsequent quarters can carry it forward; if the user
+    #     wants to revert they re-pick "default" on a future run with
+    #     a non-matching snapshot (the old history entry stays for
+    #     that quarter, which is what an audit trail should do).
+    #   * ``acl_mode="solr"`` → enable the 5300 fallback with the
+    #     user's preferred field code (default ``AAS0048``). Written to
+    #     ``cfg['acl']['use_5300_fallback']=True`` and
+    #     ``cfg['acl']['solr_fields']=[<field>]`` so the engine probes
+    #     only the chosen field. Legacy fields (A007/A718A3/A718A5/A719)
+    #     are NOT auto-appended — per user direction AAS0048 is the
+    #     canonical source. Users who need legacy backstops can list
+    #     multiple fields by submitting them comma-separated.
+    #
+    # Empty / "default" mode leaves cfg['acl'] untouched, preserving
+    # whatever the wizard configured originally.
+    if not _skip_stage:
+        acl_mode = (request.form.get("acl_mode") or "default").strip()
+        if acl_mode in ("manual", "solr"):
+            acl_block = dict(cfg.get("acl") or {})
+            persist = False
+            flash_msg = ""
+            if acl_mode == "manual":
+                raw = (request.form.get("acl_manual_value") or "").strip()
+                try:
+                    val = float(raw.replace(",", "")) if raw else 0.0
+                except ValueError:
+                    val = 0.0
+                if val > 0:
+                    hist_map = dict(acl_block.get("history") or {})
+                    hist_map[snapshot] = round(val, 2)
+                    acl_block["history"] = hist_map
+                    cfg["acl"] = acl_block
+                    cfg["acl_balance"] = round(val, 2)
+                    persist = True
+                    flash_msg = (
+                        f"Saved manual ACL Balance ${val:,.2f} for "
+                        f"{snapshot} (acl.history[{snapshot}])."
+                    )
+                else:
+                    flash(
+                        "Manual ACL mode selected but no positive value "
+                        "provided; using YAML defaults instead.",
+                        "warning",
+                    )
+            else:  # acl_mode == "solr"
+                raw_field = (request.form.get("acl_solr_field") or "").strip()
+                # Allow comma-separated lists so power users can add
+                # legacy backstops (e.g. "AAS0048,A007,A718A3"). Single
+                # field is the common case.
+                if raw_field:
+                    field_order = [
+                        f.strip().upper()
+                        for f in raw_field.split(",")
+                        if f.strip()
+                    ]
+                else:
+                    field_order = []
+                if field_order:
+                    acl_block["use_5300_fallback"] = True
+                    acl_block["solr_fields"] = field_order
+                    cfg["acl"] = acl_block
+                    persist = True
+                    if len(field_order) == 1:
+                        flash_msg = (
+                            f"Enabled NCUA 5300 ACL fallback with "
+                            f"field '{field_order[0]}'."
+                        )
+                    else:
+                        flash_msg = (
+                            f"Enabled NCUA 5300 ACL fallback (probe order: "
+                            f"{', '.join(field_order)})."
+                        )
+                else:
+                    flash(
+                        "5300 ACL mode selected but no field code provided; "
+                        "using YAML defaults instead.",
+                        "warning",
+                    )
+            if persist:
+                try:
+                    config_service.save_client_config(
+                        ws, short_name, cfg, overwrite=True)
+                    if flash_msg:
+                        flash(flash_msg, "success")
+                except (OSError, ValueError) as exc:
+                    flash(
+                        f"Could not persist ACL override: {exc}",
+                        "warning",
+                    )
+
     # 2c) On the initial submit, scan the staged files for any new
     # ``loan_pool_code`` values that aren't yet in ``cfg["pool_map"]``.
     # If any are found, re-render the page with a mapping section so the
@@ -776,6 +873,7 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
         folders.append(Path(cp_folder))
 
     counts: dict[str, int] = {}
+    sources: dict[str, set] = {}
     samples: dict[str, set] = {}
 
     def _read_column(path: Path, col_mappings: dict) -> pd.Series | None:
@@ -824,6 +922,7 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
                     if not code or _resolves_to_pool(code, pool_map, split):
                         continue
                     counts[code] = counts.get(code, 0) + 1
+                    sources.setdefault(code, set()).add(f"file:{p.name}")
                     samples.setdefault(code, set())
                 break
 
@@ -836,9 +935,22 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
     db_counts = _scan_unmapped_codes_from_db(cfg, pool_map, split)
     for code, n in db_counts.items():
         counts[code] = counts.get(code, 0) + n
+        sources.setdefault(code, set()).add("db:historical")
+
+    def _src_label(code: str) -> str:
+        srcs = sources.get(code) or set()
+        has_file = any(s.startswith("file:") for s in srcs)
+        has_db = "db:historical" in srcs
+        if has_file and has_db:
+            return "loan files + historical data"
+        if has_file:
+            return "loan files"
+        if has_db:
+            return "historical data (DB)"
+        return ""
 
     return [
-        {"code": c, "count": counts[c]}
+        {"code": c, "count": counts[c], "source": _src_label(c)}
         for c in sorted(counts, key=lambda k: (-counts[k], k.lower()))
     ]
 
@@ -847,7 +959,17 @@ def _scan_unmapped_codes_from_db(cfg: dict, pool_map: dict,
                                  split: str) -> dict[str, int]:
     """Pull distinct loan_code values from the historical-data DB tables
     (chargeoffs, recoveries, delinquency) that don't resolve to any pool
-    via ``cfg['pool_map']``. Returns ``{code: row_count}``.
+    via ``cfg['pool_map']`` AND don't resolve via the NCUA canonical
+    fallback (``_resolve_pool_with_ncua``). Returns ``{code: row_count}``.
+
+    The NCUA fallback check is critical: rows in ``loan_code_*_history``
+    populated by 5300 backfills (``source LIKE '5300%'``) are keyed by
+    NCUA canonical labels like 'First Liens', 'New Vehicles',
+    'Unsecured Credit Card'. Those resolve automatically at report time
+    via :func:`generate_report._resolve_pool_with_ncua` — surfacing them
+    here as "needs mapping" misleads the user (they have nothing to map;
+    the resolution is automatic). Only codes that resolve to NEITHER
+    pool_map NOR NCUA fallback are genuinely unmapped.
 
     Returns an empty dict on any error (missing tables, no DB access).
     """
@@ -863,6 +985,56 @@ def _scan_unmapped_codes_from_db(cfg: dict, pool_map: dict,
         eng = create_engine(get_database_url())
     except Exception:  # noqa: BLE001
         return {}
+
+    # Build NCUA canonical -> pool fallback (best-effort; if generate_report
+    # isn't importable for any reason we degrade to pool_map-only matching).
+    ncua_lookup: dict[str, str] = {}
+    try:
+        import generate_report as _gr
+        ncua_lookup = _gr._build_ncua_canonical_pool_lookup(cfg) or {}
+    except Exception:  # noqa: BLE001
+        ncua_lookup = {}
+    default_pool = (cfg.get("default_pool") or "").strip()
+
+    # Build set of known pool names (lower-cased) from the canonical pools
+    # registry. DB historical rows from 5300 backfills (5300-distributed:*,
+    # 5300CO:*, 5300REC:*, 5300DQ:*) often carry the ALREADY-RESOLVED pool
+    # name as ``loan_code`` (because the backfill writers persist the
+    # destination pool, not a raw NCUA label, when one resolves). Surfacing
+    # those as "needs mapping" misleads the user — the code IS the pool.
+    known_pool_names: set[str] = set()
+    try:
+        for _p in config_service.get_pools(cfg) or []:
+            nm = (_p.get("name") or "").strip().lower()
+            if nm:
+                known_pool_names.add(nm)
+    except Exception:  # noqa: BLE001
+        known_pool_names = set()
+
+    def _resolves(code: str) -> bool:
+        if _resolves_to_pool(code, pool_map, split):
+            return True
+        if ncua_lookup:
+            key = str(code).strip().lower()
+            pool = ncua_lookup.get(key) or ncua_lookup.get(" ".join(key.split()))
+            if pool and pool.strip().lower() not in ("ignore", "exclude"):
+                return True
+        # Code IS already a configured pool name (DB historical rows often
+        # carry the resolved pool name as loan_code — nothing to map).
+        if known_pool_names and str(code).strip().lower() in known_pool_names:
+            return True
+        # default_pool resolution: any non-empty default_pool is a deliberate
+        # user choice for how unmapped codes should flow. For DB-historical
+        # NCUA-canonical aggregations (e.g. 'Agricultural',
+        # 'Commercial and Industrial' for a non-commercial CU) the user has
+        # already opted into Ignore via default_pool — flagging them every
+        # quarter forces the same answer the user already gave. File-side
+        # scanning (in the caller) still surfaces genuinely-new codes via
+        # the loan_data_extracts path; this DB-only path defers to the
+        # configured default.
+        if default_pool:
+            return True
+        return False
 
     counts: dict[str, int] = {}
     for table in ("loan_code_history",
@@ -884,7 +1056,7 @@ def _scan_unmapped_codes_from_db(cfg: dict, pool_map: dict,
             continue
         for r in rows:
             code = (r[0] or "").strip()
-            if not code or _resolves_to_pool(code, pool_map, split):
+            if not code or _resolves(code):
                 continue
             counts[code] = counts.get(code, 0) + int(r[1] or 0)
     return counts

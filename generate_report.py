@@ -1577,6 +1577,17 @@ def _load_monthly_balances_from_wizard(config):
 
     records = []
     alll_by_date: dict = {}
+    # Track rows per source label so we can drop redundant aggregate
+    # rows (Phase 9.39 — Destinations CU): when multiple workbook
+    # labels collapse to the same canonical pool via pool_map (e.g.
+    # 'Mastercard Loans' and 'Unsecured Credit Card Loans' both -> 
+    # 'Unsecured Credit Card Loans'), naively summing them
+    # double-counts at the months where both are populated. The
+    # typical Vizo IDLR balance-sheet pattern has detailed monthly
+    # sub-pool rows alongside NCUA-canonical aggregate roll-up rows
+    # that carry values only at quarter-ends. Collect per-label rows
+    # here; the subset-dedup pass below drops the aggregate.
+    by_label: dict = {}
 
     # Extract ACL row first (by explicit row index when given).
     if acl_row_idx is not None and 0 <= acl_row_idx < df_raw.shape[0]:
@@ -1624,18 +1635,66 @@ def _load_monthly_balances_from_wizard(config):
                 continue
             pool_name = label
 
+        key = (pool_name, label)
+        entry = by_label.setdefault(
+            key, {'pool': pool_name, 'label': label, 'rows': []})
         for j in range(len(dates)):
             if pd.notna(dates[j]):
                 bal = df_raw.iloc[i, date_start_col + j]
                 if pd.notna(bal):
                     try:
-                        records.append({
-                            'pool': pool_name,
-                            'date': dates[j],
-                            'balance': float(bal),
-                        })
+                        entry['rows'].append((dates[j], float(bal)))
                     except (ValueError, TypeError):
                         pass
+
+    # Subset-dedup: when several source labels map to the same pool,
+    # drop labels whose value-date set is a strict subset of another
+    # label's date set in the same pool. Eliminates the common Vizo
+    # IDLR balance-sheet shape where an NCUA-canonical aggregate row
+    # (values only at Mar/Jun/Sep/Dec) duplicates a detailed monthly
+    # sub-pool row that's already mapped to the same canonical pool.
+    by_pool: dict = {}
+    for entry in by_label.values():
+        by_pool.setdefault(entry['pool'], []).append(entry)
+
+    dropped_labels = []
+    for pool_name, entries in list(by_pool.items()):
+        if len(entries) < 2:
+            continue
+        date_sets = [(e, {d for d, _ in e['rows']}) for e in entries]
+        survivors = []
+        for e_i, ds_i in date_sets:
+            is_subset = False
+            for e_j, ds_j in date_sets:
+                if e_i is e_j:
+                    continue
+                # Strict subset (and strictly smaller).
+                if ds_i and ds_i <= ds_j and len(ds_i) < len(ds_j):
+                    is_subset = True
+                    break
+            if is_subset:
+                dropped_labels.append((e_i['label'], pool_name, len(ds_i)))
+            else:
+                survivors.append(e_i)
+        by_pool[pool_name] = survivors
+
+    if dropped_labels:
+        print("    Dropped redundant balance labels (date set is a "
+              "subset of another label mapped to the same pool — "
+              "likely NCUA-canonical roll-up duplicating detailed "
+              "monthly rows):")
+        for lab, pool_name, n in dropped_labels:
+            print(f"      - {lab!r} -> {pool_name!r} ({n} month(s))")
+
+    # Emit records from surviving entries.
+    for entries in by_pool.values():
+        for entry in entries:
+            for dt, bal in entry['rows']:
+                records.append({
+                    'pool': entry['pool'],
+                    'date': dt,
+                    'balance': bal,
+                })
 
     out_df = pd.DataFrame(records)
     if out_df.empty and not alll_by_date:
@@ -10698,16 +10757,36 @@ def generate_report(client_name, snapshot_date=None, reports=None):
     # report engine can pull the value directly from NCUA Form 5300.
     # Opt-in per CU via ``cfg['acl']['use_5300_fallback']``; requires
     # ``cfg['charter_number']`` to know which CU to query. The fetcher
-    # probes A007 (current 5300 / 5300SF unified ACL on Loans) →
-    # A718A3 (legacy CECL Schedule A) → A718A5 (Total ACL) → A719
-    # (legacy ALLL) so it works for every reporting regime since the
-    # 2023 form revision. Only missing or zero quarter-end values are
-    # filled — explicit user values from the file / YAML history
-    # always win.
+    # probes AAS0048 (current 5300 / 5300SF "Allowance for Credit
+    # Losses on Loans") by default — per user direction this is the
+    # canonical source. Power users can override the probe order via
+    # ``cfg['acl']['solr_fields']`` (a list, e.g. ``["AAS0048",
+    # "A007"]`` to enable legacy backstops for historical quarters).
+    # Only missing or zero quarter-end values are filled — explicit
+    # user values from the file / YAML history always win.
     acl_cfg = config.get('acl') or {}
     if acl_cfg.get('use_5300_fallback') and config.get('charter_number'):
         try:
             from cecl_ui.services import solr_5300_acl as _solr_acl
+            # Per-CU / per-run override: cfg['acl']['solr_fields'] lets
+            # the user (via Run New Quarter wizard) pick a specific
+            # 5300 field or supply an explicit probe order. Empty /
+            # missing list falls back to the default probe order baked
+            # into ``_solr_acl._ACL_FIELD_ORDER`` (currently AAS0048).
+            _solr_field_order = [
+                str(f).strip().upper()
+                for f in (acl_cfg.get('solr_fields') or [])
+                if str(f).strip()
+            ]
+            if not _solr_field_order:
+                _solr_field_order = list(_solr_acl._ACL_FIELD_ORDER)
+            # NOTE: legacy field backstops (A007/A718A3/A718A5/A719)
+            # are intentionally NOT auto-appended. Per user direction
+            # AAS0048 is the only canonical source; appending A007 etc.
+            # produced incorrect values (A007 is a related-but-different
+            # aggregate, not ACL-on-Loans). Users who want backstops
+            # for historical quarters list them explicitly in
+            # ``acl.solr_fields``.
             alll_by_date = hist.get('alll_by_date') or {}
             snap_dt = pd.Timestamp(snapshot_date)
 
@@ -10736,6 +10815,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             results = _solr_acl.fetch_acl_history(
                 config['charter_number'],
                 sorted(wanted),
+                fields=tuple(_solr_field_order),
             ) or {}
 
             filled = 0
@@ -10751,12 +10831,13 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 hist['alll_by_date'] = alll_by_date
                 print(f"    5300 ACL fallback: filled {filled} quarter(s) "
                       f"for charter {config['charter_number']} "
-                      f"(field {field_used or 'mixed'})")
+                      f"(field {field_used or 'mixed'}; "
+                      f"probe order: {', '.join(_solr_field_order)})")
             else:
                 print(f"    5300 ACL fallback: no non-zero ACL value "
                       f"found in Solr for charter {config['charter_number']} "
                       f"across {len(wanted)} quarter(s) "
-                      f"(probed A007, A718A3, A718A5, A719)")
+                      f"(probed {', '.join(_solr_field_order)})")
         except Exception as _e:  # noqa: BLE001
             print(f"    5300 ACL fallback skipped: {_e}")
 

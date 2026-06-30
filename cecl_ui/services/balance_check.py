@@ -840,7 +840,8 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
     # which raw loan codes currently sit in each pool and reassign them
     # without leaving the Balance Adjustment page.
     try:
-        adapter_state = _build_state_for_run(cfg, short_name)
+        adapter_state = _build_state_for_run(cfg, short_name,
+                                             snapshot_iso=snapshot_iso)
         by_code = loan_balances_by_pool(adapter_state)
         if by_code.get("ok"):
             code_map = by_code.get("by_pool_code") or {}
@@ -872,7 +873,8 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
 
 
 def _build_state_for_run(cfg: dict[str, Any],
-                         short_name: str | None) -> dict[str, Any]:
+                         short_name: str | None,
+                         snapshot_iso: str | None = None) -> dict[str, Any]:
     """Construct a minimal state-like dict suitable for
     :func:`loan_balances_by_pool` from a runtime YAML ``cfg`` plus the
     staged ``Raw_Uploads/<short>/`` folder.
@@ -882,6 +884,14 @@ def _build_state_for_run(cfg: dict[str, Any],
     (per-extract first, then the top-level fallback). The resulting
     ``sample_uploads.loan_data_files`` list mirrors the wizard's shape
     so the existing per-code aggregation works without modification.
+
+    When ``snapshot_iso`` is provided, each candidate file's filename is
+    further filtered via :func:`import_data.extract_snapshot_date` so
+    only files belonging to the requested snapshot contribute to the
+    per-code breakdown. This prevents per-code totals from being inflated
+    by historical snapshots that linger in ``Archive/<short>/`` after
+    prior quarters' imports. Files whose date can't be parsed are
+    INCLUDED (fallback: single-period CUs or undated filenames).
     """
     from cecl_ui.services import config_service  # local: avoid cycles
     raw_dir = None
@@ -919,6 +929,22 @@ def _build_state_for_run(cfg: dict[str, Any],
     allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
     seen_names: set[str] = set()
 
+    # Snapshot filter setup. ``extract_snapshot_date`` needs ``date_pattern``
+    # in the config; absence falls back to filename hints inside the func.
+    snap_filter_active = bool(snapshot_iso)
+    _extract_date = None
+    if snap_filter_active:
+        try:
+            from import_data import extract_snapshot_date as _extract_date
+        except Exception:  # noqa: BLE001 — outside Flask / missing deps
+            _extract_date = None
+            snap_filter_active = False
+    # extract_snapshot_date requires a `date_pattern`; synthesize a
+    # liberal default when the YAML doesn't carry one so the function's
+    # name-based fallbacks (month names, MMDDYYYY, etc.) still fire.
+    snap_cfg = dict(cfg)
+    snap_cfg.setdefault("date_pattern", r"(\d{4})[-_](\d{2})")
+
     def _norm(name: str) -> str:
         # Normalize underscore/space + case so the Phase 9.35 auto-restore
         # copies (which secure_filename'd spaces into underscores) don't
@@ -946,6 +972,17 @@ def _build_state_for_run(cfg: dict[str, Any],
             if matched_ex is None and top_rx is not None and \
                     not top_rx.search(entry.name):
                 continue
+            # Phase 9.40: skip files that belong to a DIFFERENT snapshot
+            # so per-code breakdowns reflect only the requested period.
+            # Undated filenames (extract returns None) are kept so
+            # single-period CUs still get per-code data.
+            if snap_filter_active and _extract_date is not None:
+                try:
+                    file_snap = _extract_date(entry.name, snap_cfg)
+                except Exception:  # noqa: BLE001
+                    file_snap = None
+                if file_snap and file_snap != snapshot_iso:
+                    continue
             ex_src = matched_ex or {}
             file_entry: dict[str, Any] = {
                 "name": entry.name,

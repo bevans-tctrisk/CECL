@@ -3,17 +3,16 @@
 Companion to ``solr_5300_backfill`` and friends. Used by the report
 runtime as a *fallback* source when the credit union's monthly-balance
 file does not include an ACL row for a given quarter end (or includes
-$0). Modern post-CECL filers (both 5300 long form and 5300SF short
-form) report the value in ``A007``; older ``A718A3`` / ``A718A5`` /
-``A719`` fields are probed as backstops for legacy quarters and
-institutions that still file under the pre-2023 Schedule A layout.
-This module probes all four and returns the first non-zero match so
-it works for both reporting regimes.
+$0). The canonical field for CUs filing under the current 5300/5300SF
+schedule is ``AAS0048`` ("Allowance for Credit Losses on Loans"); per
+user direction this is the *only* field probed by default. Callers
+who need to probe legacy Schedule-A fields (``A007``, ``A718A3``,
+``A718A5``, ``A719``) can pass an explicit ``fields=`` tuple.
 
 Public API:
     ``fetch_acl_for_period(charter, period_iso, *, solr_url, core)``
-    -> ``{"value": float, "field": "A007"|"A718A3"|"A718A5"|"A719", ...}``
-    or ``None`` when no doc / all candidate fields are zero/missing.
+    -> ``{"value": float, "field": "AAS0048", ...}``
+    or ``None`` when no doc / the AAS0048 field is zero/missing.
 
 This is read-only and idempotent. Callers should treat any transport
 error as a soft miss (the report engine continues with whatever
@@ -33,20 +32,20 @@ from .solr_5300_backfill import (  # type: ignore[import-not-found]
 DEFAULT_SOLR_URL = "http://searchserver1.tctrisk.com:8983/solr"
 DEFAULT_CORE = "ncua"
 
-# Field probe order:
-#   1. A007   — ACL on Loans (current 5300 / 5300SF unified field used
-#      by virtually every CU since the post-CECL form revisions).
-#      Empirically populated for both small ($15M asset) and large
-#      ($300M+) filers. This is the canonical post-2023 location.
-#   2. A718A3 — ACL on Loans (legacy long-form CECL field, retained
-#      for older quarters / institutions that still report under the
-#      historical Schedule A layout).
-#   3. A718A5 — Total ACL (loans + other assets). For CECL adopters
-#      whose ACL on Loans is rolled into the total only.
-#   4. A719   — Legacy ALLL (pre-CECL adopters / state-charter CUs
-#      that still file under the pre-2023 form).
-# First non-zero positive match wins.
-_ACL_FIELD_ORDER: tuple[str, ...] = ("A007", "A718A3", "A718A5", "A719")
+# Field probe order (default = AAS0048 only per user direction).
+#
+#   AAS0048 — "Allowance for Credit Losses on Loans" on the current
+#       5300/5300SF schedule. This is the canonical, audited source
+#       of record for ACL on Loans for any CU filing under the modern
+#       form (every CU as of 2026).
+#
+# Legacy backstops (``A007``, ``A718A3``, ``A718A5``, ``A719``) are
+# intentionally NOT in the default tuple — prior cross-CU verification
+# (2026-06-11) treated A007 as canonical, but the user has clarified
+# that A007 is a related-but-different aggregate (not ACL-on-Loans
+# specifically). Callers needing legacy probing for historical quarters
+# can pass an explicit ``fields=("AAS0048", "A007", ...)`` tuple.
+_ACL_FIELD_ORDER: tuple[str, ...] = ("AAS0048",)
 
 
 def _quarter_end_iso(period_iso: str) -> str | None:
@@ -138,12 +137,17 @@ def fetch_acl_history(
     username: str | None = None,
     password: str | None = None,
     timeout: int = 20,
+    fields: tuple[str, ...] = _ACL_FIELD_ORDER,
 ) -> dict[str, dict[str, Any]]:
     """Bulk variant — returns ``{quarter_end_iso: result_dict}``.
 
     Quarter-ends are deduped after snapping. Misses (None) are NOT
     included in the output. Transport errors during one period skip
     that period and continue.
+
+    ``fields`` lets callers override the per-quarter probe order — pass
+    e.g. ``("AS0048", "A007", "A718A3", "A718A5", "A719")`` to prefer a
+    specific Solr field while keeping the legacy backstops.
     """
     out: dict[str, dict[str, Any]] = {}
     seen: set[str] = set()
@@ -161,6 +165,7 @@ def fetch_acl_history(
                 username=username,
                 password=password,
                 timeout=timeout,
+                fields=fields,
             )
         except Exception:  # noqa: BLE001
             continue

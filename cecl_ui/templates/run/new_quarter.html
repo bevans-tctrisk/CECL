@@ -14,13 +14,24 @@
     <p style="margin:6px 0;">
       Staged {{ staged_count }} file(s). Found
       <strong>{{ unmapped_codes|length }} loan code(s)</strong>
-      in the new data that aren't yet in this CU's pool map. Without a
-      mapping they would silently fall through to
-      <code>{{ cfg.default_pool or 'Ignore' }}</code> and create a spurious
-      pool in the report.
+      that aren't yet in this CU's pool map. Without a mapping they would
+      silently fall through to <code>{{ cfg.default_pool or 'Ignore' }}</code>
+      and create a spurious pool in the report.
     </p>
     <p style="margin:6px 0;">
-      Pick a pool for each new code below. Pick
+      The <em>Source</em> column shows where each code came from:
+      <strong>loan files</strong> means it's in the freshly-staged
+      quarter's loan extract (raw CU codes you typically map on
+      wizard Step 3); <strong>historical data (DB)</strong> means it's
+      sitting in the <code>loan_code_*_history</code> tables from a prior
+      5300 backfill / monthly aggregation and only surfaces here because
+      it doesn't resolve via your pool map <em>or</em> the NCUA canonical
+      fallback. NCUA-style labels that auto-route via canonical fallback
+      (e.g. "First Liens" → "Mortgage Loan") are filtered out and don't
+      need attention here.
+    </p>
+    <p style="margin:6px 0;">
+      Pick a pool for each code below. Pick
       <em>{{ cfg.default_pool or 'Ignore' }}</em> intentionally if you want
       that code excluded from the analysis.
     </p>
@@ -41,6 +52,7 @@
         <tr>
           <th>Loan Code</th>
           <th>Occurrences</th>
+          <th>Source</th>
           <th>Map to Pool</th>
           <th>or New Pool Name</th>
         </tr>
@@ -53,6 +65,7 @@
             <input type="hidden" name="map_code" value="{{ u.code }}">
           </td>
           <td>{{ u.count }}</td>
+          <td><span class="muted">{{ u.source or '—' }}</span></td>
           <td>
             <select name="map_pool">
               <option value="" selected>— choose pool —</option>
@@ -312,6 +325,52 @@
     <label><input type="checkbox" name="mgmt_adj_napkin"
            {% if cfg.reports is not defined or cfg.reports.get('mgmt_adj_napkin', True) %}checked{% endif %}>
       Management Adjustment Worksheet</label>
+
+    <details style="margin-top:24px;" open>
+      <summary style="cursor:pointer;"><strong>4. Allowance for Credit Loss Balance (optional override)</strong></summary>
+      <div style="padding:10px 4px 4px 4px;">
+        <p class="muted" style="margin:6px 0;">
+          By default the report's
+          <em>Allowance for Credit Loss Balance</em> (R125 of the
+          <code>ACL Env by Pool Mgmt Adj</code> tab) is read from the
+          monthly balance file row configured in the wizard
+          (<code>cfg.acl.row</code>). When that row is blank/zero — or
+          if you want to force a value for this quarter — use one of
+          the overrides below. The choice is persisted to this CU's
+          YAML so future quarters carry it forward (manual values are
+          stored per-quarter under <code>acl.history</code>; 5300 field
+          preference is stored under <code>acl.solr_fields</code>).
+        </p>
+        <label style="display:block; margin:6px 0;">
+          <input type="radio" name="acl_mode" value="default" checked>
+          <strong>Default</strong> — read from monthly balance file;
+          fall back to NCUA 5300 (probes
+          <code>{% if cfg.acl and cfg.acl.solr_fields %}{{ cfg.acl.solr_fields|join(', ') }}{% else %}AAS0048{% endif %}</code>)
+          when the file row is empty.
+        </label>
+        <label style="display:block; margin:6px 0;">
+          <input type="radio" name="acl_mode" value="manual">
+          <strong>Manual value:</strong>
+          <input type="number" step="0.01" min="0" name="acl_manual_value"
+                 placeholder="e.g. 125000.00"
+                 style="width:160px; margin-left:6px;">
+          dollars
+          <span class="muted" style="margin-left:6px; font-size:90%;">
+            (saved as <code>acl.history[{{ cfg.report_period or 'snapshot' }}]</code> — overrides the file and the 5300 fallback for this quarter)
+          </span>
+        </label>
+        <label style="display:block; margin:6px 0;">
+          <input type="radio" name="acl_mode" value="solr">
+          <strong>Pull from NCUA 5300,</strong> field code(s):
+          <input type="text" name="acl_solr_field" value="AAS0048"
+                 placeholder="AAS0048"
+                 style="width:160px; margin-left:6px; text-transform:uppercase;">
+          <span class="muted" style="margin-left:6px; font-size:90%;">
+            (<code>AAS0048</code> is the canonical ACL on Loans field; comma-separated list allowed if you want legacy backstops like <code>AAS0048,A007</code>)
+          </span>
+        </label>
+      </div>
+    </details>
 
     <div style="margin-top:24px; display:flex; gap:12px; align-items:center;">
       <button class="btn btn-success" type="submit">Stage, Import &amp; Run</button>
