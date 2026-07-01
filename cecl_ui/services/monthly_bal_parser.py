@@ -663,8 +663,14 @@ def pool_balances_for_latest_period(
         }
 
         by_pool: dict[str, float] = {}
-        raw_rows: list[dict[str, Any]] = []
-        seen_labels: set[str] = set()
+        # Aggregate multiple detail rows sharing the same pool label
+        # (e.g. Symitar/Episys balance-sheet exports that emit one row
+        # per loan-type code but reuse the same pool name across codes).
+        # Parent/summary rows in Vizo-style hierarchical workbooks are
+        # kept OUT of by_pool via ``exclude_labels`` (see auto_setup
+        # ``_apply_pool_seed_to_state``), so summing across identical
+        # labels is always safe.
+        row_agg: dict[str, dict[str, Any]] = {}
 
         # Walk data rows below the header; stop after a stretch of blanks.
         max_row = ws.max_row or (header_row + 200)
@@ -679,23 +685,30 @@ def pool_balances_for_latest_period(
             blanks = 0
             label = str(label_cell).strip()
             key = label.lower()
-            if key in seen_labels:
-                continue
-            seen_labels.add(key)
 
             bal = _coerce_number(
                 ws.cell(row=r, column=target_col).value
             )
             is_excluded = key in excl
             mapped = "" if is_excluded else ltp.get(key, "")
-            raw_rows.append({
-                "label": label,
-                "balance": bal,
-                "mapped_pool": mapped,
-                "excluded": is_excluded,
-            })
+
+            existing = row_agg.get(key)
+            if existing is None:
+                row_agg[key] = {
+                    "label": label,
+                    "balance": bal,
+                    "mapped_pool": mapped,
+                    "excluded": is_excluded,
+                }
+            elif bal is not None:
+                prev_bal = existing.get("balance")
+                existing["balance"] = (
+                    bal if prev_bal is None else prev_bal + bal
+                )
+
             if mapped and bal is not None:
                 by_pool[mapped] = by_pool.get(mapped, 0.0) + bal
+        raw_rows = list(row_agg.values())
     finally:
         wb.close()
 
@@ -1325,8 +1338,10 @@ def pool_balances_for_per_month_files(
         # sheet specifically. (Our _load_grid currently picks the densest
         # sheet; that's usually correct for these one-tab balance sheets.)
         by_pool: dict[str, float] = {}
-        raw_rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        # Aggregate detail rows sharing the same label (see comment in
+        # ``pool_balances_for_latest_period``); ``exclude_labels`` handles
+        # Vizo-hierarchical parent-summary rows so summing is always safe.
+        row_agg: dict[str, dict[str, Any]] = {}
         start = max(header_row, 1)
         # When the user supplied a manual stop_row we cap the scan there;
         # otherwise we scan the whole grid and rely on substring totals
@@ -1358,18 +1373,25 @@ def pool_balances_for_per_month_files(
                 # Stop at the first totals/end marker.
                 break
             key = label.lower()
-            if key in seen:
-                continue
-            seen.add(key)
             bal = (_coerce_number(row[balance_col_idx - 1])
                    if balance_col_idx - 1 < len(row) else None)
             is_excluded = key in excl
             mapped = "" if is_excluded else ltp.get(key, "")
-            raw_rows.append({"label": label, "balance": bal,
-                             "mapped_pool": mapped,
-                             "excluded": is_excluded})
+
+            existing = row_agg.get(key)
+            if existing is None:
+                row_agg[key] = {"label": label, "balance": bal,
+                                "mapped_pool": mapped,
+                                "excluded": is_excluded}
+            elif bal is not None:
+                prev_bal = existing.get("balance")
+                existing["balance"] = (
+                    bal if prev_bal is None else prev_bal + bal
+                )
+
             if mapped and bal is not None:
                 by_pool[mapped] = by_pool.get(mapped, 0.0) + bal
+        raw_rows = list(row_agg.values())
         by_period[period] = {"by_pool": by_pool, "raw_rows": raw_rows}
 
     return {"ok": True,
@@ -1697,7 +1719,9 @@ def pool_balances_for_per_year_files(
             period_iso = d.isoformat()
             slot = by_period.setdefault(
                 period_iso, {"by_pool": {}, "raw_rows": []})
-            seen: set[str] = set()
+            # Aggregate detail rows sharing the same label per period
+            # (see comment in ``pool_balances_for_latest_period``).
+            row_agg: dict[str, dict[str, Any]] = {}
             for r in range(header_row, len(rows)):
                 row = rows[r]
                 if label_col_idx - 1 >= len(row):
@@ -1714,20 +1738,27 @@ def pool_balances_for_per_year_files(
                 if lc in _PER_MONTH_SKIP_PHRASES:
                     continue
                 key = lc
-                if key in seen:
-                    continue
-                seen.add(key)
                 bal = (_coerce_number(row[c]) if c < len(row) else None)
                 is_excluded = key in excl
                 mapped = "" if is_excluded else ltp.get(key, "")
-                slot["raw_rows"].append({
-                    "label": label, "balance": bal,
-                    "mapped_pool": mapped, "period": period_iso,
-                    "excluded": is_excluded,
-                })
+
+                existing = row_agg.get(key)
+                if existing is None:
+                    row_agg[key] = {
+                        "label": label, "balance": bal,
+                        "mapped_pool": mapped, "period": period_iso,
+                        "excluded": is_excluded,
+                    }
+                elif bal is not None:
+                    prev_bal = existing.get("balance")
+                    existing["balance"] = (
+                        bal if prev_bal is None else prev_bal + bal
+                    )
+
                 if mapped and bal is not None:
                     slot["by_pool"][mapped] = (
                         slot["by_pool"].get(mapped, 0.0) + bal)
+            slot["raw_rows"].extend(row_agg.values())
 
     return {"ok": True,
             "error": "; ".join(errors) if errors else None,
