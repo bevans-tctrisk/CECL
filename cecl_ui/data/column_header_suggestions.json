@@ -1,6 +1,7 @@
 {
   "field_to_header_counts": {
     "current_balance": {
+      "account balance total amount": 1,
       "bal": 6,
       "bal forward": 2,
       "balance": 2,
@@ -16,15 +17,16 @@
       "current loan balance": 10,
       "currentbalance": 2,
       "currupb": 8,
-      "loan balance": 29,
+      "loan balance": 30,
       "new princ balance": 8,
       "newbal": 1,
       "original balance as of 11/30/21": 5
     },
     "current_fico_score": {
-      "credit score": 9
+      "credit score": 10
     },
     "days_delinquent": {
+      "account delinquent day count": 1,
       "account number": 2,
       "acctbs": 29,
       "col_x": 4,
@@ -45,11 +47,12 @@
       "member": 2,
       "member close date": 10,
       "month delq days": 2,
-      "past due": 30
+      "past due": 31
     },
     "interest_rate": {
-      "annual rate 1": 29,
+      "annual rate 1": 30,
       "cash annual interest rate": 8,
+      "cash current annual interest rate": 1,
       "int rate": 4,
       "int_rate": 2,
       "interest rate": 41,
@@ -70,8 +73,8 @@
       "lntype": 18,
       "loan collateral code": 5,
       "loan purpose": 8,
-      "loan type": 48,
-      "loan type code": 26,
+      "loan type": 49,
+      "loan type code": 27,
       "mbr state code": 6,
       "newcolb": 1,
       "oldcola": 1,
@@ -93,7 +96,8 @@
     "member_number": {
       "account": 16,
       "account #": 7,
-      "account number": 24,
+      "account identifier -pk": 1,
+      "account number": 25,
       "acct #": 4,
       "acct nbr": 10,
       "acct#": 2,
@@ -109,11 +113,12 @@
       "om sys - prin number": 8
     },
     "open_date": {
+      "account active first date": 1,
       "card open date": 8,
       "contractdate": 5,
       "date of loan": 11,
       "loan date": 2,
-      "loan original date": 29,
+      "loan original date": 30,
       "loanorigination": 2,
       "open date": 18,
       "opendat": 48,
@@ -125,7 +130,8 @@
     },
     "original_fico_score": {
       "application_creditscore": 5,
-      "credit score": 55,
+      "credit score": 56,
+      "credit score code": 1,
       "creditscore": 2,
       "fico": 5,
       "inv": 8,
@@ -137,7 +143,7 @@
       "finalloanamount": 5,
       "highbalance": 2,
       "loan amount": 2,
-      "loan original amnt": 16,
+      "loan original amnt": 17,
       "loan#": 8,
       "orig ln amt": 2,
       "orig nbr pymts": 13,
@@ -148,8 +154,8 @@
       "original loan amount": 40
     },
     "total_available_credit": {
-      "credit limit": 60,
-      "credit line amount": 8,
+      "credit limit": 61,
+      "credit line amount": 9,
       "creditlimit": 2,
       "creditlimitamt": 5,
       "dblimt": 29,
@@ -160,6 +166,10 @@
   "header_display_forms": {
     "account": "Account",
     "account #": "Account #",
+    "account active first date": "Account Active First Date",
+    "account balance total amount": "Account Balance Total Amount",
+    "account delinquent day count": "Account Delinquent Day Count",
+    "account identifier -pk": "Account Identifier -PK",
     "account number": "Account Number",
     "acct #": "Acct #",
     "acct nbr": "ACCT NBR",
@@ -181,6 +191,7 @@
     "card account number": "Card Account Number",
     "card open date": "Card Open Date",
     "cash annual interest rate": "Cash Annual Interest Rate",
+    "cash current annual interest rate": "Cash Current Annual Interest Rate",
     "cc last stmt bal": "CC LAST STMT BAL",
     "cc note last 4": "CC Note Last 4",
     "cltype": "CLTYPE",
@@ -190,6 +201,7 @@
     "credit limit": "CREDIT LIMIT",
     "credit line amount": "Credit Line Amount",
     "credit score": "CREDIT SCORE",
+    "credit score code": "Credit Score Code",
     "creditlimit": "CreditLimit",
     "creditlimitamt": "CREDITLIMITAMT",
     "creditscore": "CreditScore",
@@ -283,6 +295,6 @@
     "type of mortgage": "Type of Mortgage",
     "user_defined_field_7": "User_Defined_Field_7"
   },
-  "updated_at": "2026-06-30T20:04:57",
+  "updated_at": "2026-07-01T00:37:31",
   "version": 1
 }

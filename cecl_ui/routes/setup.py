@@ -140,19 +140,41 @@ _LEGACY_POOL_MAP_STUBS = {
 
 
 def _strip_legacy_pool_map_stubs(state: dict[str, Any]) -> bool:
-    """Remove the 7 hard-coded legacy `pool_map` example entries when their
-    value still matches the original default. Safe to call on every request
-    — only touches state when at least one stub is present. Returns True
-    when changes were made.
+    """Remove the 7 hard-coded legacy `pool_map` example entries — but ONLY
+    when the pool_map still looks like a pristine default (contains
+    nothing but legacy stub keys, each still holding the legacy default
+    value). Once the user has added any other loan code, or edited any
+    stub's pool name, the pool_map is treated as real user data and
+    left alone forever (via the ``_legacy_stubs_purged`` sentinel).
+
+    This prevents a very sharp edge case: several of the legacy stub
+    keys (notably ``CC`` -> ``Credit Cards``, ``HELOC`` -> ``HELOC``,
+    ``MORT`` -> ``Mortgage Loans``) are ALSO the natural mapping any
+    real credit union would enter. Without the sentinel, saving one of
+    those mappings would silently strip it on the very next page render
+    and every subsequent validator would flag the code as unmapped —
+    even though the disk draft still shows the correct save.
+
+    Safe to call on every request. Returns True when changes were made.
     """
     pm = state.get("pool_map")
     if not isinstance(pm, dict) or not pm:
         return False
+    # Once we've decided this draft has real user data, never touch it.
+    if state.get("_legacy_stubs_purged"):
+        return False
+    # If ANY entry is not an untouched legacy stub, treat the whole
+    # pool_map as user data and mark it so we never re-check.
+    for k, v in pm.items():
+        if k not in _LEGACY_POOL_MAP_STUBS or _LEGACY_POOL_MAP_STUBS[k] != v:
+            state["_legacy_stubs_purged"] = True
+            return False
+    # pool_map is exclusively unmodified legacy stubs — safe to purge.
     removed = False
-    for k, v in _LEGACY_POOL_MAP_STUBS.items():
-        if pm.get(k) == v:
-            pm.pop(k, None)
+    for k in list(_LEGACY_POOL_MAP_STUBS.keys()):
+        if pm.pop(k, None) is not None:
             removed = True
+    state["_legacy_stubs_purged"] = True
     return removed
 
 
