@@ -843,6 +843,66 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
         required = ['member_number', 'current_balance']
         if not static_pool_code:
             required.append('loan_pool_code')
+        missing = [
+            f for f in required
+            if not col_map.get(f) or col_map.get(f) not in df.columns
+        ]
+        if missing:
+            # Header-row auto-detection. The configured header_row didn't
+            # surface the required columns — common when a CU changes an
+            # export's layout between periods (e.g. AIRES cardholder files
+            # that moved their header from row 1 to row 4). Scan the first
+            # rows for the one that actually carries the mapped column
+            # names and re-read with it, so a stale header_row no longer
+            # silently drops a whole file (which had been dropping every
+            # credit-card loan for Central Keystone's June extract).
+            wanted = {
+                re.sub(r"\s+", " ", str(v)).strip().lower()
+                for k, v in col_map.items()
+                if k in ('member_number', 'current_balance', 'loan_pool_code')
+                and isinstance(v, str) and v.strip()
+            }
+            if wanted:
+                try:
+                    probe = (
+                        pd.read_csv(file_path, header=None, nrows=15, dtype=str)
+                        if ext == '.csv'
+                        else pd.read_excel(file_path, header=None, nrows=15)
+                    )
+                except Exception:  # noqa: BLE001
+                    probe = None
+                best_i, best_hits = None, 0
+                if probe is not None:
+                    for _i in range(len(probe)):
+                        cells = {
+                            re.sub(r"\s+", " ", str(v)).strip().lower()
+                            for v in probe.iloc[_i].tolist()
+                            if v is not None and str(v).strip()
+                        }
+                        hits = len(wanted & cells)
+                        if hits > best_hits:
+                            best_hits, best_i = hits, _i
+                if (best_i is not None and best_i != pd_header
+                        and best_hits >= min(2, len(wanted))):
+                    if ext == '.csv':
+                        df = pd.read_csv(file_path, header=best_i)
+                    else:
+                        df = pd.read_excel(file_path, header=best_i)
+                    _normed_cols = []
+                    for _i2, _c in enumerate(df.columns):
+                        _s = (re.sub(r"\s+", " ", str(_c)).strip()
+                              if _c is not None else "")
+                        _low = _s.lower()
+                        if (not _s) or _low == "nan" \
+                                or _unnamed_rx_runtime.match(_s):
+                            _normed_cols.append(
+                                f"col_{_excel_idx_to_letter(_i2)}")
+                        else:
+                            _normed_cols.append(_s)
+                    df.columns = _normed_cols
+                    print(f"    Auto-detected header on row {best_i + 1} "
+                          f"(configured header_row={hr_cfg} did not match "
+                          f"columns {missing}).")
         for field in required:
             src_col = col_map.get(field)
             if not src_col or src_col not in df.columns:
