@@ -804,6 +804,46 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
     except Exception as exc:  # noqa: BLE001
         monthly_err = f"Monthly balance read failed: {exc}"
 
+    # Restrict the comparison to real loan pools. The Monthly Balance file
+    # is often a full GL balance sheet (especially in ``per_month`` mode):
+    # its non-loan line items (ACH Clearing, ATM Machine, Christmas Clubs,
+    # Accrued Interest, CECL, ...) fall through the balance ``pool_map`` and
+    # would otherwise show up as bogus pools here. Mirror the report
+    # engine's ``load_historical_data`` filter: keep only pools this CU has
+    # configured (``pools`` / ``pool_order`` / ``not_risk_rated`` / the
+    # Monthly-Balance ``pool_map`` targets) or that actually carry imported
+    # loans this snapshot.
+    configured_lc: set[str] = set()
+    for _p in (cfg.get("pools") or []):
+        _n = _p.get("name") if isinstance(_p, dict) else _p
+        if _n:
+            configured_lc.add(str(_n).strip().lower())
+    for _n in (cfg.get("pool_order") or []):
+        if _n:
+            configured_lc.add(str(_n).strip().lower())
+    for _n in (cfg.get("not_risk_rated") or []):
+        if _n:
+            configured_lc.add(str(_n).strip().lower())
+    for _v in ((cfg.get("monthly_balance") or {}).get("pool_map") or {}).values():
+        if _v:
+            configured_lc.add(str(_v).strip().lower())
+    if configured_lc:
+        loan_pools_lc = {str(k).strip().lower() for k in loan_by_pool}
+        dropped = [
+            k for k in monthly_by_pool
+            if str(k).strip().lower() not in configured_lc
+            and str(k).strip().lower() not in loan_pools_lc
+        ]
+        if dropped:
+            monthly_by_pool = {
+                k: v for k, v in monthly_by_pool.items()
+                if k not in set(dropped)
+            }
+            print(f"    Balance check: dropped {len(dropped)} non-loan "
+                  f"balance-sheet line item(s): "
+                  f"{', '.join(sorted(dropped)[:6])}"
+                  f"{'…' if len(dropped) > 6 else ''}")
+
     # ── Build rows ──────────────────────────────────────────────────
     all_pools = sorted(
         set(loan_by_pool.keys()) | set(monthly_by_pool.keys()),
