@@ -1202,15 +1202,20 @@ def _apply_sample_to_state(
 
     # Pool map seed: every detected code -> "Ignore" so user only has to
     # rename pools, not type the codes. We keep existing entries untouched
-    # so re-running the scan doesn't clobber the user's renames.
+    # so re-running the scan doesn't clobber the user's renames. If we
+    # have a durable history entry for a code (from a prior session on
+    # this draft), restore that instead of the "Ignore" placeholder so a
+    # Step 12 extract delete-and-re-add cycle doesn't force the user to
+    # re-map codes they already assigned.
     pm = state.setdefault("pool_map", {})
+    hist = state.get("_pool_map_history") or {}
     pool_codes = sample.get("pool_code_suggestions") or []
     seeded = 0
     for code in pool_codes:
         if not code:
             continue
         if code not in pm:
-            pm[code] = "Ignore"
+            pm[code] = hist.get(code) or "Ignore"
             seeded += 1
     if seeded:
         msgs.append(
@@ -2192,15 +2197,27 @@ def _build_pool_category_index(
 def _suggest_pool_for_label(
     label: str,
     pool_index: dict[str, str],
+    pool_names: list[str] | None = None,
 ) -> str:
     """Best-effort pool-name suggestion for ``label``.
 
+    Precedence: (1) exact case-insensitive match of ``label`` against
+    any pool name in ``pool_names`` wins outright — this handles CUs
+    where multiple pools fall in the same keyword category
+    (``Indirect New Auto`` and ``New Auto`` both classify as
+    ``new_vehicle``, so the keyword heuristic would collapse them onto
+    the same pool). (2) Falls back to the keyword-category index.
     Returns ``""`` when no confident match. Vehicle labels missing
     new/used qualifiers are routed to whichever vehicle pool exists,
     preferring ``other_consumer`` as a last-resort fallback. Aggregate
     rows (``Total``/``Subtotal``/``Loan Account Totals``) are
     intentionally left blank.
     """
+    lab_norm = (label or "").strip().casefold()
+    if lab_norm and pool_names:
+        for nm in pool_names:
+            if (nm or "").strip().casefold() == lab_norm:
+                return nm
     cat = _classify_label_category(label)
     if not cat or cat == "aggregate":
         return ""
@@ -2242,6 +2259,11 @@ def selfheal_auto_map_balance_labels(state: dict[str, Any]) -> list[str]:
     pool_index = _build_pool_category_index(pool_settings)
     if not pool_index:
         return []
+    pool_names = [
+        (ps.get("name") or "").strip()
+        for ps in pool_settings
+        if isinstance(ps, dict) and (ps.get("name") or "").strip()
+    ]
     pool_map = mb.get("pool_map") or {}
     if not isinstance(pool_map, dict):
         pool_map = {}
@@ -2252,7 +2274,7 @@ def selfheal_auto_map_balance_labels(state: dict[str, Any]) -> list[str]:
         existing = (pool_map.get(lab) or "").strip()
         if existing:
             continue
-        suggestion = _suggest_pool_for_label(lab, pool_index)
+        suggestion = _suggest_pool_for_label(lab, pool_index, pool_names)
         if suggestion:
             pool_map[lab] = suggestion
             filled += 1
@@ -2264,6 +2286,66 @@ def selfheal_auto_map_balance_labels(state: dict[str, Any]) -> list[str]:
         f"Auto-mapped {filled} balance label(s) to configured pool(s) "
         f"based on keyword match. Review on Step 8 (Monthly Balance "
         f"File) and adjust any mismatches."
+    ]
+
+
+def selfheal_enforce_exact_match_pool_map(
+    state: dict[str, Any],
+) -> list[str]:
+    """Correct non-blank ``monthly_bal.pool_map`` entries whose label
+    case-insensitively equals a configured pool name but is currently
+    mapped to a DIFFERENT pool.
+
+    Complements ``selfheal_auto_map_balance_labels`` (which only fills
+    blanks). When the keyword heuristic ran on an earlier setup pass
+    and collapsed exact-name labels onto a sibling pool (e.g.
+    ``New Auto`` → ``Indirect New Auto``), this heal snaps them back to
+    the exact pool.
+
+    Safe on every GET. Idempotent — subsequent calls find no
+    corrections to make. Never touches labels whose current mapping
+    doesn't have a case-insensitive exact-name candidate in
+    ``pool_settings``.
+    """
+    mb = state.get("monthly_bal") or {}
+    if not isinstance(mb, dict):
+        return []
+    pool_map = mb.get("pool_map") or {}
+    if not isinstance(pool_map, dict) or not pool_map:
+        return []
+    pool_settings = state.get("pool_settings") or []
+    pool_names = [
+        (ps.get("name") or "").strip()
+        for ps in pool_settings
+        if isinstance(ps, dict) and (ps.get("name") or "").strip()
+    ]
+    if not pool_names:
+        return []
+    pool_lookup = {nm.casefold(): nm for nm in pool_names}
+    corrections: list[tuple[str, str, str]] = []
+    for label, mapped in list(pool_map.items()):
+        lab_key = (label or "").strip().casefold()
+        if not lab_key:
+            continue
+        exact = pool_lookup.get(lab_key)
+        if not exact:
+            continue
+        current = (mapped or "").strip()
+        if current == exact:
+            continue
+        pool_map[label] = exact
+        corrections.append((label, current or "(blank)", exact))
+    if not corrections:
+        return []
+    mb["pool_map"] = pool_map
+    state["monthly_bal"] = mb
+    sample = "; ".join(
+        f"{lab!r}: {old} \u2192 {new}" for lab, old, new in corrections[:3]
+    )
+    tail = "" if len(corrections) <= 3 else f" (+{len(corrections) - 3} more)"
+    return [
+        f"Corrected {len(corrections)} exact-match label mapping(s): "
+        f"{sample}{tail}."
     ]
 
 

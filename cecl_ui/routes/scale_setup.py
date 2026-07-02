@@ -988,19 +988,26 @@ def step_run():
 
 @scale_setup_bp.route("/step/run/complete", methods=["POST"])
 def complete_and_home():
-    """Mark the SCALE wizard as completed for this CU and return home.
+    """Mark the SCALE wizard as completed for this CU and jump to
+    that CU's SCALE Runs dashboard.
 
-    Triggered by the "Done -- Home" button on the Run step. Stamps the
-    draft's ``_draft_meta.completed_at`` so the dashboard moves it from
-    "Resume in-progress setup" to "Completed setup". The draft itself
-    is kept so the user can still Edit setup or Delete it later.
+    Triggered by the "Continue to SCALE Runs" button on the Run step.
+    Stamps the draft's ``_draft_meta.completed_at`` so the home
+    dashboard moves it from "Resume in-progress setup" to "Completed
+    setup". The draft itself is kept so the user can still Edit setup
+    or Delete it later. Redirect target is the per-CU SCALE Runs page
+    (``scale_runs.cu_dashboard``) so the user lands on the page that
+    matches their next step of the workflow -- not the generic home
+    page, which was the pre-fix behaviour and led to confusion when
+    Migration and SCALE dashboards look similar.
     """
     state = _state()
     _ensure_scale_mode(state)
+    sn = state.get("short_name") or ""
     # Make sure the on-disk draft exists (Run-step saves are usually
     # already persisted, but call save_draft as a safety net before
     # stamping completion).
-    if state.get("short_name") or state.get("credit_union"):
+    if sn or state.get("credit_union"):
         try:
             wizard_drafts.save_draft(
                 current_app.config["WORKSPACE_ROOT"], state,
@@ -1012,10 +1019,14 @@ def complete_and_home():
                 model="scale",
             )
             flash(
-                f"Marked {state.get('credit_union') or state.get('short_name')} "
+                f"Marked {state.get('credit_union') or sn} "
                 f"setup as completed.",
                 "success",
             )
         except Exception as exc:  # noqa: BLE001
             flash(f"Could not mark setup completed: {exc}", "warning")
-    return redirect(url_for("home.index"))
+    if sn:
+        return redirect(url_for("scale_runs.cu_dashboard", short_name=sn))
+    # Missing short_name (edge case: user hit Complete before Identity
+    # step saved). Fall back to the SCALE Runs index.
+    return redirect(url_for("scale_runs.index"))

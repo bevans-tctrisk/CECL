@@ -567,6 +567,17 @@ def _wizard_ctx(active: str) -> dict[str, Any]:
     st["_active_step"] = active
     session.modified = True
 
+    # Snapshot any non-blank pool_map assignments into a durable history
+    # dict so a subsequent extract delete-and-re-add cycle (which
+    # otherwise wipes state["pool_map"] via the empty-seed branch in
+    # _apply_sample_to_state) can restore user assignments automatically.
+    # Runs on EVERY wizard GET so history is captured before any
+    # self-heal or seed path could clear pool_map. Idempotent.
+    try:
+        _snapshot_pool_map_history(st)
+    except Exception:  # noqa: BLE001
+        pass
+
     # Compute per-step status badges + HIL list when the user has run
     # the Step 1 auto-scan. Without an auto-scan, every step renders
     # as "pending" (no badges shown).
@@ -647,6 +658,24 @@ def _wizard_ctx(active: str) -> dict[str, Any]:
                     _save_state(st)
                     for _m in _automap_msgs:
                         flash(f"Auto-scan: {_m}", "success")
+            except Exception:  # noqa: BLE001
+                pass
+            # Exact-match precedence: correct any non-blank monthly_bal
+            # pool_map entries whose label case-insensitively equals a
+            # configured pool name but is mapped to a DIFFERENT pool
+            # (typically because an earlier keyword-heuristic pass
+            # collapsed sibling pools like "New Auto"/"Indirect New
+            # Auto" onto the same target). Runs on every GET so a stale
+            # session that survived a prior bad Save is repaired
+            # automatically on the next page view.
+            try:
+                _exact_msgs = auto_setup.selfheal_enforce_exact_match_pool_map(
+                    st
+                )
+                if _exact_msgs:
+                    _save_state(st)
+                    for _m in _exact_msgs:
+                        flash(_m, "info")
             except Exception:  # noqa: BLE001
                 pass
             hil_needs = auto_setup.compute_hil_needs(st)
@@ -1060,7 +1089,11 @@ def step1_identity():
                         next_key = auto_setup.first_hil_step_key(state, steps)
                         if next_key and next_key in STEP_ENDPOINTS:
                             return redirect(url_for(STEP_ENDPOINTS[next_key]))
-                        # Nothing flagged HIL -> jump to review.
+                        # Nothing flagged HIL -> jump to review. SCALE
+                        # drafts finalize via scale_setup.step_review;
+                        # only Migration drafts hit step10_review.
+                        if state.get("model") == "scale":
+                            return redirect(url_for("scale_setup.step_review"))
                         return redirect(url_for("setup.step10_review"))
                 # Fall through to re-render Step 1 with the flashed
                 # error and any partial state.
@@ -2682,6 +2715,49 @@ def step5_monthly_bal():
             for _lbl, _pool in _seeded.items():
                 if _lbl not in _form_map:
                     _form_map[_lbl] = _pool
+            # Defensive exact-match precedence: if a label case-
+            # insensitively matches a configured pool name AND the
+            # form-submitted mapping points at a DIFFERENT pool, the
+            # form value is almost certainly a stale artifact of an
+            # earlier keyword-heuristic auto-map that collapsed an
+            # exact-match label onto a similar-category pool (e.g.
+            # ``New Auto`` label → ``Indirect New Auto`` pool while a
+            # ``New Auto`` pool exists on Step 2). Users can't easily
+            # notice this in browser dropdowns and it silently breaks
+            # Step 14's Balance Adjustment comparison. Correct the
+            # exact-match collision here at save time so any stale
+            # browser form can't re-pollute a good on-disk mapping.
+            try:
+                _ps_names = [
+                    (p.get("name") or "").strip()
+                    for p in (state.get("pool_settings") or [])
+                    if isinstance(p, dict) and (p.get("name") or "").strip()
+                ]
+                _ps_by_cf = {n.casefold(): n for n in _ps_names}
+                _exact_fixes: list[tuple[str, str, str]] = []
+                for _lbl, _pool in list(_form_map.items()):
+                    _lbl_cf = (_lbl or "").strip().casefold()
+                    _exact = _ps_by_cf.get(_lbl_cf)
+                    if _exact and (_pool or "").strip() != _exact:
+                        _form_map[_lbl] = _exact
+                        _exact_fixes.append((_lbl, _pool or "", _exact))
+                if _exact_fixes:
+                    _sample = ", ".join(
+                        f"'{_a}' → '{_c}' (was '{_b or '—'}')"
+                        for _a, _b, _c in _exact_fixes[:3]
+                    )
+                    _more = (
+                        f" (+{len(_exact_fixes) - 3} more)"
+                        if len(_exact_fixes) > 3 else ""
+                    )
+                    flash(
+                        "Auto-corrected pool mapping where a balance "
+                        "label exactly matches a configured pool: "
+                        f"{_sample}{_more}.",
+                        "info",
+                    )
+            except Exception:  # noqa: BLE001
+                pass
             mb["pool_map"] = _form_map
             # Persist the ACL source selection + per-source values.
             _save_acl_form(mb, request.form)
@@ -3427,6 +3503,43 @@ def _seed_loan_data_entry_mapping(
     return None
 
 
+def _snapshot_pool_map_history(state: dict[str, Any]) -> int:
+    """Capture non-blank ``state["pool_map"]`` entries into
+    ``state["_pool_map_history"]`` (a durable code -> pool memory).
+
+    Idempotent. Only writes when a code's current pool_map value is
+    non-blank AND either not present in history or differs. New history
+    entries never overwrite non-blank existing history unless the current
+    pool_map value differs (user reassignment wins). Returns the number
+    of history entries captured or updated.
+
+    The history exists to survive an extract delete-and-re-add cycle
+    which otherwise wipes ``state["pool_map"]`` values (see
+    ``_apply_sample_to_state``'s empty-seed branch that re-seeds fresh
+    codes with blank values). The seed path consults history to
+    restore user assignments transparently.
+    """
+    pm = state.get("pool_map") or {}
+    if not isinstance(pm, dict) or not pm:
+        return 0
+    hist = state.setdefault("_pool_map_history", {})
+    if not isinstance(hist, dict):
+        hist = {}
+        state["_pool_map_history"] = hist
+    n = 0
+    for code, pool in pm.items():
+        if not isinstance(code, str):
+            continue
+        val = (pool or "").strip() if isinstance(pool, str) else ""
+        if not val:
+            continue
+        prev = hist.get(code)
+        if prev != val:
+            hist[code] = val
+            n += 1
+    return n
+
+
 def _apply_sample_to_state(state: dict[str, Any], analysis: dict[str, Any]) -> None:
     """Merge sample-file suggestions into wizard state.
 
@@ -3472,9 +3585,16 @@ def _apply_sample_to_state(state: dict[str, Any], analysis: dict[str, Any]) -> N
                 state["column_mappings"][sys_field] = learned_header
 
     # Pool map — if the user is still on the default seed map, replace it
-    # with empty placeholders for every distinct code we found.
+    # with placeholders for every distinct code we found. Blank by default,
+    # but any code we've previously seen assigned (in
+    # ``state["_pool_map_history"]``) is restored to its remembered pool
+    # so a Step 12 extract delete-and-re-add cycle doesn't wipe Step 3
+    # mappings the user configured earlier in the session.
     if state["pool_map"] == defaults["pool_map"] and analysis["pool_code_suggestions"]:
-        state["pool_map"] = {code: "" for code in analysis["pool_code_suggestions"]}
+        hist = state.get("_pool_map_history") or {}
+        state["pool_map"] = {
+            code: hist.get(code, "") for code in analysis["pool_code_suggestions"]
+        }
 
     state["sample"] = analysis
 
@@ -12614,6 +12734,19 @@ def _copy_sample_uploads_to_raw(
 @setup_bp.route("/step/review", methods=["GET", "POST"])
 def step10_review():
     state = _state()
+    # SCALE guard: SCALE-model drafts must finalize via the SCALE
+    # wizard's Review step (which routes to Run and then SCALE Runs
+    # dashboard). This handler is Migration-only -- if a SCALE draft
+    # reaches it (e.g. via stale bookmark, or the Step 1 auto-scan
+    # fallback prior to the Phase SCALE.route-guard fix), redirect
+    # before any migration completion state is written.
+    if state.get("model") == "scale":
+        flash(
+            "SCALE drafts finalize on the SCALE Review step, not the "
+            "Migration review. Redirected you to the SCALE Review.",
+            "info",
+        )
+        return redirect(url_for("scale_setup.step_review"))
     yaml_dict = config_service.build_yaml_from_wizard(state)
     import yaml as _yaml
     yaml_text = _yaml.safe_dump(

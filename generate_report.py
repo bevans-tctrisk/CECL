@@ -5806,6 +5806,114 @@ def _load_dq_history_from_db(config):
     return out
 
 
+def find_standalone_impaired_file(config, snap):
+    """Locate the standalone Impaired Loans workbook for ``snap``.
+
+    Shared helper used by :func:`load_standalone_impaired` at report
+    time AND by the run-new-quarter impaired verification intercept in
+    ``cecl_ui/services/impaired_check_service.verify_for_run`` — so both
+    paths agree on which file is authoritative for a given period.
+
+    Returns the absolute path (str) on success, or ``None`` when no
+    matching file is found in ``config['data_directory']`` or the
+    credit-pull fallback folder.
+    """
+    data_dir = config.get('data_directory', '')
+    if not data_dir:
+        return None
+    if not os.path.isabs(data_dir):
+        data_dir = os.path.join(BASE, data_dir)
+
+    snap_prefix = snap[:7] if snap else ''  # e.g. "2026-03"
+
+    # Search for the standalone impaired loans file. Filenames vary:
+    #   "2026-03 Impaired Loans - Franklin Trust FCU.xlsx"
+    #   "2025-06_CECL-Migration-Impaired_Loans_-_Honolulu_FD_FCU.xlsx"
+    #   "Impaired Loans - 6-2026.xlsx"          (TCP CU 2026-06)
+    #   "Impaired Loans - June 2026.xlsx"       (month-name variant)
+    pattern = re.compile(
+        rf'^{re.escape(snap_prefix[:4])}\s*[-_]?\s*{re.escape(snap_prefix[5:7])}'
+        rf'.*Impaired[\s_-]+Loans.*\.xlsx$',
+        re.IGNORECASE)
+
+    # User-supplied override pattern(s) from config['impaired_loans']['file_pattern'].
+    # Accepts either a single regex string or a list. When provided, files
+    # matching any user pattern are returned immediately — bypasses the strict
+    # date-prefix + loose-date matching below. This is the escape hatch for
+    # CU-specific naming conventions (e.g. "impaired loans july 2026.xlsx"
+    # for a June 2026 period, or Vizo IDLR-renamed drops that no longer carry
+    # a date token in the filename).
+    _user_impaired_rxs: list[re.Pattern[str]] = []
+    _imp_cfg = config.get('impaired_loans') or {}
+    if isinstance(_imp_cfg, dict):
+        _user_pat = _imp_cfg.get('file_pattern')
+        if _user_pat:
+            _raw_pats = [_user_pat] if isinstance(_user_pat, str) else list(_user_pat)
+            for _p in _raw_pats:
+                if isinstance(_p, str) and _p.strip():
+                    try:
+                        _user_impaired_rxs.append(re.compile(_p, re.IGNORECASE))
+                    except re.error:
+                        continue
+
+    _loose_impaired_rx = re.compile(r"Impaired[\s_\-]+Loans", re.IGNORECASE)
+    _loose_date_rx = None
+    if snap_prefix and len(snap_prefix) >= 7:
+        try:
+            _year = snap_prefix[:4]
+            _month_num = int(snap_prefix[5:7])
+            _month_names = {
+                1: r"jan(?:uary)?", 2: r"feb(?:ruary)?", 3: r"mar(?:ch)?",
+                4: r"apr(?:il)?", 5: r"may", 6: r"jun(?:e)?",
+                7: r"jul(?:y)?", 8: r"aug(?:ust)?",
+                9: r"sep(?:t(?:ember)?)?", 10: r"oct(?:ober)?",
+                11: r"nov(?:ember)?", 12: r"dec(?:ember)?",
+            }
+            _mname = _month_names.get(_month_num, "")
+            _alts = [
+                rf"{_year}[-_.\s]*0?{_month_num}(?!\d)",
+                rf"(?<!\d)0?{_month_num}[-_.\s]*{_year}",
+            ]
+            if _mname:
+                _alts.append(rf"{_mname}[-_.\s]*{_year}")
+                _alts.append(rf"{_year}[-_.\s]*{_mname}")
+            _loose_date_rx = re.compile("|".join(_alts), re.IGNORECASE)
+        except (ValueError, IndexError):
+            _loose_date_rx = None
+
+    search_dirs = [data_dir]
+    fb_folder = config.get('credit_pull', {}).get('fallback_report_folder', '')
+    if fb_folder and fb_folder != data_dir:
+        if not os.path.isabs(fb_folder):
+            fb_folder = os.path.join(BASE, fb_folder)
+        search_dirs.append(fb_folder)
+
+    for sdir in search_dirs:
+        if not os.path.isdir(sdir):
+            continue
+        for root, dirs, files in os.walk(sdir):
+            for f in files:
+                if f.startswith('~$') or f.upper().startswith('DNU'):
+                    continue
+                if 'WARM' in f.upper():
+                    continue
+                if not f.lower().endswith('.xlsx'):
+                    continue
+                # User-supplied file_pattern(s) take priority. When any pattern
+                # matches, return immediately — the CU-level config is the
+                # authoritative "which file is this period's impaired list".
+                for _urx in _user_impaired_rxs:
+                    if _urx.search(f):
+                        return os.path.join(root, f)
+                if pattern.match(f):
+                    return os.path.join(root, f)
+                if (_loose_date_rx is not None
+                        and _loose_impaired_rx.search(f)
+                        and _loose_date_rx.search(f)):
+                    return os.path.join(root, f)
+    return None
+
+
 def load_standalone_impaired(config, snap, df=None):
     """Load impaired-loan data from the standalone Impaired Loans file.
 
@@ -5833,44 +5941,12 @@ def load_standalone_impaired(config, snap, df=None):
     # Search for the standalone impaired loans file. Filenames vary:
     #   "2026-03 Impaired Loans - Franklin Trust FCU.xlsx"
     #   "2025-06_CECL-Migration-Impaired_Loans_-_Honolulu_FD_FCU.xlsx"
-    # The separator between "Impaired" and "Loans" can be whitespace,
-    # underscore, or hyphen. The CU name in the filename is often an
-    # abbreviation (e.g. "Honolulu_FD_FCU" for "Honolulu Fire Department
-    # FCU"), so we don't require it in the filename — we're already
-    # restricted to the CU-specific data_directory.
-    pattern = re.compile(
-        rf'^{re.escape(snap_prefix[:4])}\s*[-_]?\s*{re.escape(snap_prefix[5:7])}'
-        rf'.*Impaired[\s_-]+Loans.*\.xlsx$',
-        re.IGNORECASE)
-
-    search_dirs = [data_dir]
-    fb_folder = config.get('credit_pull', {}).get('fallback_report_folder', '')
-    if fb_folder and fb_folder != data_dir:
-        if not os.path.isabs(fb_folder):
-            fb_folder = os.path.join(BASE, fb_folder)
-        search_dirs.append(fb_folder)
-
-    found = None
-    for sdir in search_dirs:
-        if not os.path.isdir(sdir):
-            continue
-        for root, dirs, files in os.walk(sdir):
-            for f in files:
-                if f.startswith('~$') or f.upper().startswith('DNU'):
-                    continue
-                # Skip WARM files — those are handled by load_impaired_data.
-                # Note: 'CECL-Migration-Impaired_Loans*.xlsx' (a *standalone*
-                # impaired-loan workbook from the CECL Migration suite) must
-                # NOT be excluded here, so check 'WARM' alone.
-                if 'WARM' in f.upper():
-                    continue
-                if pattern.match(f):
-                    found = os.path.join(root, f)
-                    break
-            if found:
-                break
-        if found:
-            break
+    #   "Impaired Loans - 6-2026.xlsx"          (TCP CU 2026-06)
+    #   "Impaired Loans - June 2026.xlsx"       (month-name variant)
+    # Delegated to :func:`find_standalone_impaired_file` so the wizard's
+    # run-time verification page and this report-time loader agree on
+    # which file is authoritative.
+    found = find_standalone_impaired_file(config, snap)
 
     if not found:
         return {}
@@ -5880,12 +5956,49 @@ def load_standalone_impaired(config, snap, df=None):
         from openpyxl import load_workbook
         wb = load_workbook(found, data_only=True)
         # Tab name varies — may have leading/trailing whitespace
-        # (e.g. ' Impaired Loans' in CECL-Migration workbooks).
+        # (e.g. ' Impaired Loans' in CECL-Migration workbooks). Some
+        # CUs also rename the tab entirely (e.g. TCP 2026-06 uses
+        # 'Sheet2' with the "Impaired Loans" title in cell A1). Match
+        # loosely: prefer a tab named "impaired loans", then any tab
+        # whose name mentions "impaired", then any tab whose A1/A2
+        # value contains "impaired loans", then the largest tab.
         ws = None
         for sn in wb.sheetnames:
             if sn.strip().lower() == 'impaired loans':
                 ws = wb[sn]
                 break
+        if ws is None:
+            for sn in wb.sheetnames:
+                if 'impaired' in sn.strip().lower():
+                    ws = wb[sn]
+                    print(f"    (auto-matched tab {sn!r} via loose name)")
+                    break
+        if ws is None:
+            for sn in wb.sheetnames:
+                _ws = wb[sn]
+                for _r in range(1, 4):
+                    _v = _ws.cell(row=_r, column=1).value
+                    if _v and 'impaired' in str(_v).lower():
+                        ws = _ws
+                        print(f"    (auto-matched tab {sn!r} via header cell A{_r})")
+                        break
+                if ws is not None:
+                    break
+        if ws is None:
+            # Last resort: pick the largest data-bearing tab (skip
+            # obvious instructions/help tabs).
+            _candidates = [
+                (wb[sn].max_row * wb[sn].max_column, sn)
+                for sn in wb.sheetnames
+                if 'instruction' not in sn.strip().lower()
+                and 'help' not in sn.strip().lower()
+                and 'readme' not in sn.strip().lower()
+            ]
+            _candidates.sort(reverse=True)
+            if _candidates:
+                _sz, _sn = _candidates[0]
+                ws = wb[_sn]
+                print(f"    (auto-matched tab {_sn!r} as largest data tab)")
         if ws is None:
             raise KeyError("No 'Impaired Loans' sheet (got: "
                            f"{wb.sheetnames!r})")
@@ -5946,11 +6059,34 @@ def load_standalone_impaired(config, snap, df=None):
         acl_impaired[cat_str] = prov_val
 
     # ── Build member→grade lookup from df ──
+    # The df's member_number column is the concatenated (member+suffix)
+    # form stored by import_data.derive_member_account — the exact string
+    # width depends on the CU's raw file (e.g. Nucor stores an 11-char
+    # zero-padded string "00001055701" = 9-char member + 2-char suffix).
+    # The impaired workbook, on the other hand, ships bare integer
+    # member/suffix values. To bridge the two formats we store the DB
+    # key AND several normalized variants (leading-zero-stripped, and
+    # int(member)+int(suffix) with the DB-detected total width).
     grade_lookup = {}  # {member_suffix_str: grade}
+    _db_key_len = 0
     if df is not None and 'member_number' in df.columns and 'current_grade' in df.columns:
         for _, r in df.iterrows():
             mem = str(r['member_number']).strip()
-            grade_lookup[mem] = r['current_grade']
+            grade = r['current_grade']
+            if not mem:
+                continue
+            grade_lookup[mem] = grade
+            # Also store the leading-zero-stripped variant so bare
+            # int(member)+int(suffix) forms from the impaired workbook
+            # can find a hit even when the DB pads the concatenated key.
+            try:
+                stripped = str(int(mem))
+                if stripped != mem:
+                    grade_lookup.setdefault(stripped, grade)
+            except (TypeError, ValueError):
+                pass
+            if not _db_key_len:
+                _db_key_len = len(mem)
 
     # ── Parse detail rows (row 24+) ──
     spec_id_by_pool = {}  # {pool: {grade: balance_removed}}
@@ -5993,12 +6129,45 @@ def load_standalone_impaired(config, snap, df=None):
                 # pool below.
                 mem_int = suf_int = None
             if mem_int is not None:
-                mem_key = f"{mem_int}{suf_int:0{suffix_len}d}"
-                grade = grade_lookup.get(mem_key, '')
-                if not grade:
-                    # Try with string suffix as-is
-                    mem_key2 = f"{mem_int}{str(suf_int).zfill(suffix_len)}"
-                    grade = grade_lookup.get(mem_key2, '')
+                # Try multiple key variants because YAML's suffix_length
+                # (e.g. Nucor's top-level account_suffix_length: 0 while
+                # the raw source actually has a 2-digit padded suffix)
+                # frequently disagrees with the DB's concatenated form.
+                # We test the configured width AND every plausible
+                # suffix-padding width; the first hit against
+                # grade_lookup (which stores both the padded DB key and
+                # a leading-zero-stripped variant) wins.
+                _candidate_widths = [suffix_len, 0, 1, 2, 3, 4, 5]
+                _tried: set[str] = set()
+                for _w in _candidate_widths:
+                    if _w < 0:
+                        continue
+                    if _w == 0:
+                        mem_key = f"{mem_int}{suf_int}"
+                    else:
+                        mem_key = f"{mem_int}{suf_int:0{_w}d}"
+                    if mem_key in _tried:
+                        continue
+                    _tried.add(mem_key)
+                    grade = grade_lookup.get(mem_key, '')
+                    if grade:
+                        break
+                # As a final safety net, if the DB uses a fixed total
+                # key length (e.g. 11-char zero-padded), try matching
+                # against that width by zero-padding the member side
+                # for each candidate suffix width.
+                if not grade and _db_key_len:
+                    for _sw in (2, 3, 1, 4):
+                        _mw = _db_key_len - _sw
+                        if _mw <= 0:
+                            continue
+                        mem_key = f"{mem_int:0{_mw}d}{suf_int:0{_sw}d}"
+                        if mem_key in _tried:
+                            continue
+                        _tried.add(mem_key)
+                        grade = grade_lookup.get(mem_key, '')
+                        if grade:
+                            break
 
         spec_id_by_pool.setdefault(pool, {})
         spec_id_by_pool[pool][grade] = (

@@ -134,17 +134,18 @@
       {% for row in comparison.rows %}
       <tr>
         <td>
-          {{ row.pool }}
           {% if row.loan_codes %}
-            <details style="margin-top:6px;">
-              <summary class="muted" style="cursor:pointer; font-size:90%;">
-                Loan codes in this pool ({{ row.loan_codes|length }}) — click to reassign
+            <details style="margin-top:2px;">
+              <summary style="cursor:pointer;"><strong>{{ row.pool }}</strong>
+                <span class="muted" style="font-weight:normal;">({{ row.loan_codes|length }} code{{ '' if row.loan_codes|length == 1 else 's' }} — click to reassign)</span>
               </summary>
-              <table style="margin-top:6px; font-size:90%; border-collapse:collapse;">
+              <table style="margin-top:6px; font-size:90%; border-collapse:collapse; background:#fafafa;">
                 <thead>
-                  <tr style="background:#f6f6f6;">
-                    <th style="text-align:left; padding:4px 8px; border:1px solid #ddd;">Raw code</th>
+                  <tr style="background:#f0f0f0;">
+                    <th style="text-align:left; padding:4px 8px; border:1px solid #ddd;">Loan code</th>
                     <th style="text-align:right; padding:4px 8px; border:1px solid #ddd;">Balance</th>
+                    <th style="padding:4px 8px; border:1px solid #ddd;">Reassign to pool</th>
+                    <th style="padding:4px 8px; border:1px solid #ddd;"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -152,11 +153,36 @@
                   <tr>
                     <td style="padding:4px 8px; border:1px solid #ddd;"><code>{{ code }}</code></td>
                     <td style="padding:4px 8px; border:1px solid #ddd; text-align:right;">${{ "{:,.2f}".format(bal) }}</td>
+                    <td style="padding:4px 8px; border:1px solid #ddd;">
+                      <form method="post"
+                            action="{{ url_for('run.new_quarter', short_name=short_name) }}"
+                            style="display:flex; gap:6px; margin:0;">
+                        <input type="hidden" name="stage" value="balance_remapped">
+                        <input type="hidden" name="period" value="{{ staged_period }}">
+                        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+                          {% if staged_reports and staged_reports.get(r) %}
+                            <input type="hidden" name="{{ r }}" value="on">
+                          {% endif %}
+                        {% endfor %}
+                        <input type="hidden" name="map_code" value="{{ code }}">
+                        <select name="map_pool" style="min-width:200px;">
+                          {% for choice in (pool_choices or []) %}
+                            <option value="{{ choice }}"{% if choice == row.pool %} selected{% endif %}>{{ choice }}</option>
+                          {% endfor %}
+                          <option value="Ignore"{% if row.pool == 'Ignore' %} selected{% endif %}>Ignore</option>
+                          <option value="">(unmapped &mdash; use default)</option>
+                        </select>
+                        <button class="btn btn-secondary" type="submit" style="padding:2px 10px;">Save &amp; refresh</button>
+                      </form>
+                    </td>
+                    <td style="padding:4px 8px; border:1px solid #ddd;"></td>
                   </tr>
                   {% endfor %}
                 </tbody>
               </table>
             </details>
+          {% else %}
+            <strong>{{ row.pool }}</strong>
           {% endif %}
         </td>
         <td style="text-align:right;">
@@ -189,35 +215,96 @@
 
   <p class="muted" style="margin:8px 0;">
     Loans imported: <strong>{{ comparison.loan_summary.row_count }}</strong>
-    row(s) at <code>{{ comparison.period }}</code>. Per-pool balance
-    adjustments are auto-computed by the report engine at run time —
-    you don't need to enter anything; this view is for confidence.
+    row(s) at <code>{{ comparison.period }}</code>. To reassign a loan
+    code to a different pool, expand the pool name in the table above
+    and pick a new pool from the dropdown &mdash; the tool will update
+    the pool map, re-import the snapshot, and redraw this page with the
+    new totals. Mirrors the wizard's Step 14 (Balance Adjustment) UX.
   </p>
 
-  {# --- Inline loan-code remap form (Phase 9.35f) -------------------------
-       Lists every raw loan code currently sitting in any pool, with a
-       dropdown to reassign to a different pool. On submit we patch
-       cfg["pool_map"], save YAML, and re-import so the comparison
-       refreshes with the new totals. Mirrors the wizard's Step 14
-       per-code remap UX. -------------------------------------------------- #}
-  {% set remap_codes = [] %}
-  {% for row in comparison.rows %}
-    {% for code, bal in (row.loan_codes or []) %}
-      {% set _ = remap_codes.append((code, bal, row.pool)) %}
+  <form method="post"
+        action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+    <input type="hidden" name="stage" value="balance_checked">
+    <input type="hidden" name="period" value="{{ staged_period }}">
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+      {% if staged_reports and staged_reports.get(r) %}
+        <input type="hidden" name="{{ r }}" value="on">
+      {% endif %}
     {% endfor %}
-  {% endfor %}
-  {% if remap_codes %}
+
+    <div style="display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit">Continue &rarr; Run Reports</button>
+      <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
+    </div>
+  </form>
+{% elif stage == "awaiting_impaired_check" %}
+  <div style="background:#eef6ff; border:1px solid #3a78d8; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#1a4480;">Impaired Loans Verification</h3>
+    <p style="margin:6px 0;">
+      An impaired-loans workbook was found for this period. Review the
+      distribution below to confirm each impaired loan resolves to the
+      correct pool BEFORE the reports are produced. Mirrors the
+      wizard's Step 16 (Impaired Loans).
+    </p>
+    <p class="muted" style="margin:6px 0;">
+      Source: <code>{{ impaired.filename }}</code>
+      {% if impaired.period_ending %}
+        &nbsp;·&nbsp; Period ending: <strong>{{ impaired.period_ending }}</strong>
+      {% endif %}
+      {% if impaired.cu_name %}
+        &nbsp;·&nbsp; CU: {{ impaired.cu_name }}
+      {% endif %}
+    </p>
+    {% if impaired.error %}
+      <p style="margin:6px 0; color:#8a3a00;">
+        <strong>Note:</strong> {{ impaired.error }}
+      </p>
+    {% endif %}
+  </div>
+
+  {# Summary strip: match counts + totals #}
+  <div style="display:flex; gap:24px; margin-bottom:14px; flex-wrap:wrap;">
+    <div>
+      <span class="muted">Rows:</span>
+      <strong>{{ impaired.data_rows|length }}</strong>
+    </div>
+    <div>
+      <span class="muted">Matched in loan data:</span>
+      <strong style="color:#2d662d;">{{ impaired.matched }}</strong>
+    </div>
+    <div>
+      <span class="muted">Unmatched:</span>
+      <strong style="color:{% if impaired.unmatched %}#b03a2e{% else %}#2d662d{% endif %};">{{ impaired.unmatched }}</strong>
+    </div>
+    <div>
+      <span class="muted">Total Current Balance:</span>
+      <strong>${{ "{:,.2f}".format(impaired.totals.current_balance) }}</strong>
+    </div>
+    <div>
+      <span class="muted">Total Provision:</span>
+      <strong>${{ "{:,.2f}".format(impaired.totals.provision_amount) }}</strong>
+    </div>
+    <div>
+      <span class="muted">Total Balance Removed:</span>
+      <strong>${{ "{:,.2f}".format(impaired.totals.balance_removed) }}</strong>
+    </div>
+  </div>
+
+  {# --- Validation card: unmapped codes routing to Ignore -------------- #}
+  {% set iv = impaired.validation or {} %}
+  {% if iv.get('unmapped_codes') %}
     <div style="background:#fff8e6; border:1px solid #b88a00; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
-      <h4 style="margin-top:0; color:#7a5c00;">Reassign loan codes to a different pool</h4>
+      <h4 style="margin-top:0; color:#7a5c00;">Some impaired loan codes route to Ignore</h4>
       <p class="muted" style="margin:6px 0;">
-        Spot a code that's in the wrong pool? Pick a new pool below and
-        click <strong>Save mapping changes &amp; re-check balances</strong>.
-        The tool will update the pool map, re-import the snapshot, and
-        redraw this page with the new totals.
+        The codes below appear in the impaired workbook but resolve to
+        an <code>Ignore</code> pool (either missing from the loan-code
+        map or explicitly mapped to Ignore). Assign each one to a real
+        pool so the impaired rows re-pool correctly before reports
+        run.
       </p>
       <form method="post"
             action="{{ url_for('run.new_quarter', short_name=short_name) }}">
-        <input type="hidden" name="stage" value="balance_remapped">
+        <input type="hidden" name="stage" value="impaired_remapped">
         <input type="hidden" name="period" value="{{ staged_period }}">
         {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
           {% if staged_reports and staged_reports.get(r) %}
@@ -227,27 +314,24 @@
         <table class="data-table" style="margin:8px 0;">
           <thead>
             <tr>
-              <th>Raw loan code</th>
-              <th>Current pool</th>
-              <th style="text-align:right;">Balance</th>
-              <th>Reassign to</th>
+              <th>Loan code</th>
+              <th style="text-align:right;">Rows</th>
+              <th>Assign to pool</th>
             </tr>
           </thead>
           <tbody>
-            {% for code, bal, pool in remap_codes %}
+            {% for code in iv.unmapped_codes %}
             <tr>
-              <td><code>{{ code }}</code><input type="hidden" name="map_code" value="{{ code }}"></td>
-              <td>{{ pool }}</td>
-              <td style="text-align:right;">${{ "{:,.2f}".format(bal) }}</td>
+              <td><code>{{ code }}</code>
+                <input type="hidden" name="map_code" value="{{ code }}">
+              </td>
+              <td style="text-align:right;">{{ iv.counts.get(code, 0) }}</td>
               <td>
-                <select name="map_pool" style="min-width:240px;">
-                  <option value="{{ pool }}" selected>(keep: {{ pool }})</option>
-                  {% for p in (pool_choices or []) %}
-                    {% if p != pool %}
-                    <option value="{{ p }}">{{ p }}</option>
-                    {% endif %}
+                <select name="map_pool" style="min-width:280px;">
+                  <option value="">(leave unmapped — will use default)</option>
+                  {% for p in (iv.pool_choices or []) %}
+                  <option value="{{ p }}">{{ p }}</option>
                   {% endfor %}
-                  <option value="Ignore">Ignore</option>
                 </select>
               </td>
             </tr>
@@ -256,15 +340,72 @@
         </table>
         <button class="btn btn-primary" type="submit"
                 onclick="return confirm('Save pool mapping changes and re-import the snapshot? This will rewrite monthly_loan_data with the new pool assignments.');">
-          Save mapping changes &amp; re-check balances
+          Save all mappings &amp; re-check impaired loans
         </button>
       </form>
     </div>
+  {% else %}
+    <p class="muted" style="margin:8px 0;">
+      All impaired loan codes are mapped to real pools.
+    </p>
+  {% endif %}
+
+  {# --- Data rows preview (top 200) -------------------------------- #}
+  {% if impaired.data_rows %}
+    <details {% if iv.get('unmapped_codes') %}{% else %}open{% endif %} style="margin-bottom:18px;">
+      <summary style="cursor:pointer; font-weight:600;">
+        Show all {{ impaired.data_rows|length }} impaired loan(s)
+      </summary>
+      <table class="data-table" style="margin-top:10px; font-size:90%;">
+        <thead>
+          <tr>
+            <th>Member #</th>
+            <th>Suffix</th>
+            <th>Type</th>
+            <th>Loan Pool</th>
+            <th>Credit Grade</th>
+            <th style="text-align:right;">Current Balance</th>
+            <th style="text-align:right;">Balance (Loan Rpt)</th>
+            <th style="text-align:right;">Diff</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in impaired.data_rows[:200] %}
+            {% set _lp = (row.loan_pool or '')|string %}
+            {% set _lp_low = _lp|lower %}
+            {% set _is_ignore = _lp_low in ('','ignore') %}
+            {% set _unmatched = row.get('unmatched_in_loan_data') %}
+          <tr {% if _unmatched %}style="background:#fde7e7;"{% elif _is_ignore %}style="background:#fff3d6;"{% endif %}>
+            <td>{{ row.member or row.member_number or '' }}</td>
+            <td>{{ row.suffix or row.loan_suffix or '' }}</td>
+            <td><code>{{ row.loan_type or '' }}</code></td>
+            <td>{% if _is_ignore %}<em style="color:#b03a2e;">Ignore</em>{% else %}{{ _lp }}{% endif %}</td>
+            <td>{{ row.credit_grade or '' }}</td>
+            <td style="text-align:right;">
+              {% if row.current_balance is not none %}${{ "{:,.2f}".format(row.current_balance|float) }}{% else %}—{% endif %}
+            </td>
+            <td style="text-align:right;">
+              {% if row.balance_from_loan_report is not none %}${{ "{:,.2f}".format(row.balance_from_loan_report|float) }}{% else %}—{% endif %}
+            </td>
+            <td style="text-align:right;">
+              {% set _bd = row.balance_difference if row.balance_difference is defined else row.balance_diff %}
+              {% if _bd is not none %}${{ "{:,.2f}".format(_bd|float) }}{% else %}—{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if impaired.data_rows|length > 200 %}
+      <p class="muted" style="margin:6px 0;">
+        Showing first 200 of {{ impaired.data_rows|length }} rows.
+      </p>
+      {% endif %}
+    </details>
   {% endif %}
 
   <form method="post"
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
-    <input type="hidden" name="stage" value="balance_checked">
+    <input type="hidden" name="stage" value="impaired_checked">
     <input type="hidden" name="period" value="{{ staged_period }}">
     {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
       {% if staged_reports and staged_reports.get(r) %}

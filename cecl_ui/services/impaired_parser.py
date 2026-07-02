@@ -168,6 +168,33 @@ def parse_file(filepath: str | Path) -> dict[str, Any]:
             if "impair" in sn.lower() and "pivot" not in sn.lower():
                 ws = wb[sn]
                 break
+    # Phase 9.36b — mirror the tab-name ladder in
+    # ``generate_report.load_standalone_impaired``: some CUs (e.g. TCP
+    # 2026-06) ship the workbook with the impaired data on a tab named
+    # ``Sheet2`` and the title "Impaired Loans" only in cell A1/A2/A3.
+    # Fall through to header-cell + largest-tab detection so the wizard
+    # run-time verification page can still parse those workbooks.
+    if ws is None:
+        for sn in wb.sheetnames:
+            _ws = wb[sn]
+            for _r in range(1, 4):
+                _v = _ws.cell(row=_r, column=1).value
+                if _v and "impaired" in str(_v).lower():
+                    ws = _ws
+                    break
+            if ws is not None:
+                break
+    if ws is None:
+        _candidates = [
+            (wb[sn].max_row * wb[sn].max_column, sn)
+            for sn in wb.sheetnames
+            if "instruction" not in sn.strip().lower()
+            and "help" not in sn.strip().lower()
+            and "readme" not in sn.strip().lower()
+        ]
+        _candidates.sort(reverse=True)
+        if _candidates:
+            ws = wb[_candidates[0][1]]
     if ws is None:
         wb.close()
         out["error"] = "No 'Impaired Loans' worksheet found."
@@ -697,6 +724,24 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
         return status
     status["source"] = ", ".join(sources)
 
+    # Phase 9.37b — build a leading-zero-normalised secondary index so
+    # extract keys like ``000001002-4`` still match impaired rows keyed as
+    # ``1002-4`` (or vice versa). Some CU loan extracts (Symitar AIRES)
+    # zero-pad Account Number to 9 digits as a text string, while the
+    # impaired workbook ships raw ints.
+    def _strip_lead(k: str) -> str:
+        if "-" in k:
+            a, b = k.split("-", 1)
+            return f"{a.lstrip('0') or '0'}-{b.lstrip('0') or '0'}"
+        return k.lstrip("0") or "0"
+
+    norm_index: dict[str, dict[str, Any]] = {}
+    for _k, _v in index.items():
+        _nk = _strip_lead(_k)
+        # First-in wins for duplicates; the primary index (padded form)
+        # is authoritative when both exist.
+        norm_index.setdefault(_nk, _v)
+
     for row in rows:
         key = row.get("member_suffix") or _member_suffix_key(
             row.get("member"), row.get("suffix"))
@@ -706,6 +751,9 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
             m, _, s = key.partition("-")
             alt = f"{m}-{s.lstrip('0') or '0'}"
             match = index.get(alt)
+        if match is None:
+            # Phase 9.37b — try the leading-zero-normalised index
+            match = norm_index.get(_strip_lead(key))
         if match is None:
             status["unmatched"] += 1
             _fallback_from_data_entry(row)

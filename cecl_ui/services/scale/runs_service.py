@@ -55,22 +55,22 @@ def _period_sort_key(period: str) -> tuple[int, int]:
 
 
 def list_scale_cus(workspace_root: str | Path) -> list[dict[str, Any]]:
-    """Return one entry per CU that has at least one SCALE workbook on disk.
+    """Return one entry per CU that has a SCALE workbook on disk OR a
+    completed SCALE wizard draft (so freshly-configured CUs surface on
+    the SCALE Runs index before their first quarter has been run).
 
     Each entry::
 
         {
           "short_name": "connections_cu",
           "credit_union": "Connections Credit Union",  # from draft if available
-          "latest_period": "2025-12",
+          "latest_period": "2025-12",  # empty string if no workbook yet
           "latest_path": "Z:/.../CECL_SCALE_connections_cu_Vizo.xlsx",
           "periods": ["2025-12", "2025-09", ...],
           "draft_present": True,
         }
     """
     root = _reports_root(workspace_root)
-    if not root.exists():
-        return []
 
     # Index drafts by slug. We accept either a SCALE draft (preferred,
     # has the Solr/period config) or fall back to a Migration draft
@@ -88,31 +88,55 @@ def list_scale_cus(workspace_root: str | Path) -> list[dict[str, Any]]:
             drafts_by_slug[slug] = d
 
     out: list[dict[str, Any]] = []
-    for cu_dir in sorted(root.iterdir()):
-        if not cu_dir.is_dir():
-            continue
-        short = cu_dir.name
-        periods: list[str] = []
-        for period_dir in cu_dir.iterdir():
-            if not period_dir.is_dir():
+    seen_shorts: set[str] = set()
+    if root.exists():
+        for cu_dir in sorted(root.iterdir()):
+            if not cu_dir.is_dir():
                 continue
-            if not any(period_dir.glob(_REPORT_GLOB)):
+            short = cu_dir.name
+            periods: list[str] = []
+            for period_dir in cu_dir.iterdir():
+                if not period_dir.is_dir():
+                    continue
+                if not any(period_dir.glob(_REPORT_GLOB)):
+                    continue
+                periods.append(period_dir.name)
+            if not periods:
                 continue
-            periods.append(period_dir.name)
-        if not periods:
+            periods.sort(key=_period_sort_key, reverse=True)
+            latest = periods[0]
+            latest_path = _pick_report_in_period(cu_dir / latest)
+            draft = drafts_by_slug.get(short)
+            out.append({
+                "short_name": short,
+                "credit_union": (draft or {}).get("credit_union") or short,
+                "latest_period": latest,
+                "latest_path": str(latest_path) if latest_path else "",
+                "periods": periods,
+                "draft_present": (
+                    draft is not None and draft.get("model") == "scale"
+                ),
+            })
+            seen_shorts.add(short)
+
+    # Also surface CUs that have a completed SCALE wizard draft but no
+    # workbook on disk yet (fresh setup, first-quarter run pending).
+    # Without this, the SCALE Runs index would hide any CU the user
+    # just finished configuring in the SCALE wizard.
+    for slug, draft in drafts_by_slug.items():
+        if slug in seen_shorts:
             continue
-        periods.sort(key=_period_sort_key, reverse=True)
-        latest = periods[0]
-        latest_path = _pick_report_in_period(cu_dir / latest)
-        draft = drafts_by_slug.get(short)
+        if draft.get("model") != "scale":
+            continue
         out.append({
-            "short_name": short,
-            "credit_union": (draft or {}).get("credit_union") or short,
-            "latest_period": latest,
-            "latest_path": str(latest_path) if latest_path else "",
-            "periods": periods,
-            "draft_present": draft is not None and draft.get("model") == "scale",
+            "short_name": slug,
+            "credit_union": draft.get("credit_union") or slug,
+            "latest_period": "",
+            "latest_path": "",
+            "periods": [],
+            "draft_present": True,
         })
+
     out.sort(key=lambda r: r["credit_union"].lower())
     return out
 

@@ -218,7 +218,18 @@ def apply_impaired_rows(
         ws.cell(row=r, column=9).value = row.get("allowance_provided") or None
         ws.cell(row=r, column=10).value = row.get("notes") or None
         applied += 1
-    wb.save(p)
+    try:
+        wb.save(p)
+    except PermissionError as exc:
+        result["error"] = (
+            f"Permission denied saving {p.name}. The workbook is likely "
+            f"open in Excel or locked by a sync client (Egnyte / OneDrive). "
+            f"Close it everywhere and re-run. (details: {exc})"
+        )
+        return result
+    except OSError as exc:
+        result["error"] = f"Failed to save workbook {p.name}: {exc}"
+        return result
     result["ok"] = True
     result["applied"] = applied
     result["cleared"] = cleared

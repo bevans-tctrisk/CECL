@@ -864,23 +864,45 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         pass
     fill = fill_template(tmpl["path"], out_path, rows, doc)
 
-    qf_entries = _qfactor_entries_from_state(state)
-    qf_result = apply_qfactors(out_path, qf_entries)
+    try:
+        qf_entries = _qfactor_entries_from_state(state)
+        qf_result = apply_qfactors(out_path, qf_entries)
 
-    mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
-    mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
-    mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
+        mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
+        mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
+        mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
 
-    lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
-    lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
+        lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
+        lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
 
-    imp_rows = _impaired_rows_from_state(state)
-    imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
+        imp_rows = _impaired_rows_from_state(state)
+        imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
 
-    env_result = env_factor_writer.apply_env_factor_ranges(out_path)
+        env_result = env_factor_writer.apply_env_factor_ranges(out_path)
 
-    variant = _report_variant_from_state(state)
-    variant_result = apply_report_variant(out_path, variant)
+        variant = _report_variant_from_state(state)
+        variant_result = apply_report_variant(out_path, variant)
+    except (PermissionError, OSError) as _saveexc:
+        _msg = (
+            f"Permission denied writing to {Path(out_path).name}. "
+            f"The workbook is likely open in Excel or locked by a sync "
+            f"client (Egnyte / OneDrive). Close it everywhere and re-run. "
+            f"(details: {_saveexc})"
+            if isinstance(_saveexc, PermissionError)
+            else f"OS error writing to {Path(out_path).name}: {_saveexc}"
+        )
+        return {
+            "ok": False,
+            "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "output_path": str(out_path),
+            "output_files": [],
+            "period": period,
+            "charter": charter,
+            "errors": [_msg],
+            "template_path": tmpl["path"],
+            "template_source": tmpl["source"],
+            "template_message": tmpl.get("message", ""),
+        }
     primary_output = (
         variant_result["outputs"][0]["path"]
         if variant_result["outputs"] else str(out_path)
@@ -1125,20 +1147,35 @@ def run_multi_quarter(
     }
     env_result = {"ok": False, "applied_delq": 0, "applied_econ": 0,
                   "skipped": [], "error": ""}
+    post_write_error: str = ""
     if successes > 0:
-        qf_entries = _qfactor_entries_from_state(state)
-        qf_result = apply_qfactors(out_path, qf_entries)
-        mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
-        mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
-        mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
-        lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
-        lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
-        imp_rows = _impaired_rows_from_state(state)
-        imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
-        env_result = env_factor_writer.apply_env_factor_ranges(out_path)
-        variant_result = apply_report_variant(
-            out_path, _report_variant_from_state(state)
-        )
+        try:
+            qf_entries = _qfactor_entries_from_state(state)
+            qf_result = apply_qfactors(out_path, qf_entries)
+            mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
+            mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
+            mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
+            lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
+            lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
+            imp_rows = _impaired_rows_from_state(state)
+            imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
+            env_result = env_factor_writer.apply_env_factor_ranges(out_path)
+            variant_result = apply_report_variant(
+                out_path, _report_variant_from_state(state)
+            )
+        except PermissionError as _pe:
+            post_write_error = (
+                f"Permission denied writing to {out_path.name}. The workbook "
+                f"is likely open in Excel or locked by a sync client "
+                f"(Egnyte / OneDrive). Close it everywhere and re-run. "
+                f"(details: {_pe})"
+            )
+            successes = 0
+        except OSError as _oe:
+            post_write_error = (
+                f"OS error writing to {out_path.name}: {_oe}"
+            )
+            successes = 0
 
     primary_output = (
         variant_result["outputs"][0]["path"]
@@ -1207,7 +1244,11 @@ def run_multi_quarter(
         "prior_acl": prior_acl,
         "recalc": recalc_results,
         "db_captures": db_captures,
-        "errors": [] if successes > 0 else ["No quarters were successfully written."],
+        "errors": (
+            [post_write_error] if post_write_error
+            else ([] if successes > 0
+                  else ["No quarters were successfully written."])
+        ),
     }
 
 
@@ -1564,22 +1605,44 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
     )
 
     qf_entries = _qfactor_entries_from_state(state)
-    qf_result = apply_qfactors(out_path, qf_entries)
+    try:
+        qf_result = apply_qfactors(out_path, qf_entries)
 
-    mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
-    mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, str(out_path))
-    mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
+        mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
+        mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, str(out_path))
+        mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
 
-    lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
-    lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
+        lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
+        lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
 
-    imp_rows = _impaired_rows_from_state(state)
-    imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
+        imp_rows = _impaired_rows_from_state(state)
+        imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
 
-    env_result = env_factor_writer.apply_env_factor_ranges(out_path)
+        env_result = env_factor_writer.apply_env_factor_ranges(out_path)
 
-    variant = _report_variant_from_state(state)
-    variant_result = apply_report_variant(out_path, variant)
+        variant = _report_variant_from_state(state)
+        variant_result = apply_report_variant(out_path, variant)
+    except (PermissionError, OSError) as _saveexc:
+        _msg = (
+            f"Permission denied writing to {Path(out_path).name}. "
+            f"The workbook is likely open in Excel or locked by a sync "
+            f"client (Egnyte / OneDrive). Close it everywhere and re-run. "
+            f"(details: {_saveexc})"
+            if isinstance(_saveexc, PermissionError)
+            else f"OS error writing to {Path(out_path).name}: {_saveexc}"
+        )
+        return {
+            "ok": False,
+            "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "output_path": str(out_path),
+            "output_files": [],
+            "period": period,
+            "charter": charter,
+            "carry_mode": True,
+            "carry_from_period": prev_period,
+            "carry_from_path": str(prior_path),
+            "errors": [_msg],
+        }
     primary_output = (
         variant_result["outputs"][0]["path"]
         if variant_result["outputs"] else str(out_path)

@@ -180,13 +180,13 @@ def extract_snapshot_date(source_text, config):
 # so the heuristic doesn't grab e.g. "0331" out of "03312026" as a year.
 _FALLBACK_DATE_LAYOUTS: list[tuple[str, str]] = [
     # (regex, kind) — kind tells the loop how to read the groups.
-    (r"(20\d{2})[-_./ ](\d{2})[-_./ ](\d{2})", "YMD"),
+    (r"(20\d{2})[-_./ ](\d{1,2})[-_./ ](\d{1,2})(?!\d)", "YMD"),
     (r"(20\d{2})(\d{2})(\d{2})",               "YMD"),
-    (r"(\d{2})[-_./ ](\d{2})[-_./ ](20\d{2})", "MDY"),
+    (r"(?<!\d)(\d{1,2})[-_./ ](\d{1,2})[-_./ ](20\d{2})", "MDY"),
     (r"(\d{2})(\d{2})(20\d{2})",               "MDY"),
-    (r"(20\d{2})[-_./ ](\d{2})(?!\d)",         "YM"),
+    (r"(20\d{2})[-_./ ](\d{1,2})(?!\d)",       "YM"),
     (r"(20\d{2})(\d{2})(?!\d)",                "YM"),
-    (r"(\d{2})[-_./ ](20\d{2})",               "MY"),
+    (r"(?<!\d)(\d{1,2})[-_./ ](20\d{2})",      "MY"),
     # Quarter-end forms: "2025Q4", "2026-Q1", "2026_Q1".
     # Q1->Mar 31, Q2->Jun 30, Q3->Sep 30, Q4->Dec 31.
     (r"(20\d{2})[-_ ]?[Qq]([1-4])(?!\d)",       "YQ"),

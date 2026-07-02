@@ -998,6 +998,13 @@ def _build_state_for_run(cfg: dict[str, Any],
             if "pool_code_split" in ex_src:
                 file_entry["pool_code_split"] = ex_src.get(
                     "pool_code_split") or ""
+            # Phase 9.24c parity — per-extract member_account override
+            # (e.g. CUMA Mortgage vs Symitar ceclXX shape). Needed so
+            # impaired_parser._build_loan_index can build the correct
+            # member-suffix key per file.
+            if "member_account" in ex_src:
+                file_entry["member_account"] = ex_src.get(
+                    "member_account") or {}
             seen_names.add(key)
             loan_files.append(file_entry)
 
@@ -1013,5 +1020,15 @@ def _build_state_for_run(cfg: dict[str, Any],
         "default_pool": cfg.get("default_pool") or "Other/Uncategorized",
         "balance_remove_chars": cfg.get("balance_remove_chars") or [],
         "accounting_negatives": bool(cfg.get("accounting_negatives", True)),
+        # Phase 9.37b — the run-time impaired verification page relies on
+        # these to (a) classify credit_grade correctly instead of falling
+        # back to "Not Reported" for every row, and (b) build the correct
+        # member-suffix key so loan-extract enrichment actually matches.
+        # Without them, impaired_parser._build_loan_index / _grade_for
+        # silently degrade to the empty-grades and default fixed_suffix
+        # paths, producing 100% unmatched rows with credit_grade blank.
+        "credit_grades": cfg.get("credit_grades") or [],
+        "no_score_label": cfg.get("no_score_label") or "Not Reported",
+        "member_account": cfg.get("member_account") or {},
         "sample_uploads": {"loan_data_files": loan_files},
     }

@@ -15,6 +15,7 @@ from werkzeug.utils import secure_filename
 
 from cecl_ui.services import balance_check as balance_check_service
 from cecl_ui.services import config_service, pipeline_service
+from cecl_ui.services import impaired_check_service
 
 
 run_bp = Blueprint("run", __name__)
@@ -39,6 +40,85 @@ def _period_to_snapshot(period: str) -> str | None:
         return date(y, m, last).isoformat()
     except (ValueError, calendar.IllegalMonthError):
         return None
+
+
+def _refresh_staged_monthly_balance(
+    cfg: dict, folder_src: str, upload_dir: Path,
+) -> tuple[str, str] | None:
+    """Look among the just-staged files for an updated copy of the CU's
+    monthly balance workbook and refresh the wizard-staged saved_path.
+
+    The wizard captures ``monthly_balance.saved_path`` as a copy under
+    ``%TEMP%\\cecl_ui_monthly_bal\\`` at setup time. Subsequent quarters'
+    updated Historical Balance Sheets files (with new month columns
+    appended) are dropped into the source folder but never touched by
+    Run New Quarter's default file staging (which only routes files
+    through Raw_Uploads/ for the loan importer). This helper closes
+    that gap: when we detect a filename-matching file among the newly
+    staged uploads OR in the source folder, and it's newer than the
+    existing staged copy, we copy it over ``saved_path`` so the
+    Balance Adjustment Review + report engine both pick up May/June/
+    etc. columns without a manual wizard re-visit.
+
+    Returns ``(flash_msg, category)`` or ``None`` when no refresh
+    happened. Best-effort: never raises.
+    """
+    mb = (cfg or {}).get("monthly_balance") or {}
+    saved_path = str(mb.get("saved_path") or "").strip()
+    if not saved_path:
+        return None
+    canonical = str(mb.get("filename") or "").strip() or Path(saved_path).name
+
+    def _norm(name: str) -> str:
+        return re.sub(r"[\s_\-]+", "_", str(name).strip().lower())
+
+    target = _norm(canonical)
+    if not target:
+        return None
+
+    candidates: list[Path] = []
+    try:
+        for entry in upload_dir.iterdir():
+            if entry.is_file() and _norm(entry.name) == target:
+                candidates.append(entry)
+    except OSError:
+        pass
+    if folder_src:
+        try:
+            for entry in Path(folder_src).rglob("*"):
+                if entry.is_file() and _norm(entry.name) == target:
+                    candidates.append(entry)
+        except OSError:
+            pass
+    if not candidates:
+        return None
+    try:
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    src = candidates[0]
+    dest = Path(saved_path)
+    # Skip when the staged copy is already at least as fresh (avoids
+    # clobbering a user's hand-edited local copy on repeat submits).
+    try:
+        if dest.exists() and dest.stat().st_mtime >= src.stat().st_mtime:
+            return None
+    except OSError:
+        pass
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+    except OSError as exc:
+        return (
+            f"Found updated monthly balance file '{src.name}' but could "
+            f"not refresh the staged copy: {exc}",
+            "warning",
+        )
+    return (
+        f"Refreshed staged monthly balance file from '{src.name}' — "
+        "Balance Adjustment Review will use the latest data.",
+        "success",
+    )
 
 
 @run_bp.route("/", methods=["GET"])
@@ -374,7 +454,65 @@ def new_quarter(short_name: str):
         folder_skipped = []
         # Fall through; import block is skipped via _skip_stage below.
 
-    _skip_stage = stage in ("mapped", "balance_checked", "balance_remapped")
+    if stage == "impaired_checked":
+        # User reviewed the impaired-loans verification page and clicked
+        # "Continue → Run Reports". Files were already staged and
+        # imported on the prior submit; jump straight to the report
+        # block. Mirror the ``balance_checked`` skip pattern.
+        saved = 0
+        copied = 0
+        folder_skipped = []
+        # Fall through to the report block (import is skipped below).
+
+    if stage == "impaired_remapped":
+        # User adjusted one or more loan-code → pool mappings on the
+        # Impaired Loans Verification page. Apply the new mappings to
+        # cfg["pool_map"], persist to YAML, and re-run import so the
+        # loan-data extract lookup sees the new pools. Then fall
+        # through to the impaired-check intercept so the user sees
+        # updated rows.
+        posted_codes = request.form.getlist("map_code")
+        posted_pools = request.form.getlist("map_pool")
+        new_map = dict(cfg.get("pool_map") or {})
+        changed = 0
+        for i, code in enumerate(posted_codes):
+            code = (code or "").strip()
+            if not code:
+                continue
+            new_pool = (posted_pools[i] if i < len(posted_pools) else "").strip()
+            old_pool = new_map.get(code, "")
+            if new_pool == old_pool:
+                continue
+            new_map[code] = new_pool
+            changed += 1
+        if changed:
+            cfg["pool_map"] = new_map
+            try:
+                config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+            except (OSError, ValueError) as exc:
+                flash(f"Could not save pool mappings: {exc}", "error")
+                return redirect(url_for("run.new_quarter", short_name=short_name))
+            try:
+                pipeline_service.run_import(short_name)
+                flash(
+                    f"Reassigned {changed} loan code(s) and re-imported. "
+                    "Review the updated impaired loans below.",
+                    "success",
+                )
+            except Exception as exc:  # noqa: BLE001
+                flash(f"Re-import after remap failed: {exc}", "error")
+                return redirect(url_for("run.new_quarter", short_name=short_name))
+        else:
+            flash("No mapping changes detected.", "info")
+        saved = 0
+        copied = 0
+        folder_skipped = []
+        # Fall through; import block is skipped via _skip_stage below.
+
+    _skip_stage = stage in (
+        "mapped", "balance_checked", "balance_remapped",
+        "impaired_checked", "impaired_remapped",
+    )
     folder_raw = _normalize_folder_path(request.form.get("folder_path") or "") if not _skip_stage else ""
 
     # 1) Save uploaded files
@@ -431,6 +569,21 @@ def new_quarter(short_name: str):
             + ("…" if len(folder_skipped) > 6 else ""),
             "info",
         )
+
+    # 2a) Refresh the wizard-staged monthly balance workbook if the
+    # source folder / uploads contain a newer copy (e.g. Vizo dropped
+    # an updated Historical Balance Sheets file with May/June columns
+    # into 2026-Q2/June 2026/). Best-effort — never blocks the run.
+    if not _skip_stage:
+        try:
+            _mb_msg = _refresh_staged_monthly_balance(cfg, folder_raw, upload_dir)
+            if _mb_msg:
+                flash(_mb_msg[0], _mb_msg[1])
+        except Exception as _mb_exc:  # noqa: BLE001
+            flash(
+                f"Monthly-balance auto-refresh skipped: {_mb_exc}",
+                "warning",
+            )
 
     # 2b) Update YAML's ``report_period`` to the user-selected period so
     # the import step targets the correct snapshot. Filenames without a
@@ -573,9 +726,11 @@ def new_quarter(short_name: str):
                 staged_count=saved + copied,
             )
 
-    # 3) Import (skip on balance_checked / balance_remapped resubmits —
-    # import already ran on the prior submit or inside the remap branch).
-    if stage in ("balance_checked", "balance_remapped"):
+    # 3) Import (skip on balance_checked / balance_remapped /
+    # impaired_checked / impaired_remapped resubmits — import already
+    # ran on the prior submit or inside the remap branch).
+    if stage in ("balance_checked", "balance_remapped",
+                 "impaired_checked", "impaired_remapped"):
         n_imported = 0  # already imported on prior submit
     else:
         try:
@@ -622,7 +777,11 @@ def new_quarter(short_name: str):
     # balance comparison so the user can review discrepancies BEFORE
     # the reports are produced. Mirrors wizard Step 14. On the resubmit
     # the user clicks "Continue → Run Reports" and we fall through.
-    if stage != "balance_checked":
+    # Also skip once the user has advanced PAST balance to the impaired
+    # intercept — otherwise clicking Continue on the impaired page would
+    # bounce them back to the balance page (loop).
+    if stage not in ("balance_checked", "impaired_checked",
+                     "impaired_remapped"):
         try:
             comparison = balance_check_service.compare_run(
                 cfg, snapshot, short_name=short_name)
@@ -651,6 +810,49 @@ def new_quarter(short_name: str):
                 staged_period=period,
                 staged_reports=report_selection,
                 pool_choices=pool_choices,
+            )
+
+    # 3c) Impaired Loans Verification intercept — show the parsed
+    # impaired workbook (if one is on disk for this period) so the user
+    # can confirm each impaired loan resolves to a real pool BEFORE the
+    # reports are produced. Mirrors wizard Step 16. Skipped when no
+    # impaired workbook is found — most CUs don't ship one and there's
+    # nothing to review.
+    if stage != "impaired_checked":
+        try:
+            impaired_result = impaired_check_service.verify_for_run(
+                cfg, snapshot, short_name=short_name)
+        except Exception:  # noqa: BLE001
+            impaired_result = None
+        if (impaired_result
+                and impaired_result.get("ok")
+                and impaired_result.get("found")
+                and (impaired_result.get("data_rows")
+                     or impaired_result.get("validation", {}).get(
+                         "unmapped_codes"))):
+            report_selection = {
+                r: (request.form.get(r) == "on")
+                for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
+            }
+            return render_template(
+                "run/new_quarter.html",
+                short_name=short_name,
+                cfg=cfg,
+                stage="awaiting_impaired_check",
+                impaired=impaired_result,
+                staged_period=period,
+                staged_reports=report_selection,
+            )
+        # Surface non-fatal parse errors so the user isn't blindsided if
+        # the workbook exists but couldn't be parsed. Report generation
+        # will still proceed — the report engine has its own tolerance
+        # for a missing/malformed impaired file.
+        if impaired_result and impaired_result.get("error"):
+            flash(
+                "Could not verify the impaired-loans workbook for "
+                f"{snapshot}: {impaired_result['error']}. Reports will "
+                "continue with best-effort defaults.",
+                "warning",
             )
 
     # 4) Run reports — selection comes from form (defaults seeded from cfg)

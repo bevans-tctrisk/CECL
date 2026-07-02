@@ -472,9 +472,13 @@ _FNAME_GENERALIZE_RULES: list[tuple[re.Pattern[str], str]] = [
      _MONTH_NAME_RX_GROUP),
     # Version suffix: "V2", "V3", "v10". Wildcards the digit so next
     # quarter's "V3" file matches a pattern derived from a "V2" sample.
-    # Restricted to 1-2 digits and an explicit boundary so generic words
-    # like "Vault123" don't get rewritten.
-    (re.compile(r"(?<![A-Za-z0-9])[Vv]\d{1,2}(?![A-Za-z0-9])"),
+    # Restricted to 1-2 digits and an explicit letter-boundary so generic
+    # words like "Vault123" don't get rewritten. Digits ARE allowed
+    # immediately before ``V`` so Vizo IDLR filenames that drop the
+    # separator between year and version (e.g. "TCP Aires June 2026V3.xlsx")
+    # still fire this rule — the trailing lookahead still gates against
+    # bare-numeric noise.
+    (re.compile(r"(?<![A-Za-z])[Vv]\d{1,2}(?![A-Za-z0-9])"),
      r"[Vv]\d{1,2}"),
     # Trailing numeric suffix like ".01" / ".001" / ".10" that Symitar
     # / Vizo IDLR exports sometimes append to the baseline file
@@ -543,6 +547,17 @@ def _generalize_filename_pattern(stem: str, ext_part: str) -> str:
     if last < len(stem):
         parts.append(_collapse(re.escape(stem[last:])))
     body = "".join(parts) if parts else _collapse(re.escape(stem))
+    # Cross-match year+version pairs: a pattern derived from
+    # "...2026 V3.xlsx" (with space) should also match "...2026V3.xlsx"
+    # (Vizo IDLR sometimes drops the separator on new-quarter refresh
+    # drops). Rewrite ``20\d{2}[\s_\-]+[Vv]\d{1,2}`` and
+    # ``20\d{2}[Vv]\d{1,2}`` to a common ``20\d{2}[\s_\-]*[Vv]\d{1,2}``
+    # so patterns derived from EITHER shape match BOTH.
+    body = re.sub(
+        r"20\\d\{2\}(?:\[\\s_\\\-\]\+)?\[Vv\]\\d\{1,2\}",
+        r"20\\d{2}[\\s_\\-]*[Vv]\\d{1,2}",
+        body,
+    )
     return f"(?i)^{body}\\.{ext_part}$"
 
 

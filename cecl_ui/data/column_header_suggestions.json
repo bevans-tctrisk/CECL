@@ -17,13 +17,13 @@
       "current loan balance": 10,
       "currentbalance": 2,
       "currupb": 8,
-      "loan balance": 30,
+      "loan balance": 46,
       "new princ balance": 8,
       "newbal": 1,
       "original balance as of 11/30/21": 5
     },
     "current_fico_score": {
-      "credit score": 10
+      "credit score": 24
     },
     "days_delinquent": {
       "account delinquent day count": 1,
@@ -47,10 +47,10 @@
       "member": 2,
       "member close date": 10,
       "month delq days": 2,
-      "past due": 31
+      "past due": 47
     },
     "interest_rate": {
-      "annual rate 1": 30,
+      "annual rate 1": 46,
       "cash annual interest rate": 8,
       "cash current annual interest rate": 1,
       "int rate": 4,
@@ -73,7 +73,7 @@
       "lntype": 18,
       "loan collateral code": 5,
       "loan purpose": 8,
-      "loan type": 49,
+      "loan type": 65,
       "loan type code": 27,
       "mbr state code": 6,
       "newcolb": 1,
@@ -97,7 +97,7 @@
       "account": 16,
       "account #": 7,
       "account identifier -pk": 1,
-      "account number": 25,
+      "account number": 36,
       "acct #": 4,
       "acct nbr": 10,
       "acct#": 2,
@@ -108,7 +108,7 @@
       "loan#": 8,
       "mbr# ln#": 2,
       "member": 5,
-      "member name": 16,
+      "member name": 21,
       "member's name (last, first, middle initial)": 3,
       "om sys - prin number": 8
     },
@@ -118,7 +118,7 @@
       "contractdate": 5,
       "date of loan": 11,
       "loan date": 2,
-      "loan original date": 30,
+      "loan original date": 46,
       "loanorigination": 2,
       "open date": 18,
       "opendat": 48,
@@ -130,7 +130,7 @@
     },
     "original_fico_score": {
       "application_creditscore": 5,
-      "credit score": 56,
+      "credit score": 72,
       "credit score code": 1,
       "creditscore": 2,
       "fico": 5,
@@ -143,10 +143,10 @@
       "finalloanamount": 5,
       "highbalance": 2,
       "loan amount": 2,
-      "loan original amnt": 17,
+      "loan original amnt": 28,
       "loan#": 8,
       "orig ln amt": 2,
-      "orig nbr pymts": 13,
+      "orig nbr pymts": 18,
       "orig_ln_amt": 2,
       "original amount": 1,
       "original balance": 1,
@@ -154,7 +154,7 @@
       "original loan amount": 40
     },
     "total_available_credit": {
-      "credit limit": 61,
+      "credit limit": 77,
       "credit line amount": 9,
       "creditlimit": 2,
       "creditlimitamt": 5,
@@ -295,6 +295,6 @@
     "type of mortgage": "Type of Mortgage",
     "user_defined_field_7": "User_Defined_Field_7"
   },
-  "updated_at": "2026-07-01T00:37:31",
+  "updated_at": "2026-07-02T00:13:12",
   "version": 1
 }
