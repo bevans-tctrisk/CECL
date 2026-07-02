@@ -1705,6 +1705,157 @@ def _load_monthly_balances_from_wizard(config):
     return out_df, alll_by_date
 
 
+def _discover_supplemental_monthly_balances(config):
+    """Discover per-month 'snapshot' balance files (e.g.
+    ``June 2026 Loans by Type.xlsx``) in the data directory and return
+    ``[{pool, date, balance}, ...]`` rows.
+
+    Enabled only when ``config['monthly_balance']['monthly_file_pattern']``
+    is set — a regex (case-insensitive) matched against each candidate
+    filename. Each matched file is a single-month snapshot: a label column
+    (``monthly_label_col``, default ``A``) and a balance column
+    (``monthly_balance_col``, default ``B``), with the reporting period
+    taken from the *filename* (month name + year, e.g. "June 2026").
+
+    Lets a CU that switched from a wide historical workbook to per-month
+    drops keep feeding the report without re-running setup: these rows are
+    merged over the base balances so the snapshot wins for its own month.
+    ``monthly_header_row`` (default 1) is the number of leading rows to
+    skip before the first data row. The wizard-configured
+    ``monthly_balance.filename`` (the historical wide workbook) is always
+    excluded so a shared "Loans by Type" naming doesn't re-ingest it.
+    """
+    import re as _re
+
+    mb = config.get('monthly_balance') or {}
+    pat = str(mb.get('monthly_file_pattern') or '').strip()
+    if not pat:
+        return []
+    data_dir = resolve_path(config.get('data_directory', ''))
+    if not data_dir or not os.path.isdir(data_dir):
+        return []
+    try:
+        rx = _re.compile(pat, _re.IGNORECASE)
+    except _re.error as exc:
+        print(f"    Warning: invalid monthly_file_pattern {pat!r}: {exc}")
+        return []
+
+    label_idx = _col_letter_to_idx(mb.get('monthly_label_col') or 'A')
+    balance_idx = _col_letter_to_idx(mb.get('monthly_balance_col') or 'B')
+    header_row = int(mb.get('monthly_header_row') or 1)
+    sheet = str(mb.get('monthly_sheet') or '').strip()
+    base_name = str(mb.get('filename') or '').strip().lower()
+    raw_map = mb.get('pool_map') or {}
+    pool_map = {str(k).strip().lower(): str(v).strip()
+                for k, v in raw_map.items()
+                if str(k).strip() and str(v).strip()}
+    split = str(config.get('pool_code_split') or '/').strip()
+
+    try:
+        from import_data import extract_snapshot_date as _esd
+    except Exception:  # noqa: BLE001
+        _esd = None
+
+    # Collect matching candidates (exclude the historical wide workbook).
+    candidates = []
+    for root, _dirs, files in os.walk(data_dir):
+        for f in files:
+            if not f.lower().endswith(('.xlsx', '.xlsm', '.xls')):
+                continue
+            if f.startswith('~$'):
+                continue
+            if base_name and f.strip().lower() == base_name:
+                continue
+            if not rx.search(f):
+                continue
+            candidates.append(os.path.join(root, f))
+    # Newest-first so if two files map to the same month the latest wins.
+    candidates.sort(key=os.path.getmtime, reverse=True)
+
+    records = []
+    seen_periods = set()
+    for path in candidates:
+        fn = os.path.basename(path)
+        iso = None
+        if _esd is not None:
+            iso = _esd(fn, {'date_pattern': r'(20\d{2})-(\d{2})',
+                            'date_format': 'YYYY-MM'})
+        if not iso:
+            continue
+        period = iso[:7]  # YYYY-MM
+        if period in seen_periods:
+            continue
+        dt = pd.to_datetime(iso, errors='coerce')
+        if pd.isna(dt):
+            continue
+        try:
+            if sheet:
+                try:
+                    df = pd.read_excel(path, sheet_name=sheet, header=None)
+                except Exception:
+                    df = pd.read_excel(path, sheet_name=0, header=None)
+            else:
+                df = pd.read_excel(path, header=None)
+        except Exception as exc:  # noqa: BLE001
+            print(f"    Warning: could not read monthly-balance file {fn}: {exc}")
+            continue
+        if df is None or df.empty or df.shape[1] <= max(label_idx, balance_idx):
+            continue
+        seen_periods.add(period)
+        for i in range(header_row, df.shape[0]):
+            label = df.iat[i, label_idx]
+            bal = df.iat[i, balance_idx]
+            if pd.isna(label) or str(label).strip() == '':
+                continue
+            bal_f = _coerce_balance(bal)
+            if bal_f is None:
+                continue
+            key = str(label).strip().lower()
+            pool = pool_map.get(key)
+            # Fall back to splitting composite codes (e.g. "IU/PL" -> "IU").
+            if not pool and split and split in key:
+                for part in key.split(split):
+                    pool = pool_map.get(part.strip())
+                    if pool:
+                        break
+            if not pool:
+                pool = str(label).strip()
+            records.append({'pool': pool, 'date': dt, 'balance': bal_f})
+
+    if seen_periods:
+        print(f"    Supplemental monthly-balance snapshot file(s): "
+              f"{len(seen_periods)} period(s) matched "
+              f"({', '.join(sorted(seen_periods))}).")
+    return records
+
+
+def _apply_supplemental_monthly_balances(base_df, config):
+    """Merge per-month snapshot balance rows over ``base_df``.
+
+    The snapshot rows win for any (year, month) they cover — the matching
+    months are dropped from ``base_df`` first, then the snapshot rows are
+    appended. Returns ``base_df`` unchanged when nothing is discovered.
+    """
+    try:
+        supp = _discover_supplemental_monthly_balances(config)
+    except Exception as exc:  # noqa: BLE001
+        print(f"    Warning: supplemental monthly-balance discovery failed: {exc}")
+        return base_df
+    if not supp:
+        return base_df
+    supp_df = pd.DataFrame(supp, columns=['pool', 'date', 'balance'])
+    if base_df is None or base_df.empty:
+        return supp_df
+    try:
+        supp_months = set(supp_df['date'].dt.to_period('M'))
+        keep = ~base_df['date'].dt.to_period('M').isin(supp_months)
+        merged = pd.concat([base_df[keep], supp_df], ignore_index=True)
+        return merged
+    except Exception as exc:  # noqa: BLE001
+        print(f"    Warning: could not merge supplemental balances: {exc}")
+        return base_df
+
+
 def load_monthly_balances(config):
     """Load monthly loan balances by pool from the most recent file available.
     Returns (DataFrame with columns [pool, date, balance],
@@ -1720,12 +1871,14 @@ def load_monthly_balances(config):
     if mb_source == 'per_month':
         df, alll = _load_monthly_balances_per_month(mb_cfg, acl_cfg=config.get('acl'))
         if not df.empty:
+            df = _apply_supplemental_monthly_balances(df, config)
             return df, _merge_acl_history(alll, config)
         # If per_month failed (no files / unreadable), fall through to the
         # legacy scan so the user at least gets the historical context.
     if mb_source == 'per_year':
         df, alll = _load_monthly_balances_per_year(mb_cfg, acl_cfg=config.get('acl'))
         if not df.empty:
+            df = _apply_supplemental_monthly_balances(df, config)
             return df, _merge_acl_history(alll, config)
 
     # Preferred path for "single" mode: use the wizard's saved_path +
@@ -1735,6 +1888,7 @@ def load_monthly_balances(config):
     # the wizard metadata is missing or the file can't be read.
     wiz_df, wiz_alll = _load_monthly_balances_from_wizard(config)
     if wiz_df is not None:
+        wiz_df = _apply_supplemental_monthly_balances(wiz_df, config)
         return wiz_df, _merge_acl_history(wiz_alll or {}, config)
 
     data_dir = resolve_path(config.get('data_directory', ''))
