@@ -1448,7 +1448,17 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
         folders.append(raw_dir)
     cp_folder = ((cfg.get("credit_pull") or {}).get("source_folder") or "").strip()
     if cp_folder and os.path.isdir(cp_folder):
-        folders.append(Path(cp_folder))
+        # Guard: credit_pull.source_folder can point at a SHARED wizard temp
+        # staging area (e.g. ``%TEMP%\\cecl_ui_samples``) that holds sample
+        # loan files uploaded for OTHER credit unions during setup. Scanning
+        # it here pulls in foreign LOAN TYPE codes (another CU's numeric
+        # coding scheme), which then surface as bogus "new loan codes" for
+        # THIS CU — with inflated counts summed across every CU's samples.
+        # The wizard's temp folders all live under a ``cecl_ui_*`` directory;
+        # skip any source folder that resolves inside one. Real credit-pull
+        # folders live on the client's network share and never match.
+        if "cecl_ui_" not in cp_folder.replace("\\", "/").lower():
+            folders.append(Path(cp_folder))
 
     counts: dict[str, int] = {}
     sources: dict[str, set] = {}
