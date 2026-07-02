@@ -3364,22 +3364,43 @@ def load_historical_data(config):
     """Load all historical data for a client. Returns a dict with all historical DataFrames."""
     print("  Loading historical data...")
     co_rec = load_chargeoff_recovery_history(config)
-    # Overlay charge-off / recovery rows from the wizard's DB tables
-    # (loan_code_chargeoff_history, loan_code_recovery_history). DB rows
-    # take precedence over file-derived rows for any (year, pool) cell
-    # present in the DB; file-only cells are preserved.
+    # Merge the wizard's DB tables (loan_code_chargeoff_history,
+    # loan_code_recovery_history — which hold the NCUA 5300 backfill plus
+    # any wizard-aggregated workbook rows) with the CU's own file-derived
+    # history.
+    #
+    # SOURCE PRECEDENCE: the credit union's OWN charge-off / recovery files
+    # win. The DB (5300) backfill only fills the YEARS the files don't cover
+    # ("back the missing months with the 5300, but the credit union's files
+    # should be used first"). Gating at the year level — rather than per
+    # (year, pool) cell — keeps a single year's numbers from mixing the CU's
+    # loan-code pool taxonomy with the NCUA 5300 taxonomy. When the CU ships
+    # NO files (DB-only setups, e.g. monthly-summary or pure 5300 CUs), the
+    # file result is empty, so every year falls through to the DB unchanged.
     db_corc = _load_co_rc_history_from_db(config)
     if db_corc.get('years'):
+        _file_co_years = {yr for yr, bp in (co_rec.get('chargeoffs') or {}).items() if bp}
+        _file_rc_years = {yr for yr, bp in (co_rec.get('recoveries') or {}).items() if bp}
+        co = co_rec.setdefault('chargeoffs', {})
         for yr, by_pool in db_corc['chargeoffs'].items():
-            co_rec['chargeoffs'].setdefault(yr, {}).update(by_pool)
+            if yr not in _file_co_years:
+                co[yr] = dict(by_pool)
+        rc = co_rec.setdefault('recoveries', {})
         for yr, by_pool in db_corc['recoveries'].items():
-            co_rec['recoveries'].setdefault(yr, {}).update(by_pool)
+            if yr not in _file_rc_years:
+                rc[yr] = dict(by_pool)
         co_m = co_rec.setdefault('co_monthly', {})
         for ym, by_pool in db_corc['co_monthly'].items():
-            co_m.setdefault(ym, {}).update(by_pool)
+            if ym[0] not in _file_co_years:
+                co_m[ym] = dict(by_pool)
         rc_m = co_rec.setdefault('rc_monthly', {})
         for ym, by_pool in db_corc['rc_monthly'].items():
-            rc_m.setdefault(ym, {}).update(by_pool)
+            if ym[0] not in _file_rc_years:
+                rc_m[ym] = dict(by_pool)
+        if _file_co_years or _file_rc_years:
+            print(f"    CO/Recovery source precedence: CU files win for "
+                  f"CO year(s) {sorted(_file_co_years)} and recovery year(s) "
+                  f"{sorted(_file_rc_years)}; 5300 DB backfill fills the rest.")
         co_rec['years'] = sorted(
             set(co_rec.get('years', []))
             | set(co_rec['chargeoffs'])
