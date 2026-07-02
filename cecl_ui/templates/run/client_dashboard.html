@@ -55,6 +55,46 @@
 </div>
 
 <div class="card">
+  <h3>Set ACL (allowance) balance</h3>
+  <p class="muted">
+    Override the month-end ACL balance directly &mdash; no re-import or wizard needed.
+    Saved to <code>acl.history</code> in the config and applied on the next report run.
+  </p>
+  <form method="post" action="{{ url_for('run.set_acl', short_name=short_name) }}"
+        style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+    <label>Month-end
+      {% if snapshots %}
+        <select name="acl_month">
+          {% for s in snapshots %}
+            <option value="{{ s }}" {% if s == report_period_end %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <input type="text" name="acl_month" placeholder="YYYY-MM or YYYY-MM-DD"
+               value="{{ report_period_end or '' }}">
+      {% endif %}
+    </label>
+    <label>New ACL balance
+      <input type="text" name="acl_balance" placeholder="e.g. 232825.00"
+             value="{% if report_period_end and acl_history.get(report_period_end) is not none %}{{ '%.2f'|format(acl_history.get(report_period_end)) }}{% endif %}">
+    </label>
+    <button class="btn btn-primary" type="submit">Save ACL Balance</button>
+  </form>
+
+  {% if acl_history %}
+    <h4 style="margin-top:18px;">Current ACL balances by month-end:</h4>
+    <ul style="list-style:none; padding-left:0;">
+      {% for d, v in acl_history.items() | sort %}
+        <li style="margin:2px 0;">
+          <code>{{ d }}</code> &mdash; ${{ '{:,.2f}'.format(v|float) }}
+          {% if d == report_period_end %}<span class="muted">(current period)</span>{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>
+
+<div class="card">
   <h3>3. Generate reports</h3>
   <form method="post" action="{{ url_for('run.reports', short_name=short_name) }}">
     <label>Snapshot date (optional)

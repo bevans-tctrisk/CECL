@@ -247,12 +247,16 @@ def client_dashboard(short_name: str):
     upload_dir = config_service.raw_uploads_dir(ws) / short_name
     upload_dir.mkdir(parents=True, exist_ok=True)
     pending = [p.name for p in upload_dir.glob("*") if p.is_file()]
+    acl_cfg = cfg.get("acl") or {}
+    acl_history = acl_cfg.get("history") or {}
     return render_template(
         "run/client_dashboard.html",
         short_name=short_name,
         cfg=cfg,
         snapshots=snapshots,
         pending_files=pending,
+        acl_history=acl_history,
+        report_period_end=_period_to_snapshot(cfg.get("report_period") or ""),
     )
 
 
@@ -419,6 +423,81 @@ def reports(short_name: str):
         outputs=outputs,
         errors=errors,
     )
+
+
+def _month_end_iso(value: str) -> str | None:
+    """Normalize a user-supplied date to an ISO month-end string.
+
+    Accepts ``YYYY-MM`` or a full ``YYYY-MM-DD`` and always returns the
+    last calendar day of that month (e.g. ``2026-06`` → ``2026-06-30``),
+    matching how ACL history / snapshot dates are keyed elsewhere.
+    """
+    s = (value or "").strip()
+    if not s:
+        return None
+    if len(s) == 7 and s[4] == "-":
+        return _period_to_snapshot(s)
+    try:
+        d = date.fromisoformat(s)
+    except ValueError:
+        return None
+    last = calendar.monthrange(d.year, d.month)[1]
+    return date(d.year, d.month, last).isoformat()
+
+
+@run_bp.route("/<short_name>/set-acl", methods=["POST"])
+def set_acl(short_name: str):
+    """Override the ACL (allowance) balance for a single month-end without
+    re-running the wizard.
+
+    Writes the value into ``cfg['acl']['history'][<month-end>]`` — the
+    authoritative source the report engine merges with precedence over
+    the monthly-balance file (see ``_merge_acl_history`` in
+    ``generate_report.py``). When the CU's ACL source is ``manual`` the
+    ``acl.manual`` map is kept in sync too, and the top-level
+    ``acl_balance`` is refreshed when the edited month is the current
+    ``report_period``.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+
+    month_end = _month_end_iso(request.form.get("acl_month") or "")
+    raw_amount = (request.form.get("acl_balance") or "").strip().replace(",", "")
+    if not month_end:
+        flash("Pick a valid month-end for the ACL balance.", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+    try:
+        amount = float(raw_amount)
+    except ValueError:
+        flash(f"Invalid ACL balance: {raw_amount!r}", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+    if amount < 0:
+        flash("ACL balance cannot be negative.", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+    acl = dict(cfg.get("acl") or {})
+    history = dict(acl.get("history") or {})
+    history[month_end] = amount
+    acl["history"] = history
+    # Keep the manual map aligned when the CU sources ACL manually.
+    if (acl.get("source") or "").strip().lower() == "manual":
+        manual = dict(acl.get("manual") or {})
+        manual[month_end] = amount
+        acl["manual"] = manual
+    cfg["acl"] = acl
+
+    # Refresh the scalar top-level balance when editing the current period.
+    period_end = _period_to_snapshot(cfg.get("report_period") or "")
+    if period_end and period_end == month_end:
+        cfg["acl_balance"] = amount
+
+    config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+    flash(
+        f"ACL balance for {month_end} set to ${amount:,.2f}. "
+        f"Re-generate the report to apply it.",
+        "success",
+    )
+    return redirect(url_for("run.client_dashboard", short_name=short_name))
 
 
 @run_bp.route("/download")
