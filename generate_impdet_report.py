@@ -29,7 +29,10 @@ from cecl_engine import (
     assign_business_risk_grade,
     build_grade_order,
 )
-from import_data import derive_member_account, _normalize_col_map_for_no_header, _excel_idx_to_letter
+from import_data import (
+    derive_member_account, _normalize_col_map_for_no_header, _excel_idx_to_letter,
+    extract_snapshot_date,
+)
 
 load_dotenv()
 # Honour CECL_WORKSPACE_ROOT so the data root can be decoupled from the
@@ -831,12 +834,21 @@ _EXTRACT_FIELDS = [
 ]
 
 
-def _resolve_extract_path(file_pattern, search_dirs):
-    """Find the first file in any search_dir whose name matches file_pattern.
+def _resolve_extract_path(file_pattern, search_dirs, snap=None, config=None):
+    """Find a file in any search_dir whose name matches file_pattern.
 
     ``file_pattern`` accepts either a single regex string or a list of regex
     strings (multi-pattern, first-match-wins). Empty/None returns ``None``.
     Invalid regexes are skipped.
+
+    When ``snap`` is given, prefer the matching file whose filename date
+    resolves to the same year-month as the report snapshot. Several months of
+    the same extract (e.g. ``Aires Loans Dec 2025`` and ``Aires Loans Jun
+    2026``) commonly live side-by-side in the import Archive, so a plain
+    first-match would enrich a June report with December loan detail and
+    leave every loan opened since December unmatched. If no filename resolves
+    to the snapshot month, fall back to the first match (preserves behavior
+    for extracts that ship only one dated file, e.g. an annual Visa export).
     """
     if not file_pattern:
         return None
@@ -854,6 +866,8 @@ def _resolve_extract_path(file_pattern, search_dirs):
             continue
     if not compiled:
         return None
+
+    matches: list[str] = []
     for sdir in search_dirs:
         if not sdir or not os.path.isdir(sdir):
             continue
@@ -862,8 +876,21 @@ def _resolve_extract_path(file_pattern, search_dirs):
                 if f.startswith('~$') or f.upper().startswith('DNU'):
                     continue
                 if any(rx.search(f) for rx in compiled):
-                    return os.path.join(root, f)
-    return None
+                    matches.append(os.path.join(root, f))
+    if not matches:
+        return None
+
+    snap_ym = str(snap)[:7] if snap else ''
+    if snap_ym:
+        for path in matches:
+            try:
+                iso = extract_snapshot_date(os.path.basename(path), config or {})
+            except Exception:  # noqa: BLE001
+                iso = None
+            if iso and str(iso)[:7] == snap_ym:
+                return path
+    # No snapshot-month match (or no snap requested): first match wins.
+    return matches[0]
 
 
 def _split_suffix_for_row(member_only, full_account, ma_cfg, raw_suffix):
@@ -893,7 +920,7 @@ def _split_suffix_for_row(member_only, full_account, ma_cfg, raw_suffix):
     return ''
 
 
-def _load_extract_enrichment(config, workspace_root):
+def _load_extract_enrichment(config, workspace_root, snap=None):
     """Read configured loan extract files to populate the All Loans tab
     fields that don't live in monthly_loan_data (loan_type, open_date,
     interest_rate, days_delinquent, original_loan_amount,
@@ -951,11 +978,12 @@ def _load_extract_enrichment(config, workspace_root):
         col_map = dict(ex.get('column_mappings') or {})
         if not col_map:
             continue
-        path = _resolve_extract_path(ex.get('file_pattern'), search_dirs)
+        path = _resolve_extract_path(ex.get('file_pattern'), search_dirs, snap, config)
         if not path:
             tried = ", ".join(search_dirs) if search_dirs else "(no directories)"
             print(f"    Extract '{ex.get('label')}' not found in: {tried}; skipping enrichment.")
             continue
+        print(f"    Extract '{ex.get('label')}': using {os.path.basename(path)}")
         has_header = ex.get('has_header', True)
         try:
             hr_cfg = int(ex.get('header_row') or 0)
@@ -1174,7 +1202,7 @@ def generate_report(client, snap=None):
         # All Loans tab has Member#/Suffix split + Loan Type / Open Date /
         # Interest Rate / Days Delinquent / Original Loan Amount / Credit
         # Limit even without a WARM workbook on disk.
-        enrich = _load_extract_enrichment(config, BASE)
+        enrich = _load_extract_enrichment(config, BASE, snap)
 
         def _enr_get(acct, field, default=None):
             row = enrich.get(str(acct).strip()) if enrich else None
