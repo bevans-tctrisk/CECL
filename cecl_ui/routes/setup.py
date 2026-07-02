@@ -9626,6 +9626,51 @@ def step2_files():
                 "date_format", "YYYY-MM"
             )
 
+    # Auto-remediation (Phase: month-name date rescue). Independent of the
+    # first-load prefill above: when the file_pattern was already
+    # customized (so ``is_default`` is False) but the saved
+    # (date_pattern, date_format) pair CANNOT resolve a date from the
+    # uploaded sample, adopt the sample-derived suggestion's date fields
+    # so the red "no date" / ✗ preview flips green. This is the common
+    # case for month-name filenames (e.g. "Aires December 25.v2.xlsx")
+    # whose file_pattern matched but whose date_pattern was left at the
+    # numeric YYYY-MM default. Values land in form_values only — the user
+    # still confirms by clicking Next, which persists them.
+    if (
+        request.method == "GET"
+        and suggestion
+        and sample_loan_name
+        and not is_default
+    ):
+        try:
+            _cur = sample_parser.validate_date_format(
+                form_values["date_pattern"],
+                form_values["date_format"],
+                sample_loan_name,
+            )
+        except Exception:  # noqa: BLE001
+            _cur = {"ok": False}
+        if not _cur.get("ok"):
+            try:
+                _sug = sample_parser.validate_date_format(
+                    suggestion["date_pattern"],
+                    suggestion.get("date_format", "YYYY-MM"),
+                    sample_loan_name,
+                )
+            except Exception:  # noqa: BLE001
+                _sug = {"ok": False}
+            if _sug.get("ok"):
+                form_values["date_pattern"] = suggestion["date_pattern"]
+                form_values["date_format"] = suggestion.get(
+                    "date_format", "YYYY-MM"
+                )
+                flash(
+                    "Adjusted the date pattern to match this CU's filename "
+                    f"style — '{sample_loan_name}' now reads as "
+                    f"{_sug.get('preview')}. Click Next to save it.",
+                    "success",
+                )
+
     if request.method == "POST":
         action = request.form.get("action", "save")
         # Read everything off the form first.

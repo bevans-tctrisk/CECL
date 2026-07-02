@@ -409,6 +409,11 @@ _DATE_RX_CANDIDATES: list[tuple[str, str]] = [
     # Month-name forms — the import engine knows how to translate these.
     ("Mon_YYYY",      r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[-_ \.]+(20\d{2})"),
     ("YYYY_Mon",      r"(?i)(20\d{2})[-_ \.]+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"),
+    # Month-name + 2-digit year (e.g. "December 25", "Mar_26"). Placed
+    # AFTER the 4-digit forms so a full year wins when present. The
+    # import engine's month-name router normalizes the 2-digit year to
+    # 20xx. Trailing (?!\d) stops it grabbing the head of a longer number.
+    ("Mon_YY",        r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[-_ \.]+(\d{2})(?!\d)"),
 ]
 
 
@@ -589,6 +594,13 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
     for desc, rx in _DATE_RX_CANDIDATES:
         m = re.search(rx, stem)
         if not m:
+            continue
+        # Month-name + 2-digit year is only trustworthy when NO 4-digit
+        # year appears in the name — otherwise a "Month DD YYYY" filename
+        # would have its day misread as a 2-digit year (e.g. "March 15
+        # 2025" -> "15"). Skip Mon_YY in that case and let a later /
+        # numeric candidate win.
+        if desc == "Mon_YY" and re.search(r"20\d{2}", stem):
             continue
         # Validate the match implies a real month-of-year, so we don't
         # save a regex that will explode at import time. Month-name forms

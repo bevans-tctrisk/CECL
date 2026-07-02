@@ -76,6 +76,11 @@ def extract_snapshot_date(source_text, config):
             year = int(year_token)
         except (TypeError, ValueError):
             return None
+        # Normalize 2-digit years (e.g. "25" -> 2025) so month-name
+        # filenames like "Aires December 25.v2.xlsx" resolve correctly.
+        # Without this a token of "25" yields year 25 AD and a bogus date.
+        if year < 100:
+            year += 2000
         last_day = calendar.monthrange(year, month)[1]
         return date(year, month, last_day).isoformat()
 
@@ -96,6 +101,19 @@ def extract_snapshot_date(source_text, config):
         )
         if year_first:
             return _from_month_name(year_first.group(1), year_first.group(2))
+        # Month-name + 2-digit year (e.g. "December 25", "Mar 26" from
+        # "Aires December 25.v2.xlsx"). Only attempted when NO 4-digit
+        # year appears anywhere in the name — that guard avoids reading
+        # the day out of a "Month DD YYYY" filename as a 2-digit year.
+        # ``_from_month_name`` normalizes the 2-digit year to 20xx.
+        if not re.search(r"20\d{2}", text):
+            mon_yy = re.search(
+                r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)"
+                r"[a-z]*[-_ \.]+(\d{2})(?!\d)",
+                text,
+            )
+            if mon_yy:
+                return _from_month_name(mon_yy.group(2), mon_yy.group(1))
         # Fallback: "DDMonYY" / "DDMonYYYY" smushed-together filenames like
         # "30JUN25" or "01Jan2026" (no separators between day/month/year).
         # The day is captured but ignored — we still snap to month-end below.
