@@ -381,6 +381,39 @@ def _is_numeric_or_date(v):
     return False
 
 
+def _resolve_hist_cols_by_header(header_row, kind):
+    """Locate charge-off / recovery columns by HEADER TEXT.
+
+    Some CUs drift column positions between months (one month inserts or
+    drops a blank column), which silently mis-reads a fixed-index
+    ``historical_file_formats`` config. The header labels stay consistent,
+    so they are the reliable anchor. Returns a dict with any of
+    ``{account, code, amount, date}`` whose label was confidently matched;
+    callers keep their configured index for anything not found. ``kind`` is
+    ``'co'`` (charge-off amount) or ``'rc'`` (recovery amount).
+    """
+    labels = [str(v).strip().lower() if pd.notna(v) else '' for v in header_row]
+    out = {}
+    for i, lab in enumerate(labels):
+        if not lab:
+            continue
+        if 'account' not in out and ('account' in lab or 'acct' in lab):
+            out['account'] = i
+        if ('loan type code' in lab or 'loan code' in lab
+                or (lab.endswith('code') and 'account' not in lab)):
+            out['code'] = i
+        if 'date' in lab and 'date' not in out:
+            out['date'] = i
+        if kind == 'co':
+            if ('charge off amount' in lab or 'chargeoff amount' in lab
+                    or 'charge-off amount' in lab):
+                out['amount'] = i
+        else:
+            if 'recover' in lab:
+                out['amount'] = i
+    return out
+
+
 def _parse_chargeoff_file(filepath, parse_config=None):
     """Parse a charge-off file (varying formats). Returns DataFrame with [code, amount, date]."""
     df = _read_data_file(filepath)
@@ -400,6 +433,17 @@ def _parse_chargeoff_file(filepath, parse_config=None):
         code_col = parse_config.get('code_col')
         amount_col = parse_config.get('amount_col')
         date_col = parse_config.get('date_col')
+
+        # Trust consistent header TEXT over fixed indices when the file has
+        # a header row — protects against month-to-month column drift.
+        if parse_config.get('has_header', False) and len(df) > 0:
+            _hdr = _resolve_hist_cols_by_header(df.iloc[0], 'co')
+            if 'amount' in _hdr and 'code' in _hdr:
+                account_col = _hdr.get('account', account_col)
+                code_col = _hdr['code']
+                amount_col = _hdr['amount']
+                if 'date' in _hdr:
+                    date_col = _hdr['date']
 
         ncols = cfg_df.shape[1]
         code_valid = code_col is not None and 0 <= int(code_col) < ncols
@@ -540,6 +584,17 @@ def _parse_recovery_file(filepath, parse_config=None):
         code_col = parse_config.get('code_col')
         amount_col = parse_config.get('amount_col')
         date_col = parse_config.get('date_col')
+
+        # Trust consistent header TEXT over fixed indices when the file has
+        # a header row — protects against month-to-month column drift.
+        if parse_config.get('has_header', False) and len(df) > 0:
+            _hdr = _resolve_hist_cols_by_header(df.iloc[0], 'rc')
+            if 'amount' in _hdr and 'code' in _hdr:
+                account_col = _hdr.get('account', account_col)
+                code_col = _hdr['code']
+                amount_col = _hdr['amount']
+                if 'date' in _hdr:
+                    date_col = _hdr['date']
 
         ncols = cfg_df.shape[1]
         code_valid = code_col is not None and 0 <= int(code_col) < ncols
@@ -903,12 +958,29 @@ def load_chargeoff_recovery_history(config):
             from import_data import _try_common_date_layouts as _file_iso
         except Exception:  # noqa: BLE001
             _file_iso = None  # type: ignore
+        try:
+            from import_data import extract_snapshot_date as _cfg_file_iso
+        except Exception:  # noqa: BLE001
+            _cfg_file_iso = None  # type: ignore
 
         def _file_period(fname: str):
-            """Return (year, month) parsed from filename, or None."""
-            if not _file_iso:
-                return None
-            iso = _file_iso(fname)
+            """Return (year, month) parsed from filename, or None.
+
+            Try the config-agnostic layout matcher first; when it can't
+            resolve a date (e.g. month-name filenames like "... APRIL
+            2026.xlsx"), fall back to ``extract_snapshot_date`` which honors
+            the CU's configured ``date_pattern`` (month names, 2-digit
+            years, etc.). Without this fallback, month-name CO/recovery
+            files whose in-file date column is blank all fail filename
+            parsing and default to month 12 — piling every month into a
+            spurious December bucket.
+            """
+            iso = _file_iso(fname) if _file_iso else None
+            if (not iso or len(iso) < 7) and _cfg_file_iso is not None:
+                try:
+                    iso = _cfg_file_iso(fname, config)
+                except Exception:  # noqa: BLE001
+                    iso = None
             if not iso or len(iso) < 7:
                 return None
             try:
@@ -3533,28 +3605,64 @@ def load_historical_data(config):
     # file result is empty, so every year falls through to the DB unchanged.
     db_corc = _load_co_rc_history_from_db(config)
     if db_corc.get('years'):
-        _file_co_years = {yr for yr, bp in (co_rec.get('chargeoffs') or {}).items() if bp}
-        _file_rc_years = {yr for yr, bp in (co_rec.get('recoveries') or {}).items() if bp}
-        co = co_rec.setdefault('chargeoffs', {})
-        for yr, by_pool in db_corc['chargeoffs'].items():
-            if yr not in _file_co_years:
-                co[yr] = dict(by_pool)
-        rc = co_rec.setdefault('recoveries', {})
-        for yr, by_pool in db_corc['recoveries'].items():
-            if yr not in _file_rc_years:
-                rc[yr] = dict(by_pool)
-        co_m = co_rec.setdefault('co_monthly', {})
-        for ym, by_pool in db_corc['co_monthly'].items():
-            if ym[0] not in _file_co_years:
-                co_m[ym] = dict(by_pool)
-        rc_m = co_rec.setdefault('rc_monthly', {})
-        for ym, by_pool in db_corc['rc_monthly'].items():
-            if ym[0] not in _file_rc_years:
-                rc_m[ym] = dict(by_pool)
-        if _file_co_years or _file_rc_years:
-            print(f"    CO/Recovery source precedence: CU files win for "
-                  f"CO year(s) {sorted(_file_co_years)} and recovery year(s) "
-                  f"{sorted(_file_rc_years)}; 5300 DB backfill fills the rest.")
+        # ``co_recovery_month_level_fill: true`` opts a CU into MONTH-level
+        # precedence: the CU's own files win for every (year, month) they
+        # cover and the DB fills only the months the files DON'T cover, with
+        # annual totals recomputed from the merged monthly grid. This is for
+        # CUs whose monthly files start partway through a year (so year-level
+        # gating would drop the earlier months) AND whose DB history is
+        # itself monthly-granular (a rebuilt monthly history), so there is no
+        # quarterly-vs-monthly double count. The default remains YEAR-level
+        # gating, which safely avoids mixing CU monthly data with quarterly
+        # 5300 rows inside a single year.
+        if config.get('co_recovery_month_level_fill'):
+            _file_co_months = {ym for ym, bp in (co_rec.get('co_monthly') or {}).items() if bp}
+            _file_rc_months = {ym for ym, bp in (co_rec.get('rc_monthly') or {}).items() if bp}
+            co_m = co_rec.setdefault('co_monthly', {})
+            for ym, by_pool in db_corc['co_monthly'].items():
+                if ym not in _file_co_months:
+                    co_m[ym] = dict(by_pool)
+            rc_m = co_rec.setdefault('rc_monthly', {})
+            for ym, by_pool in db_corc['rc_monthly'].items():
+                if ym not in _file_rc_months:
+                    rc_m[ym] = dict(by_pool)
+
+            def _annual_from_monthly(monthly):
+                out: dict = {}
+                for (yr, _mo), by_pool in monthly.items():
+                    y = out.setdefault(yr, {})
+                    for pool, amt in by_pool.items():
+                        y[pool] = y.get(pool, 0.0) + amt
+                return out
+
+            co_rec['chargeoffs'] = _annual_from_monthly(co_m)
+            co_rec['recoveries'] = _annual_from_monthly(rc_m)
+            print(f"    CO/Recovery source precedence (MONTH-level): CU files "
+                  f"win for {len(_file_co_months)} CO month(s) / "
+                  f"{len(_file_rc_months)} recovery month(s); DB fills the rest.")
+        else:
+            _file_co_years = {yr for yr, bp in (co_rec.get('chargeoffs') or {}).items() if bp}
+            _file_rc_years = {yr for yr, bp in (co_rec.get('recoveries') or {}).items() if bp}
+            co = co_rec.setdefault('chargeoffs', {})
+            for yr, by_pool in db_corc['chargeoffs'].items():
+                if yr not in _file_co_years:
+                    co[yr] = dict(by_pool)
+            rc = co_rec.setdefault('recoveries', {})
+            for yr, by_pool in db_corc['recoveries'].items():
+                if yr not in _file_rc_years:
+                    rc[yr] = dict(by_pool)
+            co_m = co_rec.setdefault('co_monthly', {})
+            for ym, by_pool in db_corc['co_monthly'].items():
+                if ym[0] not in _file_co_years:
+                    co_m[ym] = dict(by_pool)
+            rc_m = co_rec.setdefault('rc_monthly', {})
+            for ym, by_pool in db_corc['rc_monthly'].items():
+                if ym[0] not in _file_rc_years:
+                    rc_m[ym] = dict(by_pool)
+            if _file_co_years or _file_rc_years:
+                print(f"    CO/Recovery source precedence: CU files win for "
+                      f"CO year(s) {sorted(_file_co_years)} and recovery year(s) "
+                      f"{sorted(_file_rc_years)}; 5300 DB backfill fills the rest.")
         co_rec['years'] = sorted(
             set(co_rec.get('years', []))
             | set(co_rec['chargeoffs'])
