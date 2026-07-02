@@ -5265,6 +5265,28 @@ def _load_co_rc_history_from_db(config):
     pool_map_ci = {str(k).strip().lower(): str(v).strip()
                    for k, v in raw_map.items()
                    if str(k).strip() and str(v).strip()}
+    # Identity fallback for stored codes that are ALREADY pool names.
+    # The monthly CO/Recovery aggregator (monthly_co_recov_aggregator) stores
+    # each row's ``loan_code`` as the pool-MAPPED name (e.g. raw "Unsecured"
+    # is saved as "Personal"), whereas the 5300 backfill stores raw NCUA
+    # category codes. At report time we re-resolve every ``loan_code`` through
+    # pool_map, which is keyed by RAW codes — so a stored pool name only
+    # round-trips when it happens to equal its own source key (e.g.
+    # "Credit Cards" -> "CREDIT CARDS"). Names like "Personal" or
+    # "1st/2nd Lien Mortgage" are pool_map VALUES, not keys, so they resolved
+    # to nothing and (with default_pool="Ignore") were dropped entirely.
+    # Register every known pool name as an identity mapping so an
+    # already-mapped code resolves to itself. ``setdefault`` keeps any real
+    # raw-code mapping authoritative.
+    for _v in raw_map.values():
+        _vn = str(_v).strip()
+        if _vn and _vn.lower() not in ('ignore', 'exclude'):
+            pool_map_ci.setdefault(_vn.lower(), _vn)
+    for _p in (config.get('pools') or []):
+        _pn = _p.get('name') if isinstance(_p, dict) else _p
+        _pn = str(_pn or '').strip()
+        if _pn and _pn.lower() not in ('ignore', 'exclude'):
+            pool_map_ci.setdefault(_pn.lower(), _pn)
     default_pool = config.get('default_pool') or ''
     try:
         from cecl_credentials import get_database_url
