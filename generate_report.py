@@ -6085,14 +6085,22 @@ def find_standalone_impaired_file(config, snap):
             fb_folder = os.path.join(BASE, fb_folder)
         search_dirs.append(fb_folder)
 
+    # Robust filename-date extractor (handles YYYY-MM, MMDDYYYY, YYYYMMDD,
+    # MM-DD-YYYY, month names, ...). Used to match an impaired file to the
+    # snapshot period once we've decided it IS an impaired file — so a CU
+    # can rename its export freely as long as the words "Impaired Loans"
+    # and a resolvable date remain in the filename.
+    try:
+        from import_data import _try_common_date_layouts as _file_iso
+    except Exception:  # noqa: BLE001
+        _file_iso = None
+
     for sdir in search_dirs:
         if not os.path.isdir(sdir):
             continue
         for root, dirs, files in os.walk(sdir):
             for f in files:
                 if f.startswith('~$') or f.upper().startswith('DNU'):
-                    continue
-                if 'WARM' in f.upper():
                     continue
                 if not f.lower().endswith('.xlsx'):
                     continue
@@ -6102,12 +6110,32 @@ def find_standalone_impaired_file(config, snap):
                 for _urx in _user_impaired_rxs:
                     if _urx.search(f):
                         return os.path.join(root, f)
+                is_impaired_named = bool(_loose_impaired_rx.search(f))
+                # Skip the full CECL-WARM template workbook — it's the
+                # historical-data source, not the standalone impaired
+                # list. BUT keep files that explicitly say "Impaired
+                # Loans" even when they also carry "WARM": some CUs name
+                # their impaired export "CECL-WARM with Credit Migration
+                # Impaired Loans NEW <date>.xlsx".
+                if 'WARM' in f.upper() and not is_impaired_named:
+                    continue
+                # Strict date-prefix pattern (fast path).
                 if pattern.match(f):
                     return os.path.join(root, f)
-                if (_loose_date_rx is not None
-                        and _loose_impaired_rx.search(f)
-                        and _loose_date_rx.search(f)):
+                if not is_impaired_named:
+                    continue
+                # It's an impaired-loans file — now determine its period
+                # from the filename. Try the loose period matcher first,
+                # then fall back to the robust date extractor and compare
+                # the YYYY-MM to the snapshot. This "identify the report,
+                # then find the date" path survives CU naming-convention
+                # changes (e.g. a trailing MMDDYYYY token like 06302026).
+                if _loose_date_rx is not None and _loose_date_rx.search(f):
                     return os.path.join(root, f)
+                if _file_iso is not None and snap_prefix:
+                    iso = _file_iso(f)
+                    if iso and iso[:7] == snap_prefix:
+                        return os.path.join(root, f)
     return None
 
 
