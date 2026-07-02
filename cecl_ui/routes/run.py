@@ -121,6 +121,118 @@ def _refresh_staged_monthly_balance(
     )
 
 
+def _ingest_monthly_co_recov(cfg: dict, upload_dir: Path) -> str | None:
+    """Fold any staged *monthly-summary* Charge-Off / Recovery files into
+    the historical CO/recovery DB.
+
+    Some CUs (e.g. Central Susquehanna) ship a small monthly workbook that
+    summarizes charge-offs and recoveries *by loan type* — no per-loan
+    account numbers, and no date column: the reporting month is encoded in
+    the filename (``…Totals 1225.xlsx`` → Dec 2025). The wizard's
+    Historical step already knows how to aggregate these, but a quarterly
+    Run New Quarter pass never touched them, so a freshly-dropped month
+    never reached the loss-rate calc.
+
+    This detects such files among the staged uploads and runs the exact
+    same aggregation the wizard uses
+    (:func:`monthly_co_recov_aggregator.aggregate_all`), which upserts one
+    month per file (DELETE+INSERT, so re-runs are idempotent).
+
+    A file qualifies only when it has BOTH a loan-code/type column and a
+    charge-off or recovery *amount* column, AND **no** date column (that
+    last check keeps transaction-level CO/recovery workbooks — which need
+    per-row date binning — out of this filename-dated path). Files that
+    match the CU's loan ``file_pattern`` are skipped so the main loan
+    extract is never mis-ingested.
+
+    Returns a human-readable summary string, or ``None`` when nothing
+    qualified. Best-effort — never raises.
+    """
+    try:
+        from cecl_ui.services import monthly_co_recov_aggregator as agg
+        from cecl_ui.services import extract_hist_service
+    except Exception:  # noqa: BLE001
+        return None
+
+    cu = (cfg or {}).get("credit_union") or ""
+    if not cu:
+        return None
+
+    # Compile the loan file_pattern so we can exclude the loan extract.
+    loan_rx = None
+    pat = (cfg or {}).get("file_pattern") or ""
+    if pat:
+        try:
+            loan_rx = re.compile(pat, re.IGNORECASE)
+        except re.error:
+            loan_rx = None
+
+    allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+    co_files: list[dict] = []
+    recov_files: list[dict] = []
+    for entry in sorted(upload_dir.iterdir()):
+        if not entry.is_file() or entry.suffix.lower() not in allowed:
+            continue
+        if entry.name.startswith("~$"):
+            continue
+        if loan_rx is not None and loan_rx.search(entry.name):
+            continue  # this is the loan extract, not a CO/recovery summary
+        try:
+            insp = agg.inspect_file(entry)
+        except Exception:  # noqa: BLE001
+            continue
+        if not insp.get("ok"):
+            continue
+        sug = insp.get("suggested") or {}
+        has_code = bool((sug.get("code") or "").strip())
+        has_co = bool((sug.get("co_amount") or "").strip())
+        has_recov = bool((sug.get("recov_amount") or "").strip())
+        has_date = bool((sug.get("date") or "").strip())
+        if not has_code or has_date or not (has_co or has_recov):
+            continue
+        # The month must be resolvable from the filename, else we can't
+        # place it — skip rather than let it fall back to file mtime.
+        det = extract_hist_service.detect_as_of_date(entry.name, entry)
+        if not det.get("date") or det.get("source") != "filename":
+            continue
+        item = {"name": entry.name, "path": str(entry)}
+        if has_co:
+            co_files.append(item)
+        if has_recov:
+            recov_files.append(item)
+
+    if not co_files and not recov_files:
+        return None
+
+    state = {
+        "credit_union": cu,
+        "pool_map": (cfg or {}).get("pool_map") or {},
+        "hist_scan": {
+            "monthly_co_files": co_files,
+            "monthly_recov_files": recov_files,
+        },
+    }
+    parts: list[str] = []
+    for kind, files in (("co", co_files), ("recov", recov_files)):
+        if not files:
+            continue
+        try:
+            res = agg.aggregate_all(state, kind)
+        except Exception:  # noqa: BLE001
+            continue
+        if res.get("ok") and res.get("months_written"):
+            label = "charge-off" if kind == "co" else "recovery"
+            months = sorted(res["months_written"])
+            span = (f"{months[0][:7]}…{months[-1][:7]}"
+                    if len(months) > 1 else months[0][:7])
+            parts.append(
+                f"{len(months)} {label} month(s) [{span}]"
+            )
+    if not parts:
+        return None
+    return "Ingested monthly CO/recovery summary file(s): " + ", ".join(parts) + "."
+
+
 @run_bp.route("/", methods=["GET"])
 def select_cu():
     clients = config_service.list_existing_clients(current_app.config["WORKSPACE_ROOT"])
@@ -582,6 +694,22 @@ def new_quarter(short_name: str):
         except Exception as _mb_exc:  # noqa: BLE001
             flash(
                 f"Monthly-balance auto-refresh skipped: {_mb_exc}",
+                "warning",
+            )
+
+    # 2a-2) Monthly Charge-Off / Recovery ingestion. When a CU ships a
+    # by-loan-type monthly summary workbook (date encoded in the filename,
+    # no account numbers), fold any freshly-staged month(s) into the
+    # historical CO/recovery DB so the loss-rate calc reflects them. Mirrors
+    # the wizard's Historical step; idempotent per month. Best-effort.
+    if not _skip_stage:
+        try:
+            _cr_msg = _ingest_monthly_co_recov(cfg, upload_dir)
+            if _cr_msg:
+                flash(_cr_msg, "success")
+        except Exception as _cr_exc:  # noqa: BLE001
+            flash(
+                f"Monthly CO/recovery ingestion skipped: {_cr_exc}",
                 "warning",
             )
 
