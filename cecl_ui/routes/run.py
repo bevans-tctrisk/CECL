@@ -906,6 +906,254 @@ def new_quarter(short_name: str):
     )
 
 
+def _impaired_data_dir(cfg: dict, ws: str | Path, short_name: str) -> Path:
+    """Resolve the folder the report engine searches for the standalone
+    Impaired Loans workbook.
+
+    ``generate_report.find_standalone_impaired_file`` walks
+    ``cfg['data_directory']`` (relative paths are resolved against the
+    workspace root). When the CU has no ``data_directory`` configured we
+    fall back to ``Raw_Uploads/<short>/`` — which is where the loan
+    importer already stages files, and is inside the workspace so the
+    download containment check keeps working.
+    """
+    data_dir = str((cfg or {}).get("data_directory") or "").strip()
+    if data_dir:
+        p = Path(data_dir)
+        if not p.is_absolute():
+            p = Path(ws) / data_dir
+        return p
+    return config_service.raw_uploads_dir(ws) / short_name
+
+
+def _canonical_impaired_name(cfg: dict, snapshot: str, original: str) -> str:
+    """Build a filename the strict impaired-file matcher will accept.
+
+    ``find_standalone_impaired_file`` matches
+    ``^YYYY\\s*[-_]?\\s*MM.*Impaired[\\s_-]+Loans.*\\.xlsx$`` (plus a few
+    looser fallbacks). Saving under ``YYYY-MM Impaired Loans - <CU>.xlsx``
+    guarantees a hit regardless of what the CU named the file they sent —
+    so the very next report run discovers it with no config change.
+    Preserves the uploaded file's extension.
+    """
+    ext = Path(original).suffix.lower() or ".xlsx"
+    prefix = (snapshot or "")[:7]  # YYYY-MM
+    cu = str((cfg or {}).get("credit_union") or "").strip()
+    cu = re.sub(r'[\\/:*?"<>|]', "", cu).strip()  # strip path-hostile chars
+    base = f"{prefix} Impaired Loans"
+    if cu:
+        base += f" - {cu}"
+    return secure_filename(f"{base}{ext}") or f"{prefix}_Impaired_Loans{ext}"
+
+
+def _supersede_existing_impaired(
+    target_dir: Path, snapshot: str, keep_name: str,
+) -> list[str]:
+    """Archive any impaired workbooks for the same period already on disk.
+
+    ``find_standalone_impaired_file`` walks the folder and returns the
+    *first* ``.xlsx`` that matches the period — filesystem order is not
+    deterministic, so leaving an older workbook for the same month next
+    to the freshly-uploaded one risks the report engine silently reading
+    the stale file. To make "upload a new report" mean "use this one",
+    we rename every other same-period impaired workbook by appending a
+    ``.superseded-<UTC timestamp>`` suffix. The suffix pushes the name
+    past the ``\\.xlsx$`` anchor so it no longer matches discovery, while
+    nothing is deleted (the analyst can recover it if needed).
+
+    ``keep_name`` (the canonical target we're about to write) is never
+    archived. Returns the list of archived basenames for flash display.
+    Best-effort — logs nothing, raises nothing.
+    """
+    prefix = (snapshot or "")[:7]  # YYYY-MM
+    if not prefix or len(prefix) != 7:
+        return []
+    year, month = prefix[:4], prefix[5:7]
+    # Same loose date matching the finder uses (YYYY-MM, MM-YYYY, month name).
+    month_names = {
+        "01": r"jan(?:uary)?", "02": r"feb(?:ruary)?", "03": r"mar(?:ch)?",
+        "04": r"apr(?:il)?", "05": r"may", "06": r"jun(?:e)?",
+        "07": r"jul(?:y)?", "08": r"aug(?:ust)?",
+        "09": r"sep(?:t(?:ember)?)?", "10": r"oct(?:ober)?",
+        "11": r"nov(?:ember)?", "12": r"dec(?:ember)?",
+    }
+    mnum = str(int(month))
+    alts = [
+        rf"{year}[-_.\s]*0?{mnum}(?!\d)",
+        rf"(?<!\d)0?{mnum}[-_.\s]*{year}",
+    ]
+    mname = month_names.get(month, "")
+    if mname:
+        alts.append(rf"{mname}[-_.\s]*{year}")
+        alts.append(rf"{year}[-_.\s]*{mname}")
+    try:
+        date_rx = re.compile("|".join(alts), re.IGNORECASE)
+        imp_rx = re.compile(r"impaired[\s_\-]+loans", re.IGNORECASE)
+    except re.error:
+        return []
+
+    from datetime import datetime, timezone
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archived: list[str] = []
+    try:
+        entries = list(target_dir.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if name == keep_name:
+            continue
+        if name.startswith("~$") or name.upper().startswith("DNU"):
+            continue
+        if "WARM" in name.upper():
+            continue
+        if not name.lower().endswith(".xlsx"):
+            continue
+        if not (imp_rx.search(name) and date_rx.search(name)):
+            continue
+        archive_to = entry.with_name(f"{name}.superseded-{stamp}")
+        try:
+            entry.rename(archive_to)
+            archived.append(name)
+        except OSError:
+            continue
+    return archived
+
+
+@run_bp.route("/<short_name>/impaired", methods=["GET"])
+def upload_impaired_form(short_name: str):
+    """Standalone Impaired Loans upload page.
+
+    Lets a user drop a *new* Impaired Loans workbook for an existing CU
+    without re-running the wizard or the full new-quarter pass. The file
+    is saved into the CU's ``data_directory`` under a canonical name so
+    the report engine's ``find_standalone_impaired_file`` picks it up on
+    the next report run. Shows the currently-discovered impaired file (if
+    any) for the selected period.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    snapshots = pipeline_service.list_snapshots_for_cu(short_name)
+    # Default the period to the CU's configured report_period, else the
+    # latest snapshot in the DB.
+    default_snap = ""
+    rp = _period_to_snapshot((cfg or {}).get("report_period") or "")
+    if rp:
+        default_snap = rp
+    elif snapshots:
+        default_snap = snapshots[0]
+    return render_template(
+        "run/impaired_upload.html",
+        short_name=short_name,
+        cfg=cfg,
+        snapshots=snapshots,
+        default_snap=default_snap,
+        verification=None,
+    )
+
+
+@run_bp.route("/<short_name>/impaired", methods=["POST"])
+def upload_impaired(short_name: str):
+    """Save an uploaded Impaired Loans workbook and verify it.
+
+    The file is written into the CU's impaired-search folder using a
+    canonical, matcher-friendly name for the requested period, then
+    parsed + enriched via ``impaired_check_service.verify_for_run`` so
+    the user immediately sees the parsed rows and loan-data match counts.
+    No import or report generation is triggered — the file simply becomes
+    the authoritative impaired list for that period's next report run.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+
+    snapshot = (request.form.get("snapshot_date") or "").strip()
+    if not snapshot:
+        # Allow a YYYY-MM period picker too.
+        snapshot = _period_to_snapshot(request.form.get("period") or "") or ""
+    if not snapshot:
+        flash("Pick the reporting period this impaired file is for.", "error")
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    f = request.files.get("impaired_file")
+    if not f or not f.filename:
+        flash("Choose an Impaired Loans file to upload.", "error")
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    ext = Path(f.filename).suffix.lower()
+    if ext not in (".xlsx", ".xlsm"):
+        flash(
+            "Impaired Loans workbook must be an .xlsx or .xlsm file "
+            f"(got {ext or 'no extension'}).",
+            "error",
+        )
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    target_dir = _impaired_data_dir(cfg, ws, short_name)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        flash(f"Could not access the CU's data folder ({target_dir}): {exc}",
+              "error")
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    dest_name = _canonical_impaired_name(cfg, snapshot, f.filename)
+    dest = target_dir / dest_name
+
+    # Archive any other impaired workbook already present for the same
+    # period so discovery deterministically resolves to this upload.
+    try:
+        archived = _supersede_existing_impaired(target_dir, snapshot, dest_name)
+    except Exception:  # noqa: BLE001
+        archived = []
+    if archived:
+        preview = ", ".join(archived[:4]) + ("…" if len(archived) > 4 else "")
+        flash(
+            f"Archived {len(archived)} older impaired file(s) for this "
+            f"period (renamed with a .superseded suffix): {preview}",
+            "info",
+        )
+
+    try:
+        f.save(dest)
+    except OSError as exc:
+        flash(f"Could not save the impaired file: {exc}", "error")
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    flash(
+        f"Saved impaired workbook as '{dest_name}' in "
+        f"{target_dir}. It will be used by the next report run for "
+        f"{snapshot}.",
+        "success",
+    )
+
+    # Verify + preview so the user can confirm the file parses and its
+    # loans resolve to real pools before running reports.
+    verification = None
+    try:
+        verification = impaired_check_service.verify_for_run(
+            cfg, snapshot, short_name=short_name)
+    except Exception as exc:  # noqa: BLE001
+        flash(f"Uploaded, but verification failed: {exc}", "warning")
+    if verification and verification.get("error"):
+        flash(
+            f"Uploaded, but the workbook did not fully verify: "
+            f"{verification['error']}",
+            "warning",
+        )
+
+    snapshots = pipeline_service.list_snapshots_for_cu(short_name)
+    return render_template(
+        "run/impaired_upload.html",
+        short_name=short_name,
+        cfg=cfg,
+        snapshots=snapshots,
+        default_snap=snapshot,
+        verification=verification,
+    )
+
+
 @run_bp.route("/<short_name>/settings", methods=["GET", "POST"])
 def edit_settings(short_name: str):
     """Edit pool-level settings (risk_rated, ACL months, mgmt-adj defaults)
