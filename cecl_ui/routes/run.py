@@ -1392,6 +1392,7 @@ def edit_settings(short_name: str):
         posted_names = request.form.getlist("pool_name")
         seen: set[str] = set()
         new_pools: list[dict] = []
+        new_overlay: dict[str, float] = {}
         for i, n in enumerate(posted_names):
             n = (n or "").strip()
             if not n or n in seen:
@@ -1405,6 +1406,17 @@ def edit_settings(short_name: str):
                     acl_int = None
             except ValueError:
                 acl_int = None
+            # Per-pool management adjustment overlay (percent -> decimal),
+            # mirroring the setup wizard's Mgmt Adjustments step. Empty / 0
+            # entries are dropped so the YAML stays clean.
+            madj_raw = (request.form.get(f"madj_{i}") or "").strip().replace("%", "")
+            if madj_raw:
+                try:
+                    madj_dec = round(float(madj_raw) / 100.0, 6)
+                    if abs(madj_dec) > 1e-9:
+                        new_overlay[n] = madj_dec
+                except ValueError:
+                    pass
             new_pools.append({
                 "name": n,
                 "risk_rated": rr_val == "yes",
@@ -1414,6 +1426,10 @@ def edit_settings(short_name: str):
             })
 
         config_service.set_pools(cfg, new_pools)
+
+        # Per-pool management adjustment overlays (top-level ``mgmt_adj_by_pool``
+        # keyed by pool name -> decimal). Read by every report engine.
+        cfg["mgmt_adj_by_pool"] = new_overlay
 
         # Global mgmt_adj knobs
         ma = dict(cfg.get("mgmt_adj") or {})
@@ -1430,12 +1446,24 @@ def edit_settings(short_name: str):
         flash("Pool settings saved.", "success")
         return redirect(url_for("run.edit_settings", short_name=short_name))
 
+    overlay = cfg.get("mgmt_adj_by_pool") or {}
+
+    def _overlay_pct(name: str) -> str:
+        d = overlay.get(name)
+        if d in (None, ""):
+            return ""
+        try:
+            return "%g" % (float(d) * 100.0)
+        except (TypeError, ValueError):
+            return ""
+
     rows = [
         {
             "name": p["name"],
             "risk_rated": p["risk_rated"] and not p["excluded"],
             "excluded": p["excluded"],
             "acl_months": p["acl_months"] or "",
+            "mgmt_adj_pct": _overlay_pct(p["name"]),
         }
         for p in pools_list
     ]
