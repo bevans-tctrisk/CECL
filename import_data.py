@@ -202,6 +202,12 @@ _FALLBACK_DATE_LAYOUTS: list[tuple[str, str]] = [
     (r"(20\d{2})(\d{2})(\d{2})",               "YMD"),
     (r"(?<!\d)(\d{1,2})[-_./ ](\d{1,2})[-_./ ](20\d{2})", "MDY"),
     (r"(\d{2})(\d{2})(20\d{2})",               "MDY"),
+    # Month-Day-2digit-year (e.g. "6-30-26", "12-31-25"). Placed after the
+    # 4-digit-year forms so a full year always wins. YY -> 2000+YY, bounded
+    # to a plausible window so it doesn't grab unrelated number triples.
+    # Separators exclude spaces so a trailing code digit + spaced date
+    # (e.g. "CECLCC1 6-30-26") isn't misread as "1 6-30".
+    (r"(?<!\d)(\d{1,2})[-_./](\d{1,2})[-_./](\d{2})(?!\d)", "MDYY"),
     (r"(20\d{2})[-_./ ](\d{1,2})(?!\d)",       "YM"),
     (r"(20\d{2})(\d{2})(?!\d)",                "YM"),
     (r"(?<!\d)(\d{1,2})[-_./ ](20\d{2})",      "MY"),
@@ -231,6 +237,14 @@ def _try_common_date_layouts(text: str) -> str | None:
             if kind == "MDY":
                 mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 return date(y, mo, d).isoformat()
+            if kind == "MDYY":
+                mo, d, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                # Bound the 2-digit year to a plausible window and validate
+                # month/day so a random "a-b-cc" triple isn't misread.
+                if not (1 <= mo <= 12) or not (1 <= d <= 31) \
+                        or yy < 19 or yy > 40:
+                    continue
+                return date(2000 + yy, mo, d).isoformat()
             if kind == "YM":
                 y, mo = int(m.group(1)), int(m.group(2))
                 last = calendar.monthrange(y, mo)[1]
@@ -1548,6 +1562,17 @@ def process_client(client_name, specific_file=None):
                     matched_name = calendar.month_name[candidate_month].lower()
                     print(f"    Fallback: matched month name '{matched_name}' to "
                           f"report_period year {rp_year} -> {snapshot_date}")
+                else:
+                    # (c) The filename carries no date and no month name at
+                    # all (e.g. "CECLOE.xls"). An undated snapshot file in
+                    # the current upload belongs to the period being run, so
+                    # stamp it to the report_period month-end. Gated on
+                    # report_period being set, and only reached after every
+                    # date-parsing attempt above has failed.
+                    last_day = calendar.monthrange(rp_year, rp_month)[1]
+                    snapshot_date = date(rp_year, rp_month, last_day).isoformat()
+                    print(f"    Fallback: no date in filename; using "
+                          f"report_period -> {snapshot_date}")
         if not snapshot_date:
             print(f"    SKIPPED: Could not extract date from filename")
             continue
