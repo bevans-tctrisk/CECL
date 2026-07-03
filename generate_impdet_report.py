@@ -882,13 +882,22 @@ def _resolve_extract_path(file_pattern, search_dirs, snap=None, config=None):
 
     snap_ym = str(snap)[:7] if snap else ''
     if snap_ym:
+        dated: list[tuple[str, str]] = []  # (iso_date, path)
         for path in matches:
             try:
                 iso = extract_snapshot_date(os.path.basename(path), config or {})
             except Exception:  # noqa: BLE001
                 iso = None
             if iso and str(iso)[:7] == snap_ym:
-                return path
+                return path  # exact report-month file wins
+            if iso:
+                dated.append((str(iso), path))
+        # No exact report-month file: prefer the most recent dated file that
+        # is not AFTER the snapshot (closest prior period), so a June report
+        # falls back to May detail rather than an arbitrary or newer file.
+        prior = sorted((iso, p) for iso, p in dated if iso[:7] <= snap_ym)
+        if prior:
+            return prior[-1][1]
     # No snapshot-month match (or no snap requested): first match wins.
     return matches[0]
 
@@ -1203,6 +1212,33 @@ def generate_report(client, snap=None):
         # Interest Rate / Days Delinquent / Original Loan Amount / Credit
         # Limit even without a WARM workbook on disk.
         enrich = _load_extract_enrichment(config, BASE, snap)
+
+        # Safety net: the All Loans detail columns (Loan Type / Open Date /
+        # Interest Rate / Days Delinquent / Original Loan Amount / Suffix)
+        # are joined from the loan extract by account number. If the chosen
+        # extract is stale — e.g. its file_pattern is pinned to an older
+        # month and never matches the report-period file — a large share of
+        # loans won't match and their detail cells come out blank. Surface
+        # the coverage and warn loudly so this is caught before the report
+        # ships, for every CU.
+        if enrich:
+            _keys = set(enrich.keys())
+            _acct = df['member_number'].astype(str).str.strip()
+            _total = len(df)
+            _matched = int(_acct.isin(_keys).sum())
+            _missing = _total - _matched
+            _pct = (_missing / _total * 100.0) if _total else 0.0
+            print(f"  Extract enrichment coverage: {_matched}/{_total} loans matched"
+                  f" ({_missing} unmatched, {_pct:.1f}% blank detail)")
+            if _total and _pct >= 5.0:
+                print(
+                    f"  *** WARNING: {_missing} of {_total} loans ({_pct:.1f}%) matched no"
+                    f" loan-extract row, so their All Loans detail columns (Loan Type /"
+                    f" Open Date / Rate / Days Delinquent / Original Amount / Suffix) will"
+                    f" be BLANK. This usually means a loan_data_extracts file_pattern did"
+                    f" not match the {snap} file (e.g. it is pinned to an older month) and"
+                    f" a stale extract was used — check the 'using <file>' lines above."
+                )
 
         def _enr_get(acct, field, default=None):
             row = enrich.get(str(acct).strip()) if enrich else None
