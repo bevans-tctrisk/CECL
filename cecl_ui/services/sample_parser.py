@@ -36,12 +36,23 @@ COLUMN_HEURISTICS: list[tuple[str, list[str]]] = [
                               "curr_bal", "cur_bal", "balance", "bal"]),
     ("original_fico_score",  ["lndcrsc", "original_fico", "orig_fico",
                               "orig_score", "original_score", "application_creditscore",
-                              "application_score"]),
+                              "application_score",
+                              # Generic score columns default to the
+                              # ORIGINATION score. Most core/AIRES extracts
+                              # ship only the origination FICO; the current
+                              # score comes from the credit pull. So a plain
+                              # "Credit Score" / "FICO" / "Score" column maps
+                              # here, leaving current_fico_score unmapped
+                              # (none) by default. A genuinely-current column
+                              # (e.g. "Current FICO") still routes to
+                              # current_fico_score via its explicit keywords
+                              # below, since original claims only one column.
+                              "creditscore", "credit_score", "fico_score",
+                              "fico", "score"]),
     ("current_fico_score",   ["current_fico", "current_score",
                               "latest_credit_score", "last_credit_score",
                               "primary_score", "current_credit_score",
-                              "updated_fico", "refresh_score", "refreshed_score",
-                              "fico_score", "fico", "credit_score", "score"]),
+                              "updated_fico", "refresh_score", "refreshed_score"]),
     ("loan_pool_code",       ["lndalpc", "loan_pool", "pool_code", "loan_type",
                               "product_code", "loan_code", "pool", "product",
                               "type", "code"]),

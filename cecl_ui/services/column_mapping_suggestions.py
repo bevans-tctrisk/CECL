@@ -56,6 +56,12 @@ KNOWN_FIELDS: tuple[str, ...] = (
     "total_available_credit",
 )
 
+# Fields that must never be auto-suggested from learned history, even when a
+# matching header exists. ``current_fico_score`` defaults to none because
+# most core/AIRES extracts ship only the origination score (the current
+# score is supplied by the credit pull). Users can still map it manually.
+_NEVER_AUTOSUGGEST: frozenset[str] = frozenset({"current_fico_score"})
+
 _WS_RE = re.compile(r"\s+")
 
 
@@ -135,6 +141,11 @@ def suggest_for_headers(
     ``skip_fields`` are omitted (use this to avoid overwriting a field the
     sample parser already mapped). Only fields with a learned match are
     included in the result.
+
+    ``current_fico_score`` is never auto-suggested: most core/AIRES extracts
+    carry only the origination score and the current score comes from the
+    credit pull, so it defaults to none (unmapped) unless the user maps it
+    manually.
     """
     headers_list = [h for h in (headers or []) if h is not None]
     if not headers_list:
@@ -143,7 +154,7 @@ def suggest_for_headers(
     norm_to_actual: dict[str, str] = {}
     for h in headers_list:
         norm_to_actual.setdefault(_normalize(str(h)), str(h))
-    skip = set(skip_fields or ())
+    skip = set(skip_fields or ()) | _NEVER_AUTOSUGGEST
 
     store = load()
     counts = store.get("field_to_header_counts", {})
