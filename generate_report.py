@@ -1534,7 +1534,7 @@ def _merge_acl_history(alll_by_date: dict, config: dict) -> dict:
     return out
 
 
-def _load_monthly_balances_from_wizard(config):
+def _load_monthly_balances_from_wizard(config, mb_cfg=None):
     """Load monthly balances using wizard-provided cfg['monthly_balance']
     metadata (``saved_path`` + ``sheet`` + ``pool_name_col`` +
     ``first_date_col`` + ``header_row``) plus optional
@@ -1545,7 +1545,7 @@ def _load_monthly_balances_from_wizard(config):
     Returns ``(df, alll_by_date)`` or ``(None, None)`` if the wizard
     metadata is missing / file is unreadable.
     """
-    mb_cfg = (config or {}).get('monthly_balance') or {}
+    mb_cfg = mb_cfg if mb_cfg is not None else ((config or {}).get('monthly_balance') or {})
     saved_path = mb_cfg.get('saved_path')
     if not saved_path or not os.path.isfile(saved_path):
         return None, None
@@ -1928,6 +1928,79 @@ def _apply_supplemental_monthly_balances(base_df, config):
         return base_df
 
 
+def _apply_supplemental_wide_balances(base_df, config):
+    """Merge one or more *wide* (multi-month) supplemental balance files
+    over ``base_df``, newer months winning.
+
+    Enabled via ``config['monthly_balance']['supplemental_wide']`` — a dict
+    or list of dicts, each describing an additional wide balance workbook in
+    the same layout family as the main ``saved_path`` file (pool label
+    column + a header row of month-end dates spread across columns). Use
+    this when a CU starts delivering a fresh workbook (e.g.
+    ``Loan Balance Sheet.xlsx`` covering only the latest few months)
+    alongside the original historical workbook: the history stays intact and
+    the newer file supplies the recent month(s).
+
+    Each spec inherits the main block's ``sheet`` / ``pool_name_col`` /
+    ``first_date_col`` / ``pool_map`` unless it overrides them, and must name
+    the file via ``saved_path`` (absolute) or ``filename`` (resolved inside
+    ``data_directory``). ``header_row`` typically differs from the main file
+    and should be set per spec.
+    """
+    mb = (config or {}).get('monthly_balance') or {}
+    specs = mb.get('supplemental_wide') or []
+    if isinstance(specs, dict):
+        specs = [specs]
+    if not specs:
+        return base_df
+    data_dir = resolve_path(config.get('data_directory', ''))
+    frames = []
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        # Inherit the main monthly_balance metadata; the spec overrides.
+        merged_cfg = {k: v for k, v in mb.items() if k != 'supplemental_wide'}
+        for k, v in spec.items():
+            if v is not None:
+                merged_cfg[k] = v
+        # Resolve the file from the SPEC (not the inherited saved_path):
+        # spec.saved_path (absolute) wins, else spec.filename within data_dir.
+        path = str(spec.get('saved_path') or '').strip()
+        if not path or not os.path.isfile(path):
+            fname = str(spec.get('filename') or '').strip()
+            path = ''
+            if fname and data_dir and os.path.isdir(data_dir):
+                for root, _d, files in os.walk(data_dir):
+                    if fname in files:
+                        path = os.path.join(root, fname)
+                        break
+        if not path or not os.path.isfile(path):
+            print(f"    Supplemental wide balance file not found: "
+                  f"{spec.get('saved_path') or spec.get('filename')}")
+            continue
+        merged_cfg['saved_path'] = path
+        merged_cfg['filename'] = os.path.basename(path)
+        df, _alll = _load_monthly_balances_from_wizard(config, mb_cfg=merged_cfg)
+        if df is not None and not df.empty:
+            frames.append(df)
+    if not frames:
+        return base_df
+    supp_df = pd.concat(frames, ignore_index=True)
+    if base_df is None or base_df.empty:
+        return supp_df
+    try:
+        supp_months = set(supp_df['date'].dt.to_period('M'))
+        keep = ~base_df['date'].dt.to_period('M').isin(supp_months)
+        merged = pd.concat([base_df[keep], supp_df], ignore_index=True)
+        print(f"    Merged supplemental wide balance file(s): "
+              f"{len(supp_months)} month(s) override base "
+              f"({', '.join(str(p) for p in sorted(supp_months))}).")
+        return merged
+    except Exception as exc:  # noqa: BLE001
+        print(f"    Warning: could not merge supplemental wide balances: {exc}")
+        return base_df
+
+
 def load_monthly_balances(config):
     """Load monthly loan balances by pool from the most recent file available.
     Returns (DataFrame with columns [pool, date, balance],
@@ -1944,6 +2017,7 @@ def load_monthly_balances(config):
         df, alll = _load_monthly_balances_per_month(mb_cfg, acl_cfg=config.get('acl'))
         if not df.empty:
             df = _apply_supplemental_monthly_balances(df, config)
+            df = _apply_supplemental_wide_balances(df, config)
             return df, _merge_acl_history(alll, config)
         # If per_month failed (no files / unreadable), fall through to the
         # legacy scan so the user at least gets the historical context.
@@ -1951,6 +2025,7 @@ def load_monthly_balances(config):
         df, alll = _load_monthly_balances_per_year(mb_cfg, acl_cfg=config.get('acl'))
         if not df.empty:
             df = _apply_supplemental_monthly_balances(df, config)
+            df = _apply_supplemental_wide_balances(df, config)
             return df, _merge_acl_history(alll, config)
 
     # Preferred path for "single" mode: use the wizard's saved_path +
@@ -1961,6 +2036,7 @@ def load_monthly_balances(config):
     wiz_df, wiz_alll = _load_monthly_balances_from_wizard(config)
     if wiz_df is not None:
         wiz_df = _apply_supplemental_monthly_balances(wiz_df, config)
+        wiz_df = _apply_supplemental_wide_balances(wiz_df, config)
         return wiz_df, _merge_acl_history(wiz_alll or {}, config)
 
     data_dir = resolve_path(config.get('data_directory', ''))
