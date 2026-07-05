@@ -329,6 +329,19 @@ def clean_balance(series, balance_format):
     return pd.to_numeric(s, errors='coerce')
 
 
+# pandas' default ``na_values`` treats the bare string "NA" as NaN. Several
+# credit unions use "NA" as a real loan-type code (New Auto), so reading with
+# the defaults silently turns every New Auto loan into a blank code. This list
+# is pandas' default NaN-token set with "NA" removed, so ONLY the literal
+# "NA" changes behaviour (it is preserved as a string); every other token
+# ('', 'N/A', 'NaN', 'NULL', ...) keeps its normal NaN handling.
+_NA_VALUES_KEEP_LITERAL = [
+    '', '#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN', '-NaN', '-nan',
+    '1.#IND', '1.#QNAN', '<NA>', 'N/A', 'NULL', 'NaN', 'None', 'n/a', 'nan',
+    'null',
+]
+
+
 def map_pool_codes(series, config):
     """Map raw loan pool codes to pool names using config."""
     split_char = config.get('pool_code_split')
@@ -336,8 +349,15 @@ def map_pool_codes(series, config):
         raw = series.astype(str).str.split(split_char).str[0].str.strip()
     else:
         raw = series.astype(str).str.strip()
-    # Normalize float strings like "85.0" to "85" for numeric codes
-    raw = raw.apply(lambda x: str(int(float(x))) if x.replace('.', '', 1).isdigit() else x)
+    # Normalize float strings like "85.0" to "85" for numeric codes. Guard with
+    # isinstance(str): a string-dtype column can still carry float NaN entries
+    # (blank cells), and float NaN has no ``.replace`` — leave those untouched
+    # so they fall through to ``default_pool`` below instead of crashing.
+    raw = raw.apply(
+        lambda x: str(int(float(x)))
+        if isinstance(x, str) and x.replace('.', '', 1).isdigit()
+        else x
+    )
     pool_map = {str(k): v for k, v in config['pool_map'].items()}
     default = config.get('default_pool', 'Other/Uncategorized')
     # Normalize the legacy 'Ignore' sentinel to the canonical 'Exclude' so
@@ -832,9 +852,13 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
             hr_cfg = 0
         pd_header = hr_cfg - 1 if hr_cfg > 1 else 0
         if ext == '.csv':
-            df = pd.read_csv(file_path, header=pd_header)
+            df = pd.read_csv(file_path, header=pd_header,
+                             keep_default_na=False,
+                             na_values=_NA_VALUES_KEEP_LITERAL)
         else:
-            df = pd.read_excel(file_path, header=pd_header)
+            df = pd.read_excel(file_path, header=pd_header,
+                               keep_default_na=False,
+                               na_values=_NA_VALUES_KEEP_LITERAL)
         # Normalise header cells to match what the wizard's sample_parser
         # emits: collapse internal whitespace (wrap-text Excel cells often
         # contain CR/LF inside a single header cell), and replace any

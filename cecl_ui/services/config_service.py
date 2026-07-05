@@ -484,6 +484,56 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         existing.update(hff)
         cfg["historical_file_formats"] = existing
 
+    # Multi-format CO/Recovery: an optional list of named formats, each
+    # routing files by ``file_pattern`` to its own chargeoff/recovery column
+    # wiring. Lets one CU mix several CO/recovery layouts (e.g. consumer-loan,
+    # credit-card and overdraft files whose columns differ). The report engine
+    # reads ``historical_file_formats.formats``; when present it takes
+    # precedence over the single top-level chargeoff/recovery block. Each
+    # per-side block carries ``strict_columns: true`` so the engine trusts the
+    # explicit indices (a combined file's CO and recovery amount columns
+    # differ, which the header-text heuristic cannot disambiguate). A side may
+    # use ``code_static`` instead of ``code_col`` when the file has no loan-
+    # code column (every row is implicitly one pool, e.g. a credit-card file).
+    formats_state = state.get("co_recov_formats") or []
+    formats_out: list[dict[str, Any]] = []
+    for fmt in formats_state:
+        fp = str((fmt or {}).get("file_pattern") or "").strip()
+        if not fp:
+            continue
+        entry: dict[str, Any] = {
+            "name": str(fmt.get("name") or "").strip() or "(unnamed)",
+            "file_pattern": fp,
+        }
+        for src_key, dst_key in (("co_columns", "chargeoff"),
+                                  ("recov_columns", "recovery")):
+            src = fmt.get(src_key) or {}
+            has_amount = src.get("amount_col") not in (None, "")
+            has_code = (src.get("code_col") not in (None, "")
+                        or str(src.get("code_static") or "").strip())
+            if not (has_amount and has_code):
+                continue
+            block2: dict[str, Any] = {
+                "has_header": bool(src.get("has_header")),
+                "skip_rows": int(src.get("skip_rows") or 0),
+                "account_col": int(src.get("account_col") or 0),
+                "amount_col": int(src["amount_col"]),
+                "strict_columns": True,
+            }
+            if src.get("code_col") not in (None, ""):
+                block2["code_col"] = int(src["code_col"])
+            if str(src.get("code_static") or "").strip():
+                block2["code_static"] = str(src["code_static"]).strip()
+            if src.get("date_col") not in (None, ""):
+                block2["date_col"] = int(src["date_col"])
+            entry[dst_key] = block2
+        if entry.get("chargeoff") or entry.get("recovery"):
+            formats_out.append(entry)
+    if formats_out:
+        existing = cfg.get("historical_file_formats") or {}
+        existing["formats"] = formats_out
+        cfg["historical_file_formats"] = existing
+
     # Impaired-loans configuration (Step "impaired"). Persist the
     # editable impairment-type / provision-percentage list and the
     # DQ-range table so the report engine can apply per-type provisions

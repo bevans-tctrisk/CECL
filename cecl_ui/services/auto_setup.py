@@ -1167,6 +1167,7 @@ def _apply_sample_to_state(
         "pool_code_suggestions": sample.get("pool_code_suggestions") or [],
         "file_pattern": sample.get("file_pattern"),
         "date_pattern": sample.get("date_pattern"),
+        "date_format": sample.get("date_format"),
     }
     msgs.append(
         f"sample analysis loaded ({len(state['sample']['headers'])} columns, "
@@ -1197,6 +1198,15 @@ def _apply_sample_to_state(
     if sample.get("date_pattern"):
         state["date_pattern"] = sample["date_pattern"]
         msgs.append(f"date_pattern set to {sample['date_pattern']}")
+    # ``date_format`` tells import_data.extract_snapshot_date how to read the
+    # date_pattern capture groups. It MUST travel with date_pattern — a
+    # month-first name like "03-2026" yields date_pattern (\d{2})-(20\d{2})
+    # whose format is MMYYYY, not the YYYY-MM default. Dropping it here (the
+    # original bug) left every MM-YYYY / MMDDYY / YYYYMMDD CU silently
+    # misparsing dates until a human corrected the Files step.
+    if sample.get("date_format"):
+        state["date_format"] = sample["date_format"]
+        msgs.append(f"date_format set to {sample['date_format']}")
     # has_header
     state["has_header"] = bool(sample.get("has_header"))
 

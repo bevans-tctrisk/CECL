@@ -574,7 +574,12 @@ def _generalize_filename_pattern(stem: str, ext_part: str) -> str:
         r"20\\d{2}[\\s_\\-]*[Vv]\\d{1,2}",
         body,
     )
-    return f"(?i)^{body}\\.{ext_part}$"
+    # Tolerate a trailing copy suffix like " (1)" that Windows / Egnyte / a
+    # browser append to duplicate downloads (e.g. a sample named
+    # "2025.05.31 Loan ARIES.xlsx" whose re-drop lands as
+    # "2025.05.31 Loan ARIES (1).xlsx"). Without this, that month's file
+    # silently fails the importer's file_pattern gate and is skipped.
+    return f"(?i)^{body}(?:\\s*\\(\\d+\\))?\\.{ext_part}$"
 
 
 def guess_filename_patterns(filename: str) -> dict[str, str]:

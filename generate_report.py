@@ -326,6 +326,27 @@ def _read_data_file(filepath):
         return parts[0]
     target_cols = max(d.shape[1] for d in parts)
     parts = [d for d in parts if d.shape[1] == target_cols]
+    # Drop sheets whose content exactly duplicates an earlier sheet. Some
+    # CUs keep a working copy as a second tab (e.g. a "…File 201 (2)" sheet
+    # alongside "…File 2018.01"); concatenating both would double-count every
+    # charge-off / recovery row. Dedupe by (shape, content-hash) so only
+    # byte-identical sheets are dropped — genuinely different tabs are kept.
+    unique_parts = []
+    seen_keys = set()
+    for d in parts:
+        try:
+            content_hash = int(pd.util.hash_pandas_object(
+                d.fillna(""), index=False).sum())
+        except Exception:  # noqa: BLE001
+            content_hash = None
+        key = (d.shape, content_hash)
+        if content_hash is not None and key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique_parts.append(d)
+    parts = unique_parts
+    if len(parts) == 1:
+        return parts[0]
     return pd.concat(parts, ignore_index=True)
 
 
@@ -436,7 +457,12 @@ def _parse_chargeoff_file(filepath, parse_config=None):
 
         # Trust consistent header TEXT over fixed indices when the file has
         # a header row — protects against month-to-month column drift.
-        if parse_config.get('has_header', False) and len(df) > 0:
+        # Skipped when ``strict_columns`` is set: multi-format entries wire
+        # explicit indices for combined files whose CO and recovery amount
+        # columns differ, and the header heuristic (which keys off the word
+        # "amount") can't tell those two columns apart — it would misroute.
+        if (parse_config.get('has_header', False) and len(df) > 0
+                and not parse_config.get('strict_columns')):
             _hdr = _resolve_hist_cols_by_header(df.iloc[0], 'co')
             if 'amount' in _hdr and 'code' in _hdr:
                 account_col = _hdr.get('account', account_col)
@@ -445,21 +471,28 @@ def _parse_chargeoff_file(filepath, parse_config=None):
                 if 'date' in _hdr:
                     date_col = _hdr['date']
 
+        # Files with no loan-code column (e.g. a credit-card CO file where
+        # every row is implicitly the same pool) set ``code_static`` instead;
+        # each parsed row is stamped with it and mapped through pool_map.
+        code_static = parse_config.get('code_static')
+
         ncols = cfg_df.shape[1]
         code_valid = code_col is not None and 0 <= int(code_col) < ncols
         amount_valid = amount_col is not None and 0 <= int(amount_col) < ncols
         date_valid = date_col is not None and 0 <= int(date_col) < ncols
         account_valid = account_col is not None and 0 <= int(account_col) < ncols
 
-        if code_valid and amount_valid:
+        if amount_valid and (code_valid or code_static not in (None, '')):
             if account_valid:
                 acct_series = cfg_df.iloc[:, account_col]
                 acct_numeric = acct_series.apply(_is_numeric_or_date)
                 cfg_df = cfg_df[acct_numeric]
 
             if not cfg_df.empty:
+                code_vals = (cfg_df.iloc[:, code_col].values if code_valid
+                             else [code_static] * len(cfg_df))
                 result = pd.DataFrame({
-                    'code': cfg_df.iloc[:, code_col].values,
+                    'code': code_vals,
                     'amount': pd.to_numeric(cfg_df.iloc[:, amount_col], errors='coerce').values,
                 })
                 if date_valid:
@@ -468,6 +501,8 @@ def _parse_chargeoff_file(filepath, parse_config=None):
                 else:
                     result['date'] = pd.NaT
                 result = result.dropna(subset=['amount'])
+                if not result.empty:
+                    return result
                 if not result.empty:
                     return result
 
@@ -587,7 +622,9 @@ def _parse_recovery_file(filepath, parse_config=None):
 
         # Trust consistent header TEXT over fixed indices when the file has
         # a header row — protects against month-to-month column drift.
-        if parse_config.get('has_header', False) and len(df) > 0:
+        # Skipped when ``strict_columns`` is set (see _parse_chargeoff_file).
+        if (parse_config.get('has_header', False) and len(df) > 0
+                and not parse_config.get('strict_columns')):
             _hdr = _resolve_hist_cols_by_header(df.iloc[0], 'rc')
             if 'amount' in _hdr and 'code' in _hdr:
                 account_col = _hdr.get('account', account_col)
@@ -596,21 +633,27 @@ def _parse_recovery_file(filepath, parse_config=None):
                 if 'date' in _hdr:
                     date_col = _hdr['date']
 
+        # See _parse_chargeoff_file: files with no loan-code column stamp
+        # every row with ``code_static``.
+        code_static = parse_config.get('code_static')
+
         ncols = cfg_df.shape[1]
         code_valid = code_col is not None and 0 <= int(code_col) < ncols
         amount_valid = amount_col is not None and 0 <= int(amount_col) < ncols
         date_valid = date_col is not None and 0 <= int(date_col) < ncols
         account_valid = account_col is not None and 0 <= int(account_col) < ncols
 
-        if code_valid and amount_valid:
+        if amount_valid and (code_valid or code_static not in (None, '')):
             if account_valid:
                 acct_series = cfg_df.iloc[:, account_col]
                 acct_numeric = acct_series.apply(_is_numeric_or_date)
                 cfg_df = cfg_df[acct_numeric]
 
             if not cfg_df.empty:
+                code_vals = (cfg_df.iloc[:, code_col].values if code_valid
+                             else [code_static] * len(cfg_df))
                 result = pd.DataFrame({
-                    'code': cfg_df.iloc[:, code_col].values,
+                    'code': code_vals,
                     'amount': pd.to_numeric(cfg_df.iloc[:, amount_col], errors='coerce').values,
                 })
                 if date_valid:
@@ -906,6 +949,50 @@ def load_chargeoff_recovery_history(config):
                 "will be parsed for both halves (account/code/date "
                 "columns shared; amount columns differ)."
             )
+        # ------------------------------------------------------------------
+        # Multi-format mode.
+        #
+        # When the config supplies ``historical_file_formats.formats`` (a
+        # list of named formats, each with its own ``file_pattern`` plus
+        # ``chargeoff`` / ``recovery`` column wiring), every file is routed
+        # to the FIRST format whose pattern matches its name and parsed with
+        # that format's columns. This lets ONE credit union mix several
+        # CO/recovery layouts — e.g. a consumer-loan file, a credit-card file
+        # (no code column → ``code_static``) and an overdraft file — which a
+        # single top-level chargeoff/recovery block cannot express. Files
+        # matching no format are skipped. Absent a formats list, behaviour is
+        # unchanged (legacy single chargeoff/recovery config).
+        # ------------------------------------------------------------------
+        _co_recov_formats = historical_parse_cfg.get('formats') or []
+        multi_format = bool(_co_recov_formats)
+        _compiled_formats = []
+        for _fmt in _co_recov_formats:
+            _pat = _fmt.get('file_pattern') or ''
+            try:
+                _rx = re.compile(_pat, re.IGNORECASE) if _pat else None
+            except re.error:
+                _rx = None
+            _compiled_formats.append((_rx, _fmt))
+        if multi_format:
+            print(f"    Multi-format CO/Recovery mode: "
+                  f"{len(_compiled_formats)} format(s) configured.")
+
+        def _resolve_file_format(fname):
+            """Return (co_cfg, rc_cfg, combined) for *fname*.
+
+            Multi-format: first format whose file_pattern matches, else
+            (None, None, False) so the file is skipped. Legacy: the single
+            top-level chargeoff/recovery configs.
+            """
+            if multi_format:
+                for _rx, _fmt in _compiled_formats:
+                    if _rx is not None and _rx.search(fname):
+                        _co = _fmt.get('chargeoff')
+                        _rc = _fmt.get('recovery')
+                        return _co, _rc, _shared_locator(_co, _rc)
+                return None, None, False
+            return chargeoff_parse_cfg, recovery_parse_cfg, combined_mode
+
         # Track files already fed into each side so a filename matching
         # both tokens isn't double-counted. Tuple of (kind, abs path).
         _processed_co: set[str] = set()
@@ -994,6 +1081,11 @@ def load_chargeoff_recovery_history(config):
             for f in os.listdir(folder):
                 fl = f.lower()
                 filepath = os.path.join(folder, f)
+                # Resolve the per-file CO/recovery column config. In
+                # multi-format mode this routes by file_pattern; otherwise it
+                # returns the single legacy config. A file matching no format
+                # yields (None, None) and is skipped.
+                _co_cfg, _rc_cfg, _file_combined = _resolve_file_format(f)
                 # Determine which side(s) this file should feed.
                 # In combined mode any file matching EITHER token is
                 # parsed for BOTH halves; in legacy mode the filename
@@ -1001,21 +1093,29 @@ def load_chargeoff_recovery_history(config):
                 # exclusions still apply.
                 want_co = False
                 want_rc = False
-                if fl.endswith('.xlsx') or fl.endswith('.csv'):
-                    if combined_mode:
-                        if (('charge' in fl and 'off' in fl)
-                                or 'recov' in fl):
-                            if 'proposed' not in fl and '3yr' not in fl:
-                                want_co = True
-                                want_rc = True
+                if (_co_cfg is not None or _rc_cfg is not None) and (
+                        fl.endswith('.xlsx') or fl.endswith('.xls')
+                        or fl.endswith('.csv')):
+                    if _file_combined:
+                        if 'proposed' not in fl and '3yr' not in fl:
+                            want_co = bool(_co_cfg)
+                            want_rc = bool(_rc_cfg)
                     else:
-                        if (('charge' in fl and 'off' in fl)
+                        if (_co_cfg and ('charge' in fl and 'off' in fl)
                                 and 'proposed' not in fl
                                 and '3yr' not in fl
                                 and 'recov' not in fl):
                             want_co = True
-                        if 'recov' in fl and '3yr' not in fl:
+                        if _rc_cfg and 'recov' in fl and '3yr' not in fl:
                             want_rc = True
+                        # A format that defines only one side (and whose
+                        # file_pattern already selected this file) applies
+                        # that side even when the filename lacks the token.
+                        if multi_format and not (want_co or want_rc):
+                            if _co_cfg and not _rc_cfg:
+                                want_co = True
+                            elif _rc_cfg and not _co_cfg:
+                                want_rc = True
 
                 if want_co and filepath not in _processed_co:
                     _processed_co.add(filepath)
@@ -1026,7 +1126,7 @@ def load_chargeoff_recovery_history(config):
                         int(qlabel[5:7]) if len(qlabel) >= 7 else 12
                     )
                     try:
-                        df = _parse_chargeoff_file(filepath, parse_config=chargeoff_parse_cfg)
+                        df = _parse_chargeoff_file(filepath, parse_config=_co_cfg)
                         for _, row in df.iterrows():
                             pool = _lookup_pool(row['code'])
                             if pool and pd.notna(row['amount']):
@@ -1058,7 +1158,7 @@ def load_chargeoff_recovery_history(config):
                         int(qlabel[5:7]) if len(qlabel) >= 7 else 12
                     )
                     try:
-                        df = _parse_recovery_file(filepath, parse_config=recovery_parse_cfg)
+                        df = _parse_recovery_file(filepath, parse_config=_rc_cfg)
                         for _, row in df.iterrows():
                             pool = _lookup_pool(row['code'])
                             if pool and pd.notna(row['amount']):
