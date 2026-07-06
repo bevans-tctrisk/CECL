@@ -10670,10 +10670,14 @@ def step3_columns():
             )
             return redirect(url_for("setup.step2_sample"))
 
-        required = ["member_number", "current_balance",
-                    "days_delinquent"]
+        required = ["member_number", "current_balance"]
+        # ``days_delinquent`` is optional: overdraft / mortgage-summary
+        # extracts legitimately have no delinquency column, and the
+        # importer defaults an unmapped value to 0. Requiring it blocked
+        # multi-extract CUs (e.g. ODP / CUMA files) from advancing past
+        # this step.
         optional = ("loan_suffix", "loan_pool_code", "original_fico_score",
-                    "current_fico_score",
+                    "current_fico_score", "days_delinquent",
                     "interest_rate", "open_date",
                     "original_loan_amount", "total_available_credit",
                     "business_risk_rating")
