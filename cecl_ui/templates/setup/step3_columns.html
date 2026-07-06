@@ -2,6 +2,14 @@
 {% block title %}Column Mappings{% endblock %}
 {% block content %}
 {% include "setup/_stepper.html" %}
+{% from "setup/_files_used_panel.html" import files_used_panel %}
+
+{% if files_used and files_used.data_directory %}
+{{ files_used_panel(files_used,
+   "These are the loan-data extract files found in the credit union&rsquo;s data
+    folder that the report will import, matched by each extract&rsquo;s filename
+    pattern. Review them to validate the source data used.") }}
+{% endif %}
 
 <div class="card">
   <h2>Column Mappings</h2>

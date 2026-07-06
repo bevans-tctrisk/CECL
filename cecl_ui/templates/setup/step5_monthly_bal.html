@@ -2,8 +2,17 @@
 {% block title %}Monthly Balance File{% endblock %}
 {% block content %}
 {% include "setup/_stepper.html" %}
+{% from "setup/_files_used_panel.html" import files_used_panel %}
 
 {% set source = mb.source or 'single' %}
+
+{% if files_used %}
+{{ files_used_panel(files_used,
+   "This is the month-end balance source the report will use. When the credit
+    union supplies balance files they&rsquo;re listed below; when balances are
+    derived from the imported loan extracts, the origin is described so you can
+    still validate the numbers.") }}
+{% endif %}
 
 <div class="card">
   <h2>Monthly Balance File</h2>

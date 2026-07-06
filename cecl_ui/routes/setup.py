@@ -3520,6 +3520,7 @@ def step5_monthly_bal():
         mb=mb,
         pool_choices=pool_choices,
         has_warm=has_warm,
+        files_used=_monthly_balance_files_used(state),
         label_balances=label_balances,
         label_balance_period=label_balance_period,
         **_wizard_ctx("monthly_bal"),
@@ -5793,19 +5794,59 @@ def _co_recov_provenance_view(state: dict[str, Any], section: str) -> dict[str, 
     }
 
 
-def _co_recov_files_used(state: dict[str, Any]) -> dict[str, Any]:
-    """Describe the actual charge-off / recovery files the report will read.
+def _files_used_for_specs(
+    state: dict[str, Any], specs: list[dict[str, str]]
+) -> dict[str, Any]:
+    """Scan the CU's data directory for files matching each spec's pattern.
 
-    For each configured CO/recovery format, scan the CU's data directory for
-    files matching that format's ``file_pattern`` and list them (name +
-    resolved period). Lets a reviewer validate exactly which files feed the
-    charge-off / recovery history — especially when the config was built by a
-    script (no per-file sample uploads) or the CU has many monthly files.
+    ``specs`` is a list of ``{"name", "file_pattern"}``. Returns
+    ``{data_directory, ok, error, groups: [{name, file_pattern, match_count,
+    error, files: [{name, period, subdir}]}]}`` — a display-ready record of
+    exactly which files the report will read, so a reviewer can validate the
+    source data. Shared by the charge-off/recovery, loan-extract and
+    monthly-balance "Files used" panels.
     """
     data_dir = (state.get("data_directory") or "").strip()
     date_pattern = state.get("date_pattern") or ""
     date_format = state.get("date_format") or "YYYY-MM"
+    out: dict[str, Any] = {
+        "data_directory": data_dir,
+        "ok": bool(data_dir),
+        "error": None,
+        "groups": [],
+    }
+    if not data_dir:
+        out["error"] = "No data directory is set for this credit union yet."
+        return out
+    for spec in specs:
+        fp = (spec.get("file_pattern") or "").strip()
+        if not fp:
+            continue
+        scan = _scan_data_directory(data_dir, fp, date_pattern, date_format)
+        matched = [r for r in (scan.get("files") or []) if r.get("matched")]
+        matched.sort(key=lambda r: (r.get("date") or ""), reverse=True)
+        out["groups"].append({
+            "name": spec.get("name") or "(unnamed)",
+            "file_pattern": fp,
+            "error": scan.get("error"),
+            "match_count": len(matched),
+            "files": [
+                {"name": r.get("name"),
+                 "period": r.get("date") or "",
+                 "subdir": r.get("subdir") or ""}
+                for r in matched
+            ],
+        })
+    return out
 
+
+def _co_recov_files_used(state: dict[str, Any]) -> dict[str, Any]:
+    """Describe the actual charge-off / recovery files the report will read.
+
+    For each configured CO/recovery format, scan the data directory for files
+    matching its ``file_pattern``. Especially useful when the config was built
+    by a script (no per-file sample uploads) or the CU has many monthly files.
+    """
     formats = list(state.get("co_recov_formats") or [])
     # Fall back to the saved config's historical_file_formats.formats so a
     # stale / script-built session still shows the persisted patterns.
@@ -5822,36 +5863,123 @@ def _co_recov_files_used(state: dict[str, Any]) -> dict[str, Any]:
                     formats = cfg_formats
             except Exception:  # noqa: BLE001
                 formats = []
+    specs = [
+        {"name": f.get("name") or "(unnamed format)",
+         "file_pattern": f.get("file_pattern") or ""}
+        for f in formats
+    ]
+    return _files_used_for_specs(state, specs)
 
-    out: dict[str, Any] = {
-        "data_directory": data_dir,
-        "ok": bool(data_dir),
-        "error": None,
-        "formats": [],
-    }
-    if not data_dir:
-        out["error"] = "No data directory is set for this credit union yet."
+
+def _loan_extract_files_used(state: dict[str, Any]) -> dict[str, Any]:
+    """Describe the actual loan-data extract files the report will read.
+
+    Builds one spec per loan extract (from the wizard's ``loan_data_files``,
+    else the saved config's ``loan_data_extracts``, else the single top-level
+    ``file_pattern``) and scans the data directory for matches.
+    """
+    specs: list[dict[str, str]] = []
+    for lf in ((state.get("sample_uploads") or {}).get("loan_data_files") or []):
+        fp = (lf.get("file_pattern") or "").strip()
+        if fp:
+            specs.append({"name": lf.get("name") or "Loan extract",
+                          "file_pattern": fp})
+    if not specs:
+        short = (state.get("short_name") or "").strip()
+        if short:
+            try:
+                cfg = config_service.load_client_config(
+                    current_app.config["WORKSPACE_ROOT"], short
+                ) or {}
+                for ex in (cfg.get("loan_data_extracts") or []):
+                    fp = (ex.get("file_pattern") or "").strip()
+                    if fp:
+                        specs.append({
+                            "name": ex.get("label") or ex.get("name")
+                            or "Loan extract",
+                            "file_pattern": fp,
+                        })
+            except Exception:  # noqa: BLE001
+                pass
+    if not specs:
+        fp = (state.get("file_pattern") or "").strip()
+        if fp:
+            specs.append({"name": "Loan data extract", "file_pattern": fp})
+    return _files_used_for_specs(state, specs)
+
+
+def _monthly_balance_files_used(state: dict[str, Any]) -> dict[str, Any]:
+    """Describe the monthly-balance source the report will read.
+
+    Handles each ``monthly_bal.source`` mode: a discovery ``monthly_file_pattern``
+    is scanned against the data directory; explicit uploads (single workbook /
+    per-month / per-year) are listed directly; and when balances are DERIVED
+    from the loan extracts (no separate file), a note explains the origin using
+    the recorded historical-balance provenance so a reviewer can still tie out.
+    """
+    mb = state.get("monthly_bal") or {}
+    source = (mb.get("source") or "single").strip().lower()
+    pattern = (mb.get("monthly_file_pattern") or "").strip()
+
+    if pattern:
+        out = _files_used_for_specs(
+            state, [{"name": "Monthly balance snapshots", "file_pattern": pattern}]
+        )
+        out["note"] = None
         return out
 
-    for f in formats:
-        fp = (f.get("file_pattern") or "").strip()
-        if not fp:
-            continue
-        scan = _scan_data_directory(data_dir, fp, date_pattern, date_format)
-        matched = [r for r in (scan.get("files") or []) if r.get("matched")]
-        matched.sort(key=lambda r: (r.get("date") or ""), reverse=True)
-        out["formats"].append({
-            "name": f.get("name") or "(unnamed format)",
-            "file_pattern": fp,
-            "error": scan.get("error"),
-            "match_count": len(matched),
-            "files": [
-                {"name": r.get("name"),
-                 "period": r.get("date") or "",
-                 "subdir": r.get("subdir") or ""}
-                for r in matched
-            ],
-        })
+    data_dir = (state.get("data_directory") or "").strip()
+    out = {"data_directory": data_dir, "ok": True, "error": None,
+           "groups": [], "note": None, "inputs": []}
+
+    def _explicit(entries: list, label: str) -> None:
+        files = []
+        for e in entries or []:
+            nm = (e.get("filename") or e.get("name")
+                  or (Path(e.get("saved_path", "")).name
+                      if e.get("saved_path") else ""))
+            if nm:
+                files.append({"name": nm, "period": e.get("period") or "",
+                              "subdir": ""})
+        if files:
+            out["groups"].append({
+                "name": label, "file_pattern": "", "error": None,
+                "match_count": len(files), "files": files})
+
+    if source == "single":
+        nm = (mb.get("filename")
+              or (Path(mb.get("saved_path", "")).name
+                  if mb.get("saved_path") else ""))
+        if nm:
+            out["groups"].append({
+                "name": "Monthly balance workbook", "file_pattern": "",
+                "error": None, "match_count": 1,
+                "files": [{"name": nm, "period": "", "subdir": ""}]})
+    elif source == "per_month":
+        _explicit(mb.get("monthly_files"), "Per-month balance files")
+    elif source == "per_year":
+        _explicit(mb.get("year_files"), "Per-year balance workbooks")
+
+    if not out["groups"]:
+        if source == "manual":
+            out["note"] = ("Monthly balances were entered manually on this "
+                           "step, so there is no separate source file.")
+        else:
+            prov = None
+            try:
+                prov = _hist_balance_provenance_view(state)
+            except Exception:  # noqa: BLE001
+                prov = None
+            if prov and prov.get("recorded"):
+                out["note"] = (
+                    "No standalone monthly-balance file is configured; "
+                    "balances are derived. " + (prov.get("summary") or "")
+                ).strip()
+                out["inputs"] = list(prov.get("inputs") or [])
+            else:
+                out["note"] = (
+                    "No standalone monthly-balance file is configured. "
+                    "Balances may be derived from the imported loan extracts.")
     return out
 
 
@@ -11341,6 +11469,7 @@ def step3_columns():
     return render_template(
         "setup/step3_columns.html",
         files_view=[_file_view(e, i) for i, e in enumerate(files)],
+        files_used=_loan_extract_files_used(state),
         **_wizard_ctx("columns"),
     )
 
