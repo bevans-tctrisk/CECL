@@ -74,6 +74,17 @@ COLUMN_HEURISTICS: list[tuple[str, list[str]]] = [
 ]
 
 
+# Negative keywords per field: a candidate header whose normalised form
+# contains any of these tokens is skipped for that field. A member/account
+# NUMBER column is never the member NAME column, yet the bare ``"member"``
+# keyword otherwise grabs "Member Name" (which precedes the real "Account
+# Number" in AIRES/Symitar extracts), breaking the credit-pull join and the
+# suffix-length discovery.
+_FIELD_EXCLUDE: dict[str, tuple[str, ...]] = {
+    "member_number": ("name",),
+}
+
+
 def _normalise(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower()).strip("_")
 
@@ -294,6 +305,157 @@ def infer_member_account_from_values(
     return None
 
 
+# Header keywords that identify a member/borrower NAME column. Used by the
+# suffix-length discovery below to group a single member's loans together.
+# Ordered most-specific first. The bare ``"name"`` entry is matched *exactly*
+# (see below) and non-member name columns are rejected outright.
+_NAME_COL_KEYWORDS: tuple[str, ...] = (
+    "member name", "membername", "borrower name", "borrowername",
+    "customer name", "account name", "primary name", "owner name",
+    "name of member", "member", "borrower", "customer", "name",
+)
+
+# Tokens that disqualify a "...name" header from being the *member* name
+# (e.g. "Loan Type Name", "Product Name", "Officer Name", "City").
+_NAME_COL_REJECT: tuple[str, ...] = (
+    "type", "product", "officer", "branch", "collateral", "city", "state",
+    "code", "pool", "category", "description", "purpose", "insider",
+)
+
+
+def find_member_name_column(
+    headers: list[str],
+    body: "pd.DataFrame | None" = None,
+) -> str | None:
+    """Return the header most likely to hold the member/borrower NAME.
+
+    When ``body`` is supplied the candidate is validated as *textual*
+    (majority of sampled cells contain letters) so a numeric member-number
+    column is never picked by the trailing bare ``"name"`` keyword. Headers
+    for non-member name fields (loan type, product, officer ...) are
+    rejected. Returns ``None`` when nothing convincing is found.
+    """
+    norm = [(h, _normalise(h)) for h in headers]
+    for kw in _NAME_COL_KEYWORDS:
+        kw_n = _normalise(kw)
+        if not kw_n:
+            continue
+        for original, n in norm:
+            # The bare "name" fallback matches exactly; every other keyword
+            # matches as a substring.
+            if kw_n == "name":
+                if n != "name":
+                    continue
+            elif kw_n not in n:
+                continue
+            if any(bad in n for bad in _NAME_COL_REJECT):
+                continue
+            if body is not None and original in getattr(body, "columns", []):
+                vals = [
+                    str(v).strip()
+                    for v in body[original].head(40).tolist()
+                    if v is not None and str(v).strip()
+                    and str(v).strip().lower() not in {"nan", "none"}
+                ]
+                if vals:
+                    alpha = sum(1 for v in vals if any(c.isalpha() for c in v))
+                    if alpha / len(vals) < 0.5:
+                        continue  # mostly numeric -> not a name column
+            return original
+    return None
+
+
+def detect_suffix_from_name_groups(
+    accounts: list[Any],
+    names: list[Any],
+    max_suffix: int = 4,
+    min_groups: int = 8,
+    support_frac: float = 0.15,
+    min_support: int = 8,
+) -> dict[str, Any] | None:
+    """Discover the fixed loan-suffix width by grouping loans under one member.
+
+    Core banking systems key each loan as ``<member-number><loan-suffix>``
+    where the suffix is a fixed-width, sequentially-assigned counter
+    (``01``, ``02`` ...). A member's loans share the member-number prefix and
+    differ only in the suffix, so grouping a file's rows by member *name* and
+    inspecting the trailing digits that vary reveals the suffix width — the
+    exact manual method an analyst uses on a spreadsheet of duplicate names.
+
+    Two confounders are handled:
+
+    * **Sequential low numbers** (``01``, ``02``, ``03``) share a leading
+      zero, so a naive common-prefix undercounts the width by one. We take
+      the *largest* width corroborated by a meaningful fraction of members:
+      members who hold a loan numbered >= 10 (suffix ``83`` ...) expose the
+      true field width, while smaller observed widths are the same field
+      seen through those leading zeros.
+    * **Name collisions** (two different people sharing a common name) have
+      little/no shared account prefix, yielding an implausibly large width
+      that exceeds ``max_suffix`` and is discarded.
+
+    Returns ``{"suffix_length", "confidence", "rationale", "groups"}`` or
+    ``None`` when the evidence is too thin (caller keeps its own default).
+    """
+    import os as _os
+
+    def _na(a: Any) -> str:
+        if a is None:
+            return ""
+        return re.sub(r"\.0+$", "", str(a).strip())  # drop float-cast ".0"
+
+    def _nn(n: Any) -> str:
+        if n is None:
+            return ""
+        return re.sub(r"\s+", " ", str(n).strip().upper())
+
+    by_name: dict[str, set[str]] = {}
+    for a, n in zip(accounts, names):
+        acct = _na(a)
+        name = _nn(n)
+        if not acct or not acct.isdigit():
+            continue
+        if not name or name in {"NAN", "NONE"}:
+            continue
+        by_name.setdefault(name, set()).add(acct)
+
+    votes: dict[int, int] = {}
+    groups_used = 0
+    for accts in by_name.values():
+        if len(accts) < 2:
+            continue
+        cp = _os.path.commonprefix(sorted(accts))
+        widths = [len(a) - len(cp) for a in accts]
+        widths = [w for w in widths if 0 < w <= max_suffix]
+        if not widths:
+            continue  # collision / unrelated accounts under a shared name
+        groups_used += 1
+        top = max(widths)
+        votes[top] = votes.get(top, 0) + 1
+
+    if groups_used < min_groups or not votes:
+        return None
+
+    threshold = max(min_support, support_frac * groups_used)
+    supported = [w for w, c in votes.items() if c >= threshold]
+    if not supported:
+        return None
+    width = max(supported)
+    share = votes.get(width, 0) / groups_used
+    conf = "high" if share >= 0.30 else "medium" if share >= 0.15 else "low"
+    return {
+        "suffix_length": int(width),
+        "confidence": conf,
+        "rationale": (
+            f"{groups_used} member-name groups held 2+ loans; "
+            f"{votes.get(width, 0)} exposed a {width}-digit loan suffix "
+            f"(votes {dict(sorted(votes.items()))}). Accounts keyed as "
+            f"<member><{width}-digit suffix>."
+        ),
+        "groups": groups_used,
+    }
+
+
 _UNNAMED_RX = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$", re.IGNORECASE)
 
 
@@ -376,11 +538,14 @@ def _match_columns(headers: list[str]) -> dict[str, str]:
     used: set[str] = set()
     norm_headers = [(h, _normalise(h)) for h in headers]
     for field, keywords in COLUMN_HEURISTICS:
+        exclude = _FIELD_EXCLUDE.get(field, ())
         match: str | None = None
         for kw in keywords:
             kw_n = _normalise(kw)
             for original, norm in norm_headers:
                 if original in used:
+                    continue
+                if exclude and any(x in norm for x in exclude):
                     continue
                 if kw_n in norm or norm in kw_n:
                     match = original
@@ -1149,6 +1314,32 @@ def analyse_sample_file(
             )
         except Exception:  # noqa: BLE001
             ma_suggestion = None
+        # Refine the suffix WIDTH via member-name grouping when the account
+        # column is bare digits (fixed_suffix territory). This recovers cases
+        # like WSSC where each account is ``<member><2-digit loan suffix>`` but
+        # the values alone look like plain member numbers (variable length ->
+        # account-only heuristic guesses suffix_length=0). Skipped for
+        # delimiter-mode columns, where the suffix is already unambiguous.
+        try:
+            if ma_suggestion is None or ma_suggestion.get("mode") == "fixed_suffix":
+                name_col = find_member_name_column(headers, body)
+                if name_col and name_col != member_col:
+                    name_based = detect_suffix_from_name_groups(
+                        body[member_col].tolist(),
+                        body[name_col].tolist(),
+                    )
+                    if name_based and name_based["suffix_length"] > 0:
+                        ma_suggestion = {
+                            "mode": "fixed_suffix",
+                            "delimiter": (ma_suggestion or {}).get("delimiter", "-"),
+                            "suffix_length": name_based["suffix_length"],
+                            "confidence": name_based["confidence"],
+                            "rationale": (
+                                "Member-name grouping: " + name_based["rationale"]
+                            ),
+                        }
+        except Exception:  # noqa: BLE001
+            pass
 
     return {
         "ok": True,

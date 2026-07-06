@@ -215,10 +215,12 @@
       </label>
     </h3>
     <p class="muted" style="margin:4px 0 8px 28px;">
-      For new credit unions that don't have a fresh bureau pull yet &mdash;
-      or for loans that were originated <em>after</em> the most recent credit
-      pull &mdash; use the loan-file's original FICO column as the current
-      score.
+      No separate bureau pull? Build one automatically from the loan extract.
+      For each member the engine takes the credit score from their most
+      recently opened loan and uses it as the current score for all of that
+      member's loans &mdash; so credit migration is measured without uploading
+      a standalone credit-pull file. (When a real pull <em>is</em> configured,
+      this only overrides loans originated <em>after</em> the pull date.)
     </p>
 
     <div id="opt3-detail" class="opt-detail" style="margin-left:28px;
@@ -231,9 +233,9 @@
       <p class="muted">
         <strong>Heads up:</strong> the <code>open_date</code> column isn't
         mapped in <a href="{{ url_for('setup.step3_columns') }}">Column
-        Mappings</a>. Without it the engine can't tell which loans are newer
-        than the pull, so it will only kick in when no credit-pull source is
-        configured at all.
+        Mappings</a>. It's <strong>required</strong> for this option &mdash;
+        the engine uses each member's most-recently-opened loan to pick their
+        current score. Map it before relying on Option 3.
       </p>
       {% endif %}
     </div>

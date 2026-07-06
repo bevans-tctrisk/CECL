@@ -1221,7 +1221,7 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
     # block is a no-op (the bureau scores already loaded above stand).
     # ----------------------------------------------------------------------
     cp_cfg = config.get('credit_pull') or {}
-    if cp_cfg.get('prefer_original_for_new_loans') and pull_as_of is not None:
+    if cp_cfg.get('prefer_original_for_new_loans'):
         open_date_col = (config.get('column_mappings') or {}).get('open_date')
         if open_date_col is not None and (
             (has_header and open_date_col in df.columns)
@@ -1232,38 +1232,57 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
                 df[open_date_col] if has_header else df.iloc[:, open_date_col],
                 errors='coerce',
             )
-            newer_mask = open_date_series.notna() & (open_date_series > pd.Timestamp(pull_as_of))
-            if newer_mask.any():
-                # Per-member: pick the original score from the most-recently-opened
-                # loan and apply it to every loan that member has. This matches
-                # the user's intent that all of a member's loans share one
-                # current score derived from their freshest origination data.
-                tmp = pd.DataFrame({
-                    'member': member_numbers,
-                    'open_date': open_date_series,
-                    'orig_fico': original_fico,
-                })
-                # Only consider loans with a positive original score; zeros
-                # represent missing data and shouldn't override real scores.
-                tmp_valid = tmp[tmp['orig_fico'] > 0]
-                if not tmp_valid.empty:
-                    idx_max = tmp_valid.groupby('member')['open_date'].idxmax()
-                    member_to_latest = (
-                        tmp_valid.loc[idx_max].set_index('member')['orig_fico']
+            # Per-member "most recent loans" method: for each member, take the
+            # credit score from their most-recently-opened loan (non-zero) and
+            # apply it as the current score to every loan that member has, so
+            # credit migration can be shown without a separate bureau pull.
+            #
+            # Scope depends on whether a real credit pull is configured:
+            #   * pull configured  -> only override loans opened AFTER the pull
+            #     (their origination score is fresher than the bureau-wide pull).
+            #   * NO pull configured -> derive the current score for EVERY loan
+            #     from the member's most-recent origination score. This is the
+            #     analyst's manual "build a credit pull from the AIRES file"
+            #     process, now automatic.
+            if pull_as_of is not None:
+                scope_mask = open_date_series.notna() & (
+                    open_date_series > pd.Timestamp(pull_as_of))
+                scope_label = f"newer than {pd.Timestamp(pull_as_of).date()}"
+            else:
+                scope_mask = pd.Series(True, index=df.index)
+                scope_label = "all loans (no credit pull)"
+            # Per-member: pick the original score from the most-recently-opened
+            # loan and apply it to every loan that member has.
+            tmp = pd.DataFrame({
+                'member': member_numbers,
+                'open_date': open_date_series,
+                'orig_fico': original_fico,
+            })
+            # Only consider loans with a positive original score and a real
+            # open date; zeros/blanks represent missing data and shouldn't
+            # override real scores or drive the "most recent" comparison.
+            tmp_valid = tmp[(tmp['orig_fico'] > 0) & tmp['open_date'].notna()]
+            if not tmp_valid.empty:
+                idx_max = tmp_valid.groupby('member')['open_date'].idxmax()
+                member_to_latest = (
+                    tmp_valid.loc[idx_max].set_index('member')['orig_fico']
+                )
+                replacement = member_numbers.map(member_to_latest)
+                apply_mask = scope_mask & replacement.notna()
+                if apply_mask.any():
+                    current_fico = current_fico.where(
+                        ~apply_mask, replacement.astype('Int64')
                     )
-                    replacement = member_numbers.map(member_to_latest)
-                    apply_mask = newer_mask & replacement.notna()
-                    if apply_mask.any():
-                        current_fico = current_fico.where(
-                            ~apply_mask, replacement.astype('Int64')
-                        )
-                        # Coerce back to int after the masked update.
-                        current_fico = current_fico.fillna(0).astype(int)
-                        print(
-                            f"    Original-score fallback: {int(apply_mask.sum())} "
-                            f"loans newer than {pd.Timestamp(pull_as_of).date()} "
-                            f"now use member's most-recent original score"
-                        )
+                    # Coerce back to int after the masked update.
+                    current_fico = current_fico.fillna(0).astype(int)
+                    print(
+                        f"    Original-score fallback: {int(apply_mask.sum())} "
+                        f"loan(s) [{scope_label}] now use member's "
+                        f"most-recent original score"
+                    )
+        elif cp_cfg.get('prefer_original_for_new_loans'):
+            print("    Original-score fallback: open_date column not mapped — "
+                  "cannot derive most-recent-loan scores.")
 
     clean_data = pd.DataFrame({
         'credit_union': cu_name,
