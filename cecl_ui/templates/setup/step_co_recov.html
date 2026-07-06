@@ -149,6 +149,62 @@
   </p>
 </div>
 
+{% if files_used and files_used.data_directory %}
+<div class="card" style="border-left:4px solid #2a6ebb;">
+  <h3 style="margin-top:0;">Files used for this report</h3>
+  <p class="muted" style="margin-top:4px;">
+    You don&rsquo;t need to re-upload monthly files here &mdash; the
+    charge-off &amp; recovery history is read at report time directly from
+    the credit union&rsquo;s data folder. The files below are what the
+    report will actually use; review them to validate the source data.
+  </p>
+  <p class="muted" style="margin:4px 0;">
+    Source folder: <code>{{ files_used.data_directory }}</code>
+  </p>
+  {% if files_used.error %}
+    <p class="muted" style="color:#a33;">{{ files_used.error }}</p>
+  {% elif not files_used.formats %}
+    <p class="muted">No charge-off / recovery file formats are configured yet.</p>
+  {% else %}
+    {% for fmt in files_used.formats %}
+      <div style="margin-top:10px; padding:8px 12px; border:1px solid #e2e2e2;
+                  border-radius:6px; background:#fafafa;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <strong>{{ fmt.name }}</strong>
+          <span class="muted">{{ fmt.match_count }} file(s) matched</span>
+        </div>
+        <div class="muted" style="font-size:11px; margin:2px 0;">
+          Filename pattern: <code>{{ fmt.file_pattern }}</code>
+        </div>
+        {% if fmt.error %}
+          <p class="muted" style="color:#a33; margin:4px 0;">{{ fmt.error }}</p>
+        {% elif fmt.files %}
+          <details style="margin-top:4px;">
+            <summary style="cursor:pointer;">Show {{ fmt.match_count }} matched file(s)</summary>
+            <table class="data-table" style="width:100%; margin-top:6px;
+                   background:#fff; font-size:12px;">
+              <thead><tr><th>File</th><th style="width:120px;">Period</th></tr></thead>
+              <tbody>
+              {% for file in fmt.files %}
+                <tr>
+                  <td><code>{% if file.subdir %}{{ file.subdir }}\{% endif %}{{ file.name }}</code></td>
+                  <td>{{ file.period or '&mdash;' }}</td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </details>
+        {% else %}
+          <p class="muted" style="margin:4px 0;">
+            No files in the data folder match this pattern.
+          </p>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% endif %}
+</div>
+{% endif %}
+
 {% set su = state.sample_uploads or {} %}
 
 {# ───────────────────────────────────────────────────────────────

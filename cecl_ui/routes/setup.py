@@ -5793,6 +5793,68 @@ def _co_recov_provenance_view(state: dict[str, Any], section: str) -> dict[str, 
     }
 
 
+def _co_recov_files_used(state: dict[str, Any]) -> dict[str, Any]:
+    """Describe the actual charge-off / recovery files the report will read.
+
+    For each configured CO/recovery format, scan the CU's data directory for
+    files matching that format's ``file_pattern`` and list them (name +
+    resolved period). Lets a reviewer validate exactly which files feed the
+    charge-off / recovery history — especially when the config was built by a
+    script (no per-file sample uploads) or the CU has many monthly files.
+    """
+    data_dir = (state.get("data_directory") or "").strip()
+    date_pattern = state.get("date_pattern") or ""
+    date_format = state.get("date_format") or "YYYY-MM"
+
+    formats = list(state.get("co_recov_formats") or [])
+    # Fall back to the saved config's historical_file_formats.formats so a
+    # stale / script-built session still shows the persisted patterns.
+    if not formats:
+        short = (state.get("short_name") or "").strip()
+        if short:
+            try:
+                cfg = config_service.load_client_config(
+                    current_app.config["WORKSPACE_ROOT"], short
+                ) or {}
+                hff = cfg.get("historical_file_formats") or {}
+                cfg_formats = hff.get("formats")
+                if isinstance(cfg_formats, list):
+                    formats = cfg_formats
+            except Exception:  # noqa: BLE001
+                formats = []
+
+    out: dict[str, Any] = {
+        "data_directory": data_dir,
+        "ok": bool(data_dir),
+        "error": None,
+        "formats": [],
+    }
+    if not data_dir:
+        out["error"] = "No data directory is set for this credit union yet."
+        return out
+
+    for f in formats:
+        fp = (f.get("file_pattern") or "").strip()
+        if not fp:
+            continue
+        scan = _scan_data_directory(data_dir, fp, date_pattern, date_format)
+        matched = [r for r in (scan.get("files") or []) if r.get("matched")]
+        matched.sort(key=lambda r: (r.get("date") or ""), reverse=True)
+        out["formats"].append({
+            "name": f.get("name") or "(unnamed format)",
+            "file_pattern": fp,
+            "error": scan.get("error"),
+            "match_count": len(matched),
+            "files": [
+                {"name": r.get("name"),
+                 "period": r.get("date") or "",
+                 "subdir": r.get("subdir") or ""}
+                for r in matched
+            ],
+        })
+    return out
+
+
 def _uploaded_balance_periods(state: dict[str, Any]) -> set[str]:
     """Month-end periods (ISO) the CU already has real balance data for, read
     from its configured historical-balance source. Used so the auto 5300
@@ -9177,6 +9239,7 @@ def step_co_recov():
         co_preview=co_preview, recov_preview=recov_preview,
         co_validation=co_validation, recov_validation=recov_validation,
         pool_choices=pool_choices,
+        files_used=_co_recov_files_used(state),
         **_wizard_ctx("co_recov"),
     )
 
