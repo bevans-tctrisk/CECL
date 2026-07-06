@@ -320,6 +320,52 @@
   <h3>1. Historical Loan Balances by Pool / Type
     <span class="badge-required">Required</span>
   </h3>
+
+  {% set prov = hist_balance_provenance or {} %}
+  {% if prov.recorded %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #b6d4e6; background:#eef6fb;">
+    <div style="font-weight:600; color:#20628a; margin-bottom:4px;">
+      &#9432; How these balances were compiled
+    </div>
+    <div style="margin-bottom:4px;">
+      <strong>{{ prov.label }}</strong>
+      {% if prov.summary %}<br><span class="muted">{{ prov.summary }}</span>{% endif %}
+    </div>
+    {% if prov.coverage and prov.coverage.months %}
+    <div class="muted" style="margin-bottom:4px;">
+      Covers <strong>{{ prov.coverage.months }}</strong> month(s)
+      ({{ prov.coverage.start }} &rarr; {{ prov.coverage.end }})
+      across <strong>{{ prov.coverage.pools }}</strong> pool(s).
+    </div>
+    {% endif %}
+    {% if prov.inputs %}
+    <div class="muted" style="margin-bottom:4px;">
+      Source: {{ prov.inputs | join('; ') }}.
+    </div>
+    {% endif %}
+    {% if prov.generated_by %}
+    <div class="muted" style="margin-bottom:4px;">{{ prov.generated_by }}.</div>
+    {% endif %}
+    {% if prov.validation_hint %}
+    <div style="margin-top:6px; padding:6px 8px; background:#ffffff;
+                border-left:3px solid #20628a; font-size:0.92em;">
+      <strong>To validate:</strong> {{ prov.validation_hint }}
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #e6cfa0; background:#fdf6e9;">
+    <div style="font-weight:600; color:#8a5a20; margin-bottom:4px;">
+      &#9888; Source not recorded
+    </div>
+    <div class="muted">
+      {{ prov.summary or "The source of these historical balances has not been confirmed. Choose how they were compiled below so a reviewer can validate them." }}
+    </div>
+  </div>
+  {% endif %}
+
   <p class="muted">
     Choose how this credit union will provide its monthly historical loan
     balances. Pick one of the three options below.
@@ -1979,6 +2025,23 @@
     <span class="muted" style="font-weight:normal;">(automatic, optional)</span>
   </h3>
 
+  {# Default-on auto-fill toggle. When ON, the wizard runs the 5300 balance
+     backfill automatically as you continue past this step. #}
+  <form method="post" style="margin:4px 0 10px;">
+    <input type="hidden" name="action" value="set_solr_backfill_enabled">
+    <label style="display:flex; gap:8px; align-items:center;">
+      <input type="checkbox" name="solr_backfill_enabled"
+             onchange="this.form.submit()"
+             {% if sb.get('enabled', True) %}checked{% endif %}>
+      <span><strong>Auto-fill balances from NCUA 5300</strong> when I continue
+      past this step (recommended default). The earlier quarters with no
+      balance data are filled from the CU's 5300 call report; existing months
+      are never overwritten.</span>
+    </label>
+    <noscript><button class="btn btn-secondary" type="submit"
+      style="margin-top:6px;">Save</button></noscript>
+  </form>
+
   {# Mode selector — auto-submits on change. #}
   <form method="post" style="margin:6px 0 12px 0;
         padding:10px 14px; background:#fff; border:1px solid #c9d6e8;
@@ -2401,6 +2464,49 @@
   <h3>2. Historical Charge-Offs
     <span class="badge-required">Required</span>
   </h3>
+  {% set cprov = co_provenance or {} %}
+  {% if cprov.recorded %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #b6d4e6; background:#eef6fb;">
+    <div style="font-weight:600; color:#20628a; margin-bottom:4px;">
+      &#9432; How these charge-offs were compiled
+    </div>
+    <div style="margin-bottom:4px;"><strong>{{ cprov.label }}</strong></div>
+    {% if cprov.summary %}<div class="muted" style="margin-bottom:6px;">{{ cprov.summary }}</div>{% endif %}
+    {% if cprov.cu_files %}
+    <div style="margin-bottom:4px;"><span class="muted">CU-provided file(s):</span>
+      <ul style="margin:2px 0 4px 18px;">
+        {% for f in cprov.cu_files %}
+        <li>{{ f.name }}{% if f.file_pattern %} <code style="font-size:0.85em;">{{ f.file_pattern }}</code>{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if cprov.db_sources %}
+    <div style="margin-bottom:4px;"><span class="muted">Backfill source(s):</span>
+      <ul style="margin:2px 0 4px 18px;">
+        {% for s in cprov.db_sources %}
+        <li>{{ s.label }}{% if s.years %} ({{ s.years }}){% endif %}{% if s.total %} &mdash; ${{ '{:,.2f}'.format(s.total) }}{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if cprov.validation_hint %}
+    <div style="margin-top:6px; padding:6px 8px; background:#ffffff;
+                border-left:3px solid #20628a; font-size:0.92em;">
+      <strong>To validate:</strong> {{ cprov.validation_hint }}
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #e6cfa0; background:#fdf6e9;">
+    <div style="font-weight:600; color:#8a5a20; margin-bottom:4px;">
+      &#9888; Source not recorded
+    </div>
+    <div class="muted">{{ cprov.summary or "The source of these historical charge-offs has not been confirmed. Configure it below so a reviewer can validate them." }}</div>
+  </div>
+  {% endif %}
   <p class="muted">
     Choose where this CU's historical charge-off data comes from. The same
     <strong>target reporting period</strong> and <strong>history depth</strong>
@@ -3416,6 +3522,57 @@
   <h3>3. Historical Recoveries
     <span class="badge-optional">Optional</span>
   </h3>
+  {% set rprov = recov_provenance or {} %}
+  {% if rprov.no_recoveries %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #ccc; background:#f6f6f6;">
+    <div style="font-weight:600; color:#555; margin-bottom:4px;">
+      &#9432; How these recoveries were compiled
+    </div>
+    <div class="muted">{{ rprov.summary }}</div>
+  </div>
+  {% elif rprov.recorded %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #b6d4e6; background:#eef6fb;">
+    <div style="font-weight:600; color:#20628a; margin-bottom:4px;">
+      &#9432; How these recoveries were compiled
+    </div>
+    <div style="margin-bottom:4px;"><strong>{{ rprov.label }}</strong></div>
+    {% if rprov.summary %}<div class="muted" style="margin-bottom:6px;">{{ rprov.summary }}</div>{% endif %}
+    {% if rprov.cu_files %}
+    <div style="margin-bottom:4px;"><span class="muted">CU-provided file(s):</span>
+      <ul style="margin:2px 0 4px 18px;">
+        {% for f in rprov.cu_files %}
+        <li>{{ f.name }}{% if f.file_pattern %} <code style="font-size:0.85em;">{{ f.file_pattern }}</code>{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if rprov.db_sources %}
+    <div style="margin-bottom:4px;"><span class="muted">Backfill source(s):</span>
+      <ul style="margin:2px 0 4px 18px;">
+        {% for s in rprov.db_sources %}
+        <li>{{ s.label }}{% if s.years %} ({{ s.years }}){% endif %}{% if s.total %} &mdash; ${{ '{:,.2f}'.format(s.total) }}{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if rprov.validation_hint %}
+    <div style="margin-top:6px; padding:6px 8px; background:#ffffff;
+                border-left:3px solid #20628a; font-size:0.92em;">
+      <strong>To validate:</strong> {{ rprov.validation_hint }}
+    </div>
+    {% endif %}
+  </div>
+  {% elif rprov.recorded == false and not state.no_hist_recoveries %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #e6cfa0; background:#fdf6e9;">
+    <div style="font-weight:600; color:#8a5a20; margin-bottom:4px;">
+      &#9888; Source not recorded
+    </div>
+    <div class="muted">{{ rprov.summary or "The source of these historical recoveries has not been confirmed. Configure it below (or mark that this CU has no recoveries) so a reviewer can validate them." }}</div>
+  </div>
+  {% endif %}
   <p class="muted">
     If this CU has no recovery history, check the box and skip the rest of
     this section. Otherwise pick where the historical recoveries come from

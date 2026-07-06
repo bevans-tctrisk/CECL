@@ -258,6 +258,205 @@ def pool_distribution_for_cu(
         return []
 
 
+def pool_score_coverage_for_cu(
+    cu_name: str, snapshot_date: str | None = None
+) -> dict[str, dict]:
+    """Return per-pool credit-score coverage for a credit union.
+
+    Takes the credit-union *name* (``monthly_loan_data.credit_union``) rather
+    than a config short-name, so it works during the setup wizard before the
+    YAML config is saved. For the latest (or given) snapshot, returns::
+
+        {loan_pool: {"total": float, "scored": float, "frac": float}}
+
+    where ``scored`` is the balance of loans carrying a real credit score
+    (``original_fico_score > 0``) and ``frac`` is ``scored / total``. Returns
+    an empty dict when the CU has no imported data or the DB is unavailable.
+    """
+    cu_name = (cu_name or "").strip()
+    if not cu_name:
+        return {}
+    try:
+        cfg_mod = importlib.import_module("cecl_credentials")
+        url = cfg_mod.get_database_url()
+        from sqlalchemy import create_engine, text
+        eng = create_engine(url)
+        with eng.connect() as conn:
+            if not snapshot_date:
+                snapshot_date = conn.execute(
+                    text(
+                        "SELECT MAX(snapshot_date) FROM monthly_loan_data "
+                        "WHERE credit_union = :cu"
+                    ),
+                    {"cu": cu_name},
+                ).scalar()
+                if not snapshot_date:
+                    return {}
+            rows = conn.execute(
+                text(
+                    "SELECT loan_pool, "
+                    "       COALESCE(SUM(current_balance), 0) AS total, "
+                    "       COALESCE(SUM(CASE WHEN original_fico_score > 0 "
+                    "                        THEN current_balance ELSE 0 END), 0) "
+                    "         AS scored "
+                    "FROM monthly_loan_data "
+                    "WHERE credit_union = :cu AND snapshot_date = :s "
+                    "GROUP BY loan_pool"
+                ),
+                {"cu": cu_name, "s": snapshot_date},
+            ).fetchall()
+        out: dict[str, dict] = {}
+        for pool, total, scored in rows:
+            if pool is None:
+                continue
+            total = float(total or 0)
+            scored = float(scored or 0)
+            out[str(pool)] = {
+                "total": total,
+                "scored": scored,
+                "frac": (scored / total) if total else 0.0,
+            }
+        return out
+    except Exception:
+        return {}
+
+
+def balance_coverage_for_cu(cu_name: str) -> dict:
+    """Return the snapshot coverage of a CU's imported loan data.
+
+    Used to describe how far the historical monthly balances (derived from the
+    imported loan extracts) actually span, so a validator can see the range::
+
+        {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD",
+         "months": int, "pools": int}
+
+    Returns ``{}`` when the CU has no data or the DB is unavailable.
+    """
+    cu_name = (cu_name or "").strip()
+    if not cu_name:
+        return {}
+    try:
+        cfg_mod = importlib.import_module("cecl_credentials")
+        url = cfg_mod.get_database_url()
+        from sqlalchemy import create_engine, text
+        eng = create_engine(url)
+        with eng.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT MIN(snapshot_date), MAX(snapshot_date), "
+                    "       COUNT(DISTINCT snapshot_date), "
+                    "       COUNT(DISTINCT loan_pool) "
+                    "FROM monthly_loan_data WHERE credit_union = :cu"
+                ),
+                {"cu": cu_name},
+            ).fetchone()
+        if not row or row[0] is None:
+            return {}
+        return {
+            "start": str(row[0]),
+            "end": str(row[1]),
+            "months": int(row[2] or 0),
+            "pools": int(row[3] or 0),
+        }
+    except Exception:
+        return {}
+
+
+def _co_recov_source_group(source: str) -> str:
+    """Map a raw history ``source`` tag to a human-readable origin group."""
+    s = (source or "").strip().lower()
+    if s.startswith("5300"):
+        return "NCUA 5300 Call Report backfill"
+    if s.startswith("monthly"):
+        return "Monthly charge-off / recovery summary files"
+    if s.startswith("workbook"):
+        return "Uploaded historical workbook"
+    if not s:
+        return "Unlabeled source"
+    return source.split(":", 1)[0]
+
+
+def co_recov_coverage_for_cu(cu_name: str) -> dict:
+    """Return DB-stored charge-off / recovery coverage grouped by origin.
+
+    Describes what actually landed in ``loan_code_chargeoff_history`` /
+    ``loan_code_recovery_history`` for the CU, grouped by source (NCUA 5300
+    backfill, monthly summaries, uploaded workbook). Note: for CUs whose
+    charge-offs/recoveries are parsed from files at report time
+    (``historical_file_formats``), that portion is NOT in these tables — the
+    provenance view combines this DB picture with the configured CU files.
+
+    Shape::
+
+        {"chargeoff": {"groups": [{"group","years","total","rows"}, ...],
+                       "year_min": int, "year_max": int, "total": float},
+         "recovery":  {...}}
+
+    Returns ``{}`` on any error / no data.
+    """
+    cu_name = (cu_name or "").strip()
+    if not cu_name:
+        return {}
+    try:
+        cfg_mod = importlib.import_module("cecl_credentials")
+        url = cfg_mod.get_database_url()
+        from sqlalchemy import create_engine, text
+        eng = create_engine(url)
+        out: dict[str, Any] = {}
+        with eng.connect() as conn:
+            for key, tbl, amt in (
+                ("chargeoff", "loan_code_chargeoff_history", "chargeoff_amount"),
+                ("recovery", "loan_code_recovery_history", "recovery_amount"),
+            ):
+                rows = conn.execute(
+                    text(
+                        "SELECT source, "
+                        "       MIN(EXTRACT(YEAR FROM as_of_date))::int, "
+                        "       MAX(EXTRACT(YEAR FROM as_of_date))::int, "
+                        "       COUNT(*), COALESCE(SUM(" + amt + "), 0) "
+                        "FROM " + tbl + " WHERE cu = :cu GROUP BY source"
+                    ),
+                    {"cu": cu_name},
+                ).fetchall()
+                if not rows:
+                    out[key] = {"groups": [], "year_min": None,
+                                "year_max": None, "total": 0.0}
+                    continue
+                agg: dict[str, dict] = {}
+                y_min = None
+                y_max = None
+                total = 0.0
+                for source, ymn, ymx, cnt, amt_sum in rows:
+                    grp = _co_recov_source_group(source)
+                    g = agg.setdefault(
+                        grp, {"group": grp, "year_min": ymn, "year_max": ymx,
+                              "total": 0.0, "rows": 0}
+                    )
+                    if ymn is not None:
+                        g["year_min"] = ymn if g["year_min"] is None else min(g["year_min"], ymn)
+                        y_min = ymn if y_min is None else min(y_min, ymn)
+                    if ymx is not None:
+                        g["year_max"] = ymx if g["year_max"] is None else max(g["year_max"], ymx)
+                        y_max = ymx if y_max is None else max(y_max, ymx)
+                    g["total"] += float(amt_sum or 0)
+                    g["rows"] += int(cnt or 0)
+                    total += float(amt_sum or 0)
+                groups = []
+                for g in agg.values():
+                    yr = ""
+                    if g["year_min"] is not None:
+                        yr = (f"{g['year_min']}" if g["year_min"] == g["year_max"]
+                              else f"{g['year_min']}\u2013{g['year_max']}")
+                    groups.append({"group": g["group"], "years": yr,
+                                   "total": round(g["total"], 2), "rows": g["rows"]})
+                groups.sort(key=lambda x: x["group"])
+                out[key] = {"groups": groups, "year_min": y_min,
+                            "year_max": y_max, "total": round(total, 2)}
+        return out
+    except Exception:
+        return {}
+
+
 def reclassify_loan_pool(
     client_short_name: str,
     from_pool: str,

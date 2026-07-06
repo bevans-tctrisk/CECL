@@ -38,7 +38,7 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
-from cecl_ui.services import balance_check as balance_check_service, chargeoff_hist_processor, co_recov_parser, column_mapping_suggestions, config_service, cu_locator, delinquency_hist_processor, dq_extract_parser, extract_hist_processor, extract_hist_service, geo_service, hist_parser, impaired_parser, monthly_bal_parser, monthly_co_recov_aggregator, pipeline_service, recovery_hist_processor, sample_parser, solr_5300_backfill, solr_5300_co_backfill, solr_5300_delq_backfill, solr_5300_recov_backfill, warm_parser, wizard_drafts
+from cecl_ui.services import balance_check as balance_check_service, chargeoff_hist_processor, co_recov_parser, column_mapping_suggestions, config_service, cu_locator, delinquency_hist_processor, dq_extract_parser, extract_hist_processor, extract_hist_service, geo_service, hist_parser, impaired_parser, monthly_bal_parser, monthly_co_recov_aggregator, pipeline_service, recovery_hist_processor, risk_tier_parser, sample_parser, solr_5300_backfill, solr_5300_co_backfill, solr_5300_delq_backfill, solr_5300_recov_backfill, warm_parser, wizard_drafts
 from cecl_ui.services import admin_defaults
 
 
@@ -359,6 +359,17 @@ def _default_state() -> dict[str, Any]:
         #                              (e.g. AIRES file)
         #   "monthly_balance_sheets" — one balance sheet per month
         "hist_balance_source": "single_workbook",
+        # Historical step — explicit, display-only provenance record for the
+        # monthly historical balances, so a validator can see HOW they were
+        # compiled. When set (e.g. by a setup script that derived balances
+        # from the imported loan-data extracts), it is authoritative for the
+        # "How these balances were compiled" panel; otherwise the panel
+        # derives a best-effort description from ``hist_balance_source``.
+        # Shape: {"method": str, "summary": str, "inputs": [str, ...],
+        #         "coverage": {"start","end","months","pools"},
+        #         "generated_by": str, "validation_hint": str,
+        #         "generated_at": "YYYY-MM-DD..."}
+        "hist_balance_provenance": {},
         # Historical step — state for the "monthly loan-data extracts" source.
         # Populated when hist_balance_source == "monthly_loan_extracts".
         #
@@ -413,6 +424,14 @@ def _default_state() -> dict[str, Any]:
                 # cases where the 5300 categories line up cleanly with
                 # this CU's pools.
                 "mode": "distributed",
+                # When True (the default), the wizard automatically runs
+                # the 5300 balance backfill once, when the user leaves the
+                # Historical Balances step, so filling early quarters from
+                # the 5300 is the out-of-the-box behavior. The analyst can
+                # untick it on that step to opt out, and the manual "Run"
+                # button still works either way.
+                "enabled": True,
+                "auto_ran": False,
                 "last_test": None,
                 "last_run": None,
             },
@@ -521,6 +540,75 @@ def _mark_step_user_completed(state: dict[str, Any], step_key: str) -> None:
         done.append(step_key)
 
 
+# Provenance state keys that must never be silently dropped by a save from a
+# session that predates them (see _preserve_provenance_records).
+_PROVENANCE_KEYS = ("hist_balance_provenance", "co_recov_provenance")
+
+
+def _provenance_record_has_content(key: str, rec: Any) -> bool:
+    """True when ``rec`` is a populated provenance record for ``key``."""
+    if not isinstance(rec, dict) or not rec:
+        return False
+    if key == "co_recov_provenance":
+        for side in ("chargeoff", "recovery"):
+            sub = rec.get(side) or {}
+            if isinstance(sub, dict) and (sub.get("method") or sub.get("no_recoveries")):
+                return True
+        return False
+    # hist_balance_provenance and future single-record keys.
+    return bool(rec.get("method"))
+
+
+def _preserve_provenance_records(state: dict[str, Any]) -> None:
+    """Permanent guard against silently dropping provenance records.
+
+    A save from an in-memory session that predates a provenance record (e.g.
+    one written straight to the draft/config by a setup or backfill script)
+    would otherwise overwrite the disk draft — and any regenerated YAML — with
+    a state that no longer carries the record. Before persisting, restore any
+    provenance record the live state is missing from the still-current on-disk
+    draft, falling back to the saved YAML config. Preserve-only: never clears a
+    record the session already holds, and only reads disk (no recompute), so it
+    is safe to call on every save.
+    """
+    missing = [
+        k for k in _PROVENANCE_KEYS
+        if not _provenance_record_has_content(k, state.get(k))
+    ]
+    if not missing:
+        return
+    try:
+        ws = current_app.config["WORKSPACE_ROOT"]
+    except Exception:  # noqa: BLE001
+        return
+    slug = (state.get("short_name") or state.get("credit_union") or "").strip()
+    if not slug:
+        return
+    # Source 1: the current on-disk draft (about to be overwritten).
+    disk: dict[str, Any] | None = None
+    try:
+        disk = wizard_drafts.load_draft(
+            ws, slug, model=state.get("model") or "migration"
+        )
+    except Exception:  # noqa: BLE001
+        disk = None
+    # Source 2: the saved YAML config (loaded lazily, only if still needed).
+    saved: dict[str, Any] | None = None
+    short = (state.get("short_name") or "").strip()
+    for key in missing:
+        if isinstance(disk, dict) and _provenance_record_has_content(key, disk.get(key)):
+            state[key] = disk[key]
+            continue
+        if short:
+            if saved is None:
+                try:
+                    saved = config_service.load_client_config(ws, short) or {}
+                except Exception:  # noqa: BLE001
+                    saved = {}
+            if _provenance_record_has_content(key, saved.get(key)):
+                state[key] = saved[key]
+
+
 def _save_state(state: dict[str, Any]) -> None:
     # Detect a "Save & Next"-style POST and record the user's explicit
     # done-signal for the active step. This drives the green ✓ on the
@@ -544,6 +632,9 @@ def _save_state(state: dict[str, Any]) -> None:
     # failure must not block the request.
     if not (state.get("short_name") or state.get("credit_union")):
         return
+    # Permanent guard: don't let a stale session drop provenance records that
+    # already exist on disk (draft or saved config) before we overwrite them.
+    _preserve_provenance_records(state)
     try:
         wizard_drafts.save_draft(
             current_app.config["WORKSPACE_ROOT"],
@@ -1441,7 +1532,74 @@ def step2_warm():
             # Move on to the dedicated Loan Code Mapping step.
             return redirect(url_for("setup.step4_pools"))
 
+    changed = _apply_score_based_risk_default(state)
+    if changed:
+        _save_state(state)
+        flash(
+            "Defaulted "
+            + ", ".join(changed)
+            + " to <strong>No (single line)</strong> because "
+            + ("this pool has" if len(changed) == 1 else "these pools have")
+            + " no credit scores. Change any back to per-grade below if needed.",
+            "info",
+        )
     return render_template("setup/step2_warm.html", **_wizard_ctx("warm"))
+
+
+# Pools whose scored balance is below this fraction of their total balance are
+# treated as having "no credit scores" and default to single-line
+# (risk_rated=False) in Step 2. A small non-zero threshold absorbs a handful of
+# stray scores in an otherwise unscored pool (e.g. one scored loan out of
+# hundreds), matching the "all balances in Not Reported" case.
+_NO_SCORE_SINGLE_LINE_FRAC = 0.01
+
+
+def _apply_score_based_risk_default(state: dict[str, Any]) -> list[str]:
+    """Default pools with (near-)zero credit-score coverage to single-line.
+
+    For any pool whose imported loans carry essentially no credit scores, set
+    ``risk_rated=False`` so Step 2 defaults it to a single line instead of a
+    per-grade breakout. Runs at most once per draft (guarded by
+    ``_score_default_applied``) so it never fights a manual choice the user
+    makes afterward, and only ever flips a scored-out pool *off* — scored pools
+    are left untouched. No-ops when the CU has no imported loan data yet, so it
+    naturally activates on the first Step 2 visit after an import.
+
+    Returns the list of pool names that were flipped (for a flash message).
+    """
+    if state.get("_score_default_applied"):
+        return []
+    pool_settings = state.get("pool_settings") or []
+    if not pool_settings:
+        return []
+    cu = (state.get("credit_union") or "").strip()
+    if not cu:
+        return []
+    try:
+        coverage = pipeline_service.pool_score_coverage_for_cu(cu)
+    except Exception:  # noqa: BLE001
+        coverage = {}
+    if not coverage:
+        # No imported data to judge by — leave defaults and try again on the
+        # next visit (once the loans have been imported).
+        return []
+    cov_ci = {str(k).strip().lower(): v for k, v in coverage.items()}
+    changed: list[str] = []
+    for p in pool_settings:
+        nm = (p.get("name") or "").strip()
+        if not nm or nm.lower() in ("ignore", "exclude"):
+            continue
+        info = cov_ci.get(nm.lower())
+        if not info or info.get("total", 0) <= 0:
+            continue
+        if info["frac"] < _NO_SCORE_SINGLE_LINE_FRAC and p.get("risk_rated"):
+            p["risk_rated"] = False
+            p["brr"] = False
+            changed.append(nm)
+    # Data was available, so this decision is final — don't re-run and clobber
+    # the user's subsequent edits.
+    state["_score_default_applied"] = True
+    return changed
 
 
 # =================================================================
@@ -1536,6 +1694,17 @@ def step_loan_pools():
         if action in ("next", "skip"):
             return redirect(url_for("setup.step4_pools"))
 
+    changed = _apply_score_based_risk_default(state)
+    if changed:
+        _save_state(state)
+        flash(
+            "Defaulted "
+            + ", ".join(changed)
+            + " to <strong>No (single line)</strong> because "
+            + ("this pool has" if len(changed) == 1 else "these pools have")
+            + " no credit scores. Change any back to per-grade below if needed.",
+            "info",
+        )
     return render_template("setup/step_loan_pools.html", **_wizard_ctx("loan_pools"))
 
 
@@ -5295,6 +5464,431 @@ def _aggregate_dq_history_by_pool(
     }
 
 
+# =================================================================
+# Historical-balance provenance — surface HOW the monthly historical
+# balances were compiled so an analyst can validate them.
+# =================================================================
+# Plain-English descriptions for each user-selectable source. The
+# "derived_from_loan_extracts" method is not user-selectable; it is
+# recorded explicitly (e.g. by a setup script) when the balances were
+# computed from the imported loan-data snapshots rather than uploaded.
+_HIST_SOURCE_DESCRIPTIONS = {
+    "single_workbook": (
+        "Uploaded spreadsheet",
+        "Read directly from a single workbook that lists each pool's balance "
+        "by month.",
+    ),
+    "monthly_loan_extracts": (
+        "One loan-data extract per month",
+        "Each month's pool balance is the sum of the loan balances in that "
+        "month's loan-data extract file.",
+    ),
+    "monthly_balance_sheets": (
+        "One balance sheet per month",
+        "Each month's pool balance is read from that month's balance-sheet "
+        "file.",
+    ),
+    "annual_balance_sheets": (
+        "One balance sheet per year",
+        "Each year's pool balance is read from that year's balance-sheet file.",
+    ),
+    "derived_from_loan_extracts": (
+        "Derived from imported loan extracts",
+        "Not uploaded as a balance file. Each pool's monthly balance was "
+        "computed as the sum of current_balance for all loans in that pool, "
+        "from that month's imported loan-data extract (monthly_loan_data).",
+    ),
+}
+
+
+def build_derived_loan_extract_provenance(cu_name: str) -> dict[str, Any]:
+    """Build the provenance record for balances derived from loan extracts.
+
+    Shared by the setup wizard and the balance-build scripts so scripted
+    setups record the same honest, validator-friendly provenance. Queries the
+    DB for the real coverage (date range / months / pools).
+    """
+    label, summary = _HIST_SOURCE_DESCRIPTIONS["derived_from_loan_extracts"]
+    coverage = {}
+    try:
+        coverage = pipeline_service.balance_coverage_for_cu(cu_name) or {}
+    except Exception:  # noqa: BLE001
+        coverage = {}
+    from datetime import datetime as _dt
+    return {
+        "method": "derived_from_loan_extracts",
+        "label": label,
+        "summary": summary,
+        "inputs": ["Imported monthly loan-data extracts (monthly_loan_data)"],
+        "coverage": coverage,
+        "generated_by": "Auto-derived during setup (not an uploaded balance file)",
+        "validation_hint": (
+            "To validate a cell: open that month's loan-data extract, filter to "
+            "the pool, and sum the current-balance column — it should equal the "
+            "balance shown here."
+        ),
+        "generated_at": _dt.now().strftime("%Y-%m-%d %H:%M"),
+    }
+
+
+def _hist_balance_provenance_view(state: dict[str, Any]) -> dict[str, Any]:
+    """Return a display-ready provenance record for the Historical Balances
+    step. An explicit ``state['hist_balance_provenance']`` always wins (it is
+    the honest record of how the data was actually produced); otherwise a
+    best-effort description is derived from the configured
+    ``hist_balance_source``. ``recorded`` is False when the source has not been
+    confirmed, so the UI can prompt the analyst instead of masking the gap.
+    """
+    explicit = state.get("hist_balance_provenance")
+    if isinstance(explicit, dict) and explicit.get("method"):
+        view = dict(explicit)
+        view.setdefault("recorded", True)
+        if not view.get("coverage"):
+            try:
+                view["coverage"] = pipeline_service.balance_coverage_for_cu(
+                    (state.get("credit_union") or "").strip()
+                ) or {}
+            except Exception:  # noqa: BLE001
+                view["coverage"] = {}
+        return view
+
+    # Fallback: the live session may predate a provenance record that was
+    # written straight to the saved config (e.g. by a setup/backfill script,
+    # or a prior save the current session never reloaded). Read it back from
+    # the persisted YAML so the panel still reflects the real, recorded source
+    # without forcing the analyst to re-resume the draft.
+    short = (state.get("short_name") or "").strip()
+    if short:
+        try:
+            saved = config_service.load_client_config(
+                current_app.config["WORKSPACE_ROOT"], short
+            ) or {}
+        except Exception:  # noqa: BLE001
+            saved = {}
+        saved_prov = saved.get("hist_balance_provenance")
+        if isinstance(saved_prov, dict) and saved_prov.get("method"):
+            view = dict(saved_prov)
+            view["recorded"] = True
+            if not view.get("coverage"):
+                try:
+                    view["coverage"] = pipeline_service.balance_coverage_for_cu(
+                        (state.get("credit_union") or "").strip()
+                    ) or {}
+                except Exception:  # noqa: BLE001
+                    view["coverage"] = {}
+            return view
+
+    source = (state.get("hist_balance_source") or "").strip()
+    desc = _HIST_SOURCE_DESCRIPTIONS.get(source)
+    # Treat the unconfigured default as "not recorded": single_workbook is the
+    # initial value, so if no workbook is actually attached we can't honestly
+    # claim it — flag it so the analyst confirms the real source.
+    mb = state.get("monthly_bal") or {}
+    has_single_wb = bool(mb.get("saved_path") or mb.get("filename"))
+    if source == "single_workbook" and not has_single_wb:
+        return {
+            "method": "",
+            "recorded": False,
+            "label": "Source not recorded",
+            "summary": (
+                "The source of these historical balances has not been "
+                "confirmed. Choose how they were compiled below so a reviewer "
+                "can validate them."
+            ),
+            "inputs": [],
+            "coverage": {},
+        }
+    if not desc:
+        return {"method": source, "recorded": False, "label": "",
+                "summary": "", "inputs": [], "coverage": {}}
+    label, summary = desc
+    return {
+        "method": source,
+        "recorded": True,
+        "label": label,
+        "summary": summary,
+        "inputs": [],
+        "coverage": {},
+        "validation_hint": "",
+    }
+
+
+# =================================================================
+# Charge-off / Recovery provenance — mirror of the balance panel so an
+# analyst can see (and validate) HOW the historical charge-offs and
+# recoveries were compiled: CU-provided files, NCUA 5300 backfill,
+# monthly summaries, or a mix.
+# =================================================================
+def _co_recov_cu_file_inputs(state: dict[str, Any], section: str) -> list[dict[str, str]]:
+    """Return the CU-provided file layouts feeding this section (co|recov).
+
+    Reads the wizard-state shape first (``co_recov_formats`` /
+    ``co_columns`` / ``recov_columns``); falls back to the saved config
+    shape (``historical_file_formats``) so a stale session still shows the
+    persisted source.
+    """
+    want = "co_columns" if section == "co" else "recov_columns"
+    inputs: list[dict[str, str]] = []
+    for f in (state.get("co_recov_formats") or []):
+        cols = f.get(want) or {}
+        if (cols.get("amount_col") is not None
+                or cols.get("code_static")
+                or cols.get("code_col") is not None):
+            inputs.append({
+                "name": f.get("name") or "(unnamed format)",
+                "file_pattern": f.get("file_pattern") or "",
+            })
+    if inputs:
+        return inputs
+    single = state.get(want) or {}
+    if single.get("amount_col") is not None:
+        inputs.append({
+            "name": "Charge-off file" if section == "co" else "Recovery file",
+            "file_pattern": "",
+        })
+    if inputs:
+        return inputs
+    # Fallback: saved config's historical_file_formats.
+    short = (state.get("short_name") or "").strip()
+    if not short:
+        return inputs
+    try:
+        cfg = config_service.load_client_config(
+            current_app.config["WORKSPACE_ROOT"], short
+        ) or {}
+    except Exception:  # noqa: BLE001
+        return inputs
+    hff = cfg.get("historical_file_formats") or {}
+    dst = "chargeoff" if section == "co" else "recovery"
+    formats = hff.get("formats")
+    if isinstance(formats, list) and formats:
+        for f in formats:
+            if f.get(dst):
+                inputs.append({
+                    "name": f.get("name") or "(unnamed format)",
+                    "file_pattern": f.get("file_pattern") or "",
+                })
+    elif hff.get(dst):
+        inputs.append({
+            "name": "Charge-off file" if section == "co" else "Recovery file",
+            "file_pattern": "",
+        })
+    return inputs
+
+
+def _co_recov_provenance_view(state: dict[str, Any], section: str) -> dict[str, Any]:
+    """Return a display-ready provenance record for the CO / recovery step.
+
+    Combines the CU-provided file layouts with the DB-stored origins (NCUA
+    5300 backfill, monthly summaries, uploaded workbook) so a validator can
+    see where each part of the history came from and how to tie it out.
+    ``recorded`` is False only when nothing can be stated.
+    """
+    is_recov = (section == "recov")
+    noun = "recovery" if is_recov else "charge-off"
+
+    if is_recov and state.get("no_hist_recoveries"):
+        return {
+            "recorded": True,
+            "no_recoveries": True,
+            "label": "No historical recoveries",
+            "summary": ("This credit union was marked as having no historical "
+                        "recoveries, so none are included in the analysis."),
+            "cu_files": [],
+            "db_sources": [],
+            "validation_hint": "",
+        }
+
+    cu_name = (state.get("credit_union") or "").strip()
+    cu_files = _co_recov_cu_file_inputs(state, section)
+
+    cov = {}
+    try:
+        cov = pipeline_service.co_recov_coverage_for_cu(cu_name) or {}
+    except Exception:  # noqa: BLE001
+        cov = {}
+    sec_cov = cov.get("recovery" if is_recov else "chargeoff") or {}
+    db_groups = [
+        {
+            "label": g.get("group") or "",
+            "years": g.get("years") or "",
+            "total": float(g.get("total") or 0),
+        }
+        for g in (sec_cov.get("groups") or [])
+        if float(g.get("total") or 0) or (g.get("rows") or 0)
+    ]
+
+    has_cu = bool(cu_files)
+    has_5300 = any("5300" in g["label"] for g in db_groups)
+    has_db = bool(db_groups)
+
+    if not has_cu and not has_db:
+        return {
+            "recorded": False,
+            "label": "Source not recorded",
+            "summary": (f"The source of these historical {noun}s has not been "
+                        "confirmed. Configure it below so a reviewer can "
+                        "validate the numbers."),
+            "cu_files": [],
+            "db_sources": [],
+        }
+
+    # Method + human label.
+    if has_cu and has_5300:
+        method = "cu_files+5300"
+        label = f"CU-provided {noun} files + NCUA 5300 backfill"
+    elif has_cu and has_db:
+        method = "cu_files+db"
+        label = f"CU-provided {noun} files + supplemental backfill"
+    elif has_cu:
+        method = "cu_files"
+        label = f"CU-provided {noun} files"
+    elif has_5300:
+        method = "5300_backfill"
+        label = "NCUA 5300 Call Report backfill"
+    else:
+        method = "db"
+        label = "Backfilled from stored history"
+
+    parts: list[str] = []
+    if has_cu:
+        parts.append(
+            f"The credit union's own {noun} file(s) are parsed at report time "
+            f"(each row's amount summed by loan pool and year)."
+        )
+    if has_db:
+        parts.append(
+            "Years not covered by the CU files are filled from stored history "
+            "(e.g. the NCUA 5300 Call Report backfill)."
+        )
+    if has_cu and has_db:
+        parts.append(
+            "Where both exist, the CU's own files take precedence per year; the "
+            "backfill only fills the years the CU files don't cover."
+        )
+    summary = " ".join(parts)
+
+    hint_parts: list[str] = []
+    if has_cu:
+        hint_parts.append(
+            f"open the matching CU {noun} file for a period, filter to the loan "
+            f"type/pool, and sum the {noun} amount column"
+        )
+    if has_5300:
+        hint_parts.append(
+            f"for backfilled years, tie to the CU's NCUA 5300 Call Report "
+            f"({noun} schedule)"
+        )
+    validation_hint = ("To validate a year: " + "; ".join(hint_parts) + "."
+                       if hint_parts else "")
+
+    return {
+        "recorded": True,
+        "method": method,
+        "label": label,
+        "summary": summary,
+        "cu_files": cu_files,
+        "db_sources": db_groups,
+        "validation_hint": validation_hint,
+    }
+
+
+def _uploaded_balance_periods(state: dict[str, Any]) -> set[str]:
+    """Month-end periods (ISO) the CU already has real balance data for, read
+    from its configured historical-balance source. Used so the auto 5300
+    backfill only fills EARLIER quarters (annual / monthly balance sheets;
+    single_workbook returns empty and relies on the report's workbook-wins
+    merge)."""
+    mb = state.get("monthly_bal") or {}
+    source = state.get("hist_balance_source") or ""
+    label_to_pool = mb.get("pool_map") or {}
+    try:
+        if source == "annual_balance_sheets":
+            ann = monthly_bal_parser.pool_balances_for_per_year_files(
+                mb.get("year_files") or [], mb.get("per_year_layout") or {},
+                label_to_pool, exclude_labels=mb.get("exclude_labels") or [])
+            return set((ann.get("by_period") or {}).keys())
+        if source == "monthly_balance_sheets":
+            pm = monthly_bal_parser.pool_balances_for_per_month_files(
+                mb.get("monthly_files") or [], mb.get("per_month_layout") or {},
+                label_to_pool, exclude_labels=mb.get("exclude_labels") or [])
+            return set((pm.get("by_period") or {}).keys())
+    except Exception:  # noqa: BLE001
+        return set()
+    return set()
+
+
+def _auto_run_5300_balance_backfill(state: dict[str, Any]) -> None:
+    """Default behavior: when the analyst leaves the Historical Balances step,
+    automatically fill the earlier quarters' balances from the NCUA 5300
+    (distributed mode) — so 5300 backfill is the out-of-the-box default rather
+    than a button the analyst has to remember. Opt out via
+    ``solr_backfill['enabled'] = False``. Runs at most once per draft, only in
+    distributed mode, only when the prerequisites (charter, period, a
+    computable pool distribution) are present, and never blocks navigation.
+    The manual "Run" button remains available for precise control.
+    """
+    he = state.get("hist_extracts") or {}
+    sb = he.get("solr_backfill") or {}
+    if not sb.get("enabled", True) or sb.get("auto_ran"):
+        return
+    if (sb.get("mode") or "distributed") != "distributed":
+        return  # per-loan-code is a manual special case
+    lr = sb.get("last_run") or {}
+    if isinstance(lr, dict) and lr.get("ok"):
+        return  # already backfilled (e.g. manual run)
+    cu = (state.get("credit_union") or "").strip()
+    try:
+        charter = int(re.sub(r"\D", "", state.get("charter_number") or ""))
+    except (TypeError, ValueError):
+        charter = 0
+    period = (he.get("target_period") or "").strip()
+    months = int(he.get("history_months") or 84)
+    if not (cu and charter and period):
+        return  # not enough info yet — analyst can run it manually later
+    dist = _earliest_month_pool_distribution(state)
+    if not dist.get("ok") or not dist.get("pool_distribution"):
+        return  # no distribution (e.g. no uploaded balance file) — skip quietly
+    existing: set[str] = set()
+    try:
+        hv = extract_hist_processor.history_matrix(cu)
+        existing = set((hv or {}).get("months") or [])
+    except Exception:  # noqa: BLE001
+        existing = set()
+    existing |= _uploaded_balance_periods(state)
+    sb["auto_ran"] = True
+    try:
+        res = solr_5300_backfill.backfill_missing_quarters_distributed(
+            cu, charter, sb.get("solr_url"), sb.get("core"),
+            period, months,
+            pool_distribution=dist["pool_distribution"],
+            existing_dates=existing,
+            source_period_iso=dist.get("period") or "",
+        )
+    except Exception as exc:  # noqa: BLE001
+        flash(
+            "Auto 5300 balance backfill was skipped (" f"{exc}"
+            "). You can run it manually from the Historical Balances step.",
+            "warning",
+        )
+        _save_state(state)
+        return
+    sb["last_run"] = res
+    _save_state(state)
+    if res.get("ok"):
+        filled = len(res.get("months_filled") or [])
+        if filled:
+            flash(
+                f"Automatically backfilled {filled} earlier month(s) of pool "
+                f"balances from the NCUA 5300 (distributed by the "
+                f"{dist.get('period')} pool mix). Untick 'Auto-fill from 5300' "
+                "on the Historical Balances step to disable this.",
+                "success",
+            )
+    else:
+        flash(f"Auto 5300 balance backfill: {res.get('error')}", "warning")
+
+
 @setup_bp.route("/step/historical", methods=["GET", "POST"])
 @setup_bp.route("/step/co-history", methods=["GET", "POST"],
                 endpoint="step3a_co_history")
@@ -6196,6 +6790,23 @@ def step3_historical():
                 flash(f"5300 backfill mode set to: {label}.", "success")
             else:
                 flash("Invalid backfill mode.", "error")
+
+        elif action == "set_solr_backfill_enabled":
+            he = _ensure_hist_extracts(state)
+            sb = he["solr_backfill"]
+            enabled = request.form.get("solr_backfill_enabled") == "on"
+            sb["enabled"] = enabled
+            # Re-arm the one-shot auto-run when re-enabled so toggling it back
+            # on actually triggers a backfill on the next "next".
+            if enabled:
+                sb["auto_ran"] = False
+            _save_state(state)
+            flash(
+                "Auto-fill balances from NCUA 5300: "
+                + ("ON — will run when you continue past this step."
+                   if enabled else "OFF."),
+                "success",
+            )
 
         elif action == "test_solr_fetch":
             he = _ensure_hist_extracts(state)
@@ -7380,6 +7991,11 @@ def step3_historical():
                 flash(f"Removed {name}.", "success")
 
         elif action in ("next", "skip"):
+            # Leaving the Historical Balances step: auto-fill earlier quarters
+            # from the NCUA 5300 by default (opt-out on that step). No-op for
+            # the CO / recovery sub-steps and when already run / disabled.
+            if section == "balances":
+                _auto_run_5300_balance_backfill(state)
             _save_state(state)
             return redirect(url_for(next_endpoint))
 
@@ -7792,6 +8408,9 @@ def step3_historical():
         co_layouts=co_layouts,
         recov_layouts=recov_layouts,
         section=section,
+        hist_balance_provenance=_hist_balance_provenance_view(state),
+        co_provenance=_co_recov_provenance_view(state, "co"),
+        recov_provenance=_co_recov_provenance_view(state, "recov"),
         **_wizard_ctx(active_key),
     )
 
@@ -11534,6 +12153,67 @@ def step5_grades():
                 )
             return redirect(url_for("setup.step5_grades"))
 
+        # Import risk tiers / FICO ranges from an uploaded CU document
+        # (.docx or .xlsx). Filenames vary widely between CUs, so the analyst
+        # uploads the file here; we parse it tolerantly and pre-fill the grade
+        # bands for confirmation. Reserve rates are never in these documents,
+        # so they're preserved (by label) or left at 0 for the user to enter.
+        if action == "parse_risk_tiers":
+            f = request.files.get("risk_tier_file")
+            if not f or not f.filename:
+                flash("Choose a risk-tier document (.docx or .xlsx) to upload.", "error")
+                return redirect(url_for("setup.step5_grades"))
+            dest = _SAMPLE_DIR / "risk_tiers"
+            dest.mkdir(parents=True, exist_ok=True)
+            fn = secure_filename(f.filename) or "risk_tiers.docx"
+            target = dest / fn
+            try:
+                f.save(target)
+                result = risk_tier_parser.parse_risk_tiers(target)
+            except Exception as exc:  # noqa: BLE001
+                flash(f"Could not read the uploaded document: {exc}", "error")
+                return redirect(url_for("setup.step5_grades"))
+            if not result.get("ok"):
+                flash(result.get("error") or "Could not parse the document.", "error")
+                return redirect(url_for("setup.step5_grades"))
+            existing_rates = {
+                (g.get("label") or "").strip().lower(): float(g.get("reserve_rate") or 0.0)
+                for g in (state.get("credit_grades") or [])
+            }
+            tiers = sorted(
+                result["tiers"],
+                key=lambda t: (t["min_score"] if t["min_score"] is not None else -1),
+                reverse=True,
+            )
+            grades: list[dict[str, Any]] = []
+            for i, t in enumerate(tiers):
+                mn = t.get("min_score")
+                mx = t.get("max_score")
+                if mx is None:
+                    if i == 0:
+                        mx = score_ceiling
+                    else:
+                        prev_min = tiers[i - 1].get("min_score")
+                        mx = (prev_min - 1) if prev_min is not None else score_ceiling
+                if i == len(tiers) - 1 or mn is None:
+                    mn = score_floor
+                grades.append({
+                    "label": t["label"],
+                    "min_score": mn,
+                    "max_score": mx,
+                    "reserve_rate": existing_rates.get(t["label"].strip().lower(), 0.0),
+                })
+            state["credit_grades"] = grades
+            _save_state(state)
+            flash(
+                f"Imported {len(grades)} tier(s) from {fn}. Review the ranges "
+                "and enter a reserve rate for each before saving.",
+                "success",
+            )
+            for w in (result.get("warnings") or []):
+                flash(w, "info")
+            return redirect(url_for("setup.step5_grades"))
+
         # Save-progress hijacks: the stepper submits THIS form (via
         # ``form="step-form"``) so any in-DOM edits to the BRR table or
         # the no-score label persist. We DON'T re-validate / overwrite
@@ -12792,6 +13472,10 @@ def step10_review():
             "info",
         )
         return redirect(url_for("scale_setup.step_review"))
+    # Permanent guard: restore any provenance record the live session is
+    # missing (from the on-disk draft or saved config) before we build and
+    # persist the YAML, so a stale session can't drop it from the final config.
+    _preserve_provenance_records(state)
     yaml_dict = config_service.build_yaml_from_wizard(state)
     import yaml as _yaml
     yaml_text = _yaml.safe_dump(

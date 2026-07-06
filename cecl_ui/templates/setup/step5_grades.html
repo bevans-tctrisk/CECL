@@ -25,6 +25,27 @@
     <a href="{{ url_for('admin.index') }}">Admin page</a>.
   </p>
 
+  <div style="margin:14px 0; padding:12px 14px; border:1px solid #b6d4e6;
+              border-radius:6px; background:#eef6fb;">
+    <div style="font-weight:600; color:#20628a; margin-bottom:4px;">
+      &#128196; Import tiers from the CU's risk-tier document
+    </div>
+    <p class="muted" style="margin:0 0 8px;">
+      If the credit union supplied a score-range / risk-tier document
+      (Word <code>.docx</code> or Excel <code>.xlsx</code>), upload it here and
+      the wizard will read the tier labels and score ranges into the table
+      below for you to confirm. Reserve rates aren't in these documents &mdash;
+      you'll still enter those. The file can be named anything.
+    </p>
+    <form method="post" enctype="multipart/form-data"
+          style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <input type="hidden" name="action" value="parse_risk_tiers">
+      <input type="file" name="risk_tier_file" accept=".docx,.xlsx,.xlsm"
+             required style="max-width:100%;">
+      <button class="btn btn-secondary" type="submit">Read tiers from file</button>
+    </form>
+  </div>
+
   {% set warm_grades = (state.warm and state.warm.grades) or [] %}
   {% if warm_grades %}
     <div class="alert alert-info" style="margin-bottom:16px;">

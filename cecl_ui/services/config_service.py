@@ -771,6 +771,80 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             mb_block["notes"] = mb["notes"]
         cfg["monthly_balance"] = mb_block
 
+    # Historical-balance provenance — a display-only record of HOW the monthly
+    # historical balances were compiled, so a reviewer of the saved report can
+    # see and validate the source (e.g. "derived from the imported loan
+    # extracts" vs. an uploaded balance workbook). Persisted verbatim from the
+    # wizard state; only emitted when a method was recorded.
+    prov = state.get("hist_balance_provenance") or {}
+    if isinstance(prov, dict) and prov.get("method"):
+        prov_block: dict[str, Any] = {"method": str(prov["method"])}
+        for k in ("label", "summary", "generated_by", "validation_hint",
+                  "generated_at"):
+            if prov.get(k):
+                prov_block[k] = str(prov[k])
+        inputs = [str(x) for x in (prov.get("inputs") or []) if str(x).strip()]
+        if inputs:
+            prov_block["inputs"] = inputs
+        cov = prov.get("coverage") or {}
+        if isinstance(cov, dict) and cov:
+            cov_clean: dict[str, Any] = {}
+            for ck in ("start", "end"):
+                if cov.get(ck):
+                    cov_clean[ck] = str(cov[ck])
+            for ck in ("months", "pools"):
+                try:
+                    if cov.get(ck) is not None:
+                        cov_clean[ck] = int(cov[ck])
+                except (TypeError, ValueError):
+                    pass
+            if cov_clean:
+                prov_block["coverage"] = cov_clean
+        cfg["hist_balance_provenance"] = prov_block
+
+    # Charge-off / recovery provenance — display-only record of HOW the
+    # historical charge-offs and recoveries were compiled (CU files, NCUA
+    # 5300 backfill, or a mix), so the saved report carries a validator-facing
+    # trail. Passed through verbatim from wizard state when present.
+    crp = state.get("co_recov_provenance") or {}
+    if isinstance(crp, dict) and crp:
+        crp_block: dict[str, Any] = {}
+        for side in ("chargeoff", "recovery"):
+            rec = crp.get(side) or {}
+            if not isinstance(rec, dict) or not (rec.get("method") or rec.get("no_recoveries")):
+                continue
+            side_block: dict[str, Any] = {}
+            for k in ("method", "label", "summary", "validation_hint"):
+                if rec.get(k):
+                    side_block[k] = str(rec[k])
+            if rec.get("no_recoveries"):
+                side_block["no_recoveries"] = True
+            cu_files = [
+                {"name": str(f.get("name") or ""),
+                 "file_pattern": str(f.get("file_pattern") or "")}
+                for f in (rec.get("cu_files") or []) if f.get("name")
+            ]
+            if cu_files:
+                side_block["cu_files"] = cu_files
+            db_src = []
+            for s in (rec.get("db_sources") or []):
+                entry = {"label": str(s.get("label") or "")}
+                if s.get("years"):
+                    entry["years"] = str(s["years"])
+                try:
+                    if s.get("total") is not None:
+                        entry["total"] = round(float(s["total"]), 2)
+                except (TypeError, ValueError):
+                    pass
+                if entry["label"]:
+                    db_src.append(entry)
+            if db_src:
+                side_block["db_sources"] = db_src
+            if side_block:
+                crp_block[side] = side_block
+        if crp_block:
+            cfg["co_recov_provenance"] = crp_block
+
     return cfg
 
 
