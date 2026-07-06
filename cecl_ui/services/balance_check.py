@@ -241,6 +241,94 @@ def canonical_pool_order(state: dict[str, Any]) -> list[str]:
     return out
 
 
+def _loan_balances_from_db(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Fallback loan-side balances sourced from the imported ``monthly_loan_data``
+    DB snapshot, for CUs whose wizard draft has no readable sample loan files
+    (e.g. a script-built config where each extract entry's ``path`` is absent).
+
+    Resolves the snapshot as the latest on/before the Report Period (or the
+    latest available for the CU), sums ``current_balance`` per ``loan_pool``,
+    and returns the same shape as :func:`loan_balances_by_pool`. Returns
+    ``None`` when the CU/DB/snapshot can't be resolved so the caller keeps its
+    own "no extracts" error.
+    """
+    cu = (state.get("credit_union") or "").strip()
+    if not cu:
+        return None
+    try:
+        from sqlalchemy import create_engine, text
+        from cecl_credentials import get_database_url
+        engine = create_engine(get_database_url())
+    except Exception:  # noqa: BLE001
+        return None
+    cutoff = _report_period_cutoff(state)
+    default_pool = (state.get("default_pool") or "Other/Uncategorized").strip()
+    try:
+        with engine.connect() as conn:
+            snap = None
+            if cutoff:
+                snap = conn.execute(
+                    text("SELECT MAX(snapshot_date) FROM monthly_loan_data "
+                         "WHERE credit_union=:c AND snapshot_date<=:cut"),
+                    {"c": cu, "cut": cutoff},
+                ).scalar()
+            if not snap:
+                snap = conn.execute(
+                    text("SELECT MAX(snapshot_date) FROM monthly_loan_data "
+                         "WHERE credit_union=:c"),
+                    {"c": cu},
+                ).scalar()
+            if not snap:
+                return None
+            rows = conn.execute(
+                text("SELECT loan_pool, SUM(current_balance) AS t, "
+                     "COUNT(*) AS n FROM monthly_loan_data "
+                     "WHERE credit_union=:c AND snapshot_date=:s "
+                     "GROUP BY loan_pool"),
+                {"c": cu, "s": snap},
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        return None
+    if not rows:
+        return None
+    by_pool: dict[str, float] = {}
+    default_total = 0.0
+    grand_total = 0.0
+    row_count = 0
+    for pool, t, n in rows:
+        name = str(pool or "").strip()
+        if name in ("Ignore", "Exclude"):
+            continue
+        v = float(t or 0.0)
+        row_count += int(n or 0)
+        grand_total += v
+        if name == default_pool:
+            default_total += v
+        else:
+            by_pool[name] = by_pool.get(name, 0.0) + v
+    snap_str = str(snap)[:10]
+    return {
+        "ok": True,
+        "error": None,
+        "by_pool": by_pool,
+        "by_pool_code": {},
+        "default_total": default_total,
+        "file_count": 0,
+        "row_count": row_count,
+        "files": [{
+            "name": f"Imported snapshot {snap_str} (monthly_loan_data)",
+            "rows": row_count,
+            "total": grand_total,
+            "current_balance_col": "current_balance (DB)",
+            "loan_pool_code_col": "loan_pool (DB)",
+            "error": None,
+        }],
+        "unmapped_codes": [],
+        "source": "db",
+        "period": snap_str,
+    }
+
+
 def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
     """Sum ``current_balance`` per mapped pool across all loan-data extracts.
 
@@ -316,6 +404,9 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
                 "unmapped_codes": []}
 
     if not files:
+        db = _loan_balances_from_db(state)
+        if db is not None:
+            return db
         return {"ok": False, "error":
                 "No loan-data extracts have been uploaded yet.",
                 "by_pool": {}, "by_pool_code": {}, "default_total": 0.0,
@@ -410,6 +501,15 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
                                "current_balance_col": cb_col_display,
                                "loan_pool_code_col": pool_col_display,
                                "error": None})
+
+    # If every candidate file was unreadable (e.g. a script-built config
+    # whose sample paths are absent, or archived-away uploads), fall back to
+    # the imported DB snapshot so the reconciliation still shows real
+    # per-pool loan balances instead of a blank column.
+    if total_rows == 0 and not by_pool and not default_total:
+        db = _loan_balances_from_db(state)
+        if db is not None:
+            return db
 
     # Sort each pool's code breakdown by descending balance.
     by_pool_code_sorted: dict[str, list[tuple[str, float]]] = {
