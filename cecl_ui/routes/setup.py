@@ -10410,9 +10410,13 @@ def step2_files():
     sample_loan_files = (
         (state.get("sample_uploads") or {}).get("loan_data_files") or []
     )
-    sample_loan_name = (
-        Path(sample_loan_files[-1]["path"]).name if sample_loan_files else ""
+    # Guard against entries that carry no ``path`` (e.g. script-built configs
+    # whose loan-data files were never uploaded through the wizard) — a hard
+    # ``["path"]`` subscript here 500s the whole step.
+    _last_loan_path = (
+        sample_loan_files[-1].get("path") if sample_loan_files else None
     )
+    sample_loan_name = Path(_last_loan_path).name if _last_loan_path else ""
     suggestion: dict[str, str] | None = None
     if sample_loan_name:
         suggestion = _suggest_file_patterns(sample_loan_name)
