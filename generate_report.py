@@ -2273,6 +2273,23 @@ def _compute_balance_adjustments(df, hist, config, snapshot_date):
             pool = str(row['pool']).strip()
             monthly_bals[pool] = float(row['balance'])
 
+    # A per-pool monthly balance FILE covering the snapshot month is the only
+    # authoritative "monthly balance by pool/type" source for the current
+    # period. When it is absent, CUs without a monthly balance by pool/type
+    # (e.g. no monthly balance file yet for the quarter) should NOT have the
+    # current loan file compared against the most recent prior month's balances
+    # (the WARM/hist-bal fallbacks below). That comparison produces a
+    # misleading adjustment (e.g. Dec balances vs Mar loans). Instead, leave the
+    # balance-adjustment data unset so the Balance Adjustment section renders as
+    # zeros. WARM CUs that already carry per-pool balances from the Risk Change
+    # Data Entry tab (pool_bal_detail) are left on their existing code path.
+    if not monthly_bals:
+        _imp_existing = hist.get('impaired', {}) or {}
+        if not _imp_existing.get('pool_bal_detail'):
+            print("    Balance adjustments: no monthly balance by pool/type for "
+                  f"{snap_ym} - section left at zero (no prior-month comparison)")
+            return
+
     # Fallback: WARM template's per-pool monthly balance series. Use the
     # snapshot month's value (or the most recent value at/before snapshot).
     _SKIP_POOLS = {'grand total', 'total', 'exclude', 'excluded'}
@@ -3792,8 +3809,19 @@ def load_historical_data(config):
         # gating, which safely avoids mixing CU monthly data with quarterly
         # 5300 rows inside a single year.
         if config.get('co_recovery_month_level_fill'):
-            _file_co_months = {ym for ym, bp in (co_rec.get('co_monthly') or {}).items() if bp}
-            _file_rc_months = {ym for ym, bp in (co_rec.get('rc_monthly') or {}).items() if bp}
+            # A (year, month) only counts as "covered by the CU's files" when
+            # the file reports NON-ZERO data for it (see the year-level note
+            # below). Cumulative recovery-tracking exports otherwise emit
+            # all-zero month cells that would wrongly suppress the DB history.
+            def _nonzero_keys(section):
+                out = set()
+                for k, bp in (section or {}).items():
+                    if isinstance(bp, dict) and any(
+                            abs(float(v or 0)) > 0.005 for v in bp.values()):
+                        out.add(k)
+                return out
+            _file_co_months = _nonzero_keys(co_rec.get('co_monthly'))
+            _file_rc_months = _nonzero_keys(co_rec.get('rc_monthly'))
             co_m = co_rec.setdefault('co_monthly', {})
             for ym, by_pool in db_corc['co_monthly'].items():
                 if ym not in _file_co_months:
@@ -3817,28 +3845,75 @@ def load_historical_data(config):
                   f"win for {len(_file_co_months)} CO month(s) / "
                   f"{len(_file_rc_months)} recovery month(s); DB fills the rest.")
         else:
-            _file_co_years = {yr for yr, bp in (co_rec.get('chargeoffs') or {}).items() if bp}
-            _file_rc_years = {yr for yr, bp in (co_rec.get('recoveries') or {}).items() if bp}
+            # A year only counts as "covered by the CU's files" when the file
+            # actually reports NON-ZERO charge-offs / recoveries for it. Some
+            # CU charge-off/recovery exports are cumulative recovery-tracking
+            # files that list previously charged-off loans with a BLANK
+            # charge-off amount, so naive ``if bp`` truthiness marks every
+            # historical year as covered (a non-empty dict of all-zero pools)
+            # and wrongly suppresses the DB's real charge-off history.
+            def _nonzero_years(section):
+                out = set()
+                for yr, bp in (section or {}).items():
+                    if isinstance(bp, dict) and any(
+                            abs(float(v or 0)) > 0.005 for v in bp.values()):
+                        out.add(yr)
+                return out
+
+            _file_co_years = _nonzero_years(co_rec.get('chargeoffs'))
+            _file_rc_years = _nonzero_years(co_rec.get('recoveries'))
+
+            # ``co_recovery_db_fills_covered_years`` opts a CU into (year, pool)
+            # CELL-level fill for the DB backfill: within a year the file DOES
+            # report, the DB still fills the pools the file left absent / at
+            # zero. This is for CUs whose CO/recovery export is a cumulative
+            # recovery-tracking file that only carries a charge-off AMOUNT in
+            # the period of charge-off, so a single stray amount would
+            # otherwise let one pool's value stand in for the whole year. Only
+            # safe when the DB history is in the CU's own pool taxonomy, so it
+            # is guarded by a subset check and left OFF by default (whole-year
+            # gating) to avoid mixing the CU taxonomy with NCUA 5300 categories.
+            _cell_level = False
+            if config.get('co_recovery_db_fills_covered_years'):
+                _cfg_pools = set()
+                for _p in (config.get('pool_order') or []):
+                    if _p:
+                        _cfg_pools.add(str(_p).strip().lower())
+                for _p in (config.get('pools') or []):
+                    _n = _p.get('name') if isinstance(_p, dict) else _p
+                    if _n:
+                        _cfg_pools.add(str(_n).strip().lower())
+                _db_pools = set()
+                for _sec in (db_corc.get('chargeoffs'), db_corc.get('recoveries')):
+                    for _bp in (_sec or {}).values():
+                        if isinstance(_bp, dict):
+                            _db_pools.update(str(p).strip().lower() for p in _bp)
+                _cell_level = bool(_cfg_pools) and _db_pools.issubset(_cfg_pools)
+
+            def _fill(target, source_db, covered_years, year_key):
+                for key, by_pool in (source_db or {}).items():
+                    yr = key[0] if year_key else key
+                    if yr not in covered_years:
+                        target[key] = dict(by_pool)
+                    elif _cell_level:
+                        cur = target.setdefault(key, {})
+                        for pool, amt in by_pool.items():
+                            if amt and abs(float(cur.get(pool, 0) or 0)) <= 0.005:
+                                cur[pool] = amt
+
             co = co_rec.setdefault('chargeoffs', {})
-            for yr, by_pool in db_corc['chargeoffs'].items():
-                if yr not in _file_co_years:
-                    co[yr] = dict(by_pool)
+            _fill(co, db_corc.get('chargeoffs'), _file_co_years, False)
             rc = co_rec.setdefault('recoveries', {})
-            for yr, by_pool in db_corc['recoveries'].items():
-                if yr not in _file_rc_years:
-                    rc[yr] = dict(by_pool)
+            _fill(rc, db_corc.get('recoveries'), _file_rc_years, False)
             co_m = co_rec.setdefault('co_monthly', {})
-            for ym, by_pool in db_corc['co_monthly'].items():
-                if ym[0] not in _file_co_years:
-                    co_m[ym] = dict(by_pool)
+            _fill(co_m, db_corc.get('co_monthly'), _file_co_years, True)
             rc_m = co_rec.setdefault('rc_monthly', {})
-            for ym, by_pool in db_corc['rc_monthly'].items():
-                if ym[0] not in _file_rc_years:
-                    rc_m[ym] = dict(by_pool)
+            _fill(rc_m, db_corc.get('rc_monthly'), _file_rc_years, True)
             if _file_co_years or _file_rc_years:
-                print(f"    CO/Recovery source precedence: CU files win for "
-                      f"CO year(s) {sorted(_file_co_years)} and recovery year(s) "
-                      f"{sorted(_file_rc_years)}; 5300 DB backfill fills the rest.")
+                _mode = "cell-level" if _cell_level else "year-level"
+                print(f"    CO/Recovery source precedence ({_mode}): CU files win "
+                      f"for CO year(s) {sorted(_file_co_years)} and recovery "
+                      f"year(s) {sorted(_file_rc_years)}; DB backfill fills the rest.")
         co_rec['years'] = sorted(
             set(co_rec.get('years', []))
             | set(co_rec['chargeoffs'])

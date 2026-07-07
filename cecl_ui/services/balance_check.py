@@ -870,6 +870,10 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
     monthly_by_pool: dict[str, float] = {}
     monthly_period = ""
     monthly_err: str | None = None
+    # When the CU has no monthly balance by pool/type for the snapshot
+    # month, show zeros for the monthly balance instead of comparing the
+    # current loan extract against a stale prior month.
+    no_monthly_data = False
     try:
         import generate_report  # local import keeps service decoupled
         mb_df, _alll = generate_report.load_monthly_balances(cfg)
@@ -881,21 +885,22 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
             snap_ts = pd.to_datetime(snapshot_iso)
             same = mb_df[mb_df["date"].dt.normalize() == snap_ts.normalize()]
             if same.empty:
-                eligible = mb_df[mb_df["date"] <= snap_ts]
-                if not eligible.empty:
-                    pick = eligible["date"].max()
-                    same = eligible[eligible["date"] == pick]
-                    monthly_period = pd.Timestamp(pick).date().isoformat()
-            else:
-                monthly_period = snapshot_iso
-            if not same.empty:
-                monthly_by_pool = (
-                    same.groupby("pool")["balance"].sum().to_dict()
+                # No monthly balance by pool/type for the snapshot month.
+                # Do NOT fall back to the most recent prior period —
+                # comparing the current loan extract against a stale month
+                # (e.g. Dec balances vs Mar loans) is misleading. Show zeros
+                # for the monthly balance with no per-pool difference.
+                no_monthly_data = True
+                monthly_period = ""
+                monthly_err = (
+                    "No monthly balance by pool/type for "
+                    f"{snapshot_iso} — showing zeros for the monthly balance "
+                    "(no prior-period comparison)."
                 )
             else:
-                monthly_err = (
-                    "Monthly balance file is configured but contains no "
-                    f"data on or before {snapshot_iso}."
+                monthly_period = snapshot_iso
+                monthly_by_pool = (
+                    same.groupby("pool")["balance"].sum().to_dict()
                 )
         else:
             monthly_err = (
@@ -945,10 +950,21 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
                   f"{'…' if len(dropped) > 6 else ''}")
 
     # ── Build rows ──────────────────────────────────────────────────
-    all_pools = sorted(
-        set(loan_by_pool.keys()) | set(monthly_by_pool.keys()),
-        key=lambda s: s.lower(),
-    )
+    # Order pools to match the reports rather than alphabetically. Mirror
+    # generate_report's canonical ordering: pools listed in
+    # ``config['pool_order']`` come first in their declared order, then any
+    # extras alphabetically; within that, risk-rated pools precede
+    # not-risk-rated pools (same as the report sheets).
+    cfg_order = cfg.get("pool_order", []) or []
+    nrr = {str(n).strip() for n in (cfg.get("not_risk_rated", []) or [])}
+    order_idx = {name: i for i, name in enumerate(cfg_order)}
+    fallback = len(cfg_order)
+    pool_names = set(loan_by_pool.keys()) | set(monthly_by_pool.keys())
+    rr_pools = [p for p in pool_names if str(p).strip() not in nrr]
+    nrr_pools = [p for p in pool_names if str(p).strip() in nrr]
+    rr_pools.sort(key=lambda p: (order_idx.get(p, fallback), str(p).lower()))
+    nrr_pools.sort(key=lambda p: (order_idx.get(p, fallback), str(p).lower()))
+    all_pools = rr_pools + nrr_pools
     rows: list[dict[str, Any]] = []
     total_m = 0.0
     total_l = 0.0
@@ -957,9 +973,13 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
         l_val = loan_by_pool.get(pool)
         m_f = float(m_val) if m_val is not None else None
         l_f = float(l_val) if l_val is not None else None
+        if no_monthly_data:
+            # Zeros on the monthly balance; suppress the difference so we do
+            # not present a comparison against a period we do not have.
+            m_f = 0.0
         diff = None
         pct = None
-        if m_f is not None and l_f is not None:
+        if not no_monthly_data and m_f is not None and l_f is not None:
             diff = l_f - m_f
             if m_f:
                 pct = (diff / m_f) * 100.0
@@ -999,7 +1019,7 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
         "totals": {
             "monthly": total_m,
             "loans": total_l,
-            "diff": total_l - total_m,
+            "diff": 0.0 if no_monthly_data else (total_l - total_m),
         },
         "loan_summary": {
             "file_count": 0,
