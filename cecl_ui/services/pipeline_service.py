@@ -119,6 +119,125 @@ def run_import(
     return import_data.process_client(client_short_name, specific_file=specific_file)
 
 
+def reimport_period(client_short_name: str, period: str) -> dict[str, Any]:
+    """Re-import ONE historical period on demand (outlier re-runs).
+
+    Pulls exactly that period's loan files from the authoritative source
+    folder — ``loan_source_folder`` config, else ``loan_file_folder``, else
+    the CU's ``Archive/<short>/``, else ``Raw_Uploads/<short>/`` — copies just
+    those files into a temp folder, imports ONLY that snapshot (idempotent
+    per-snapshot replace), then removes the temp folder. Leaves the standing
+    Raw_Uploads folder (the current period) untouched.
+
+    ``period`` accepts ``YYYY-MM`` or ``YYYY-MM-DD``. Returns
+    ``{ok, period, cu, source_folder, files, rows, error}``.
+    """
+    import os
+    import re
+    import shutil
+    import calendar
+    import tempfile
+
+    import_data = importlib.import_module("import_data")
+    try:
+        config = import_data.load_client_config(client_short_name)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Could not load config: {exc}"}
+    cu_name = config.get("credit_union")
+
+    # Resolve the target snapshot as a month-end ISO date.
+    p = (period or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", p):
+        target = p
+    elif re.fullmatch(r"\d{4}-\d{2}", p):
+        y, m = int(p[:4]), int(p[5:7])
+        if not (1 <= m <= 12):
+            return {"ok": False, "error": f"Invalid month in period: {p!r}."}
+        target = f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}"
+    else:
+        return {"ok": False,
+                "error": f"Invalid period {p!r} — use YYYY-MM or YYYY-MM-DD."}
+
+    # Resolve the source folder to pull the period's files from.
+    source = config.get("loan_source_folder") or config.get("loan_file_folder")
+    if source:
+        source = import_data.resolve_path(source)
+    else:
+        candidates = [
+            os.path.join(import_data.ARCHIVE_FOLDER, client_short_name),
+            os.path.join(import_data.UPLOAD_FOLDER, client_short_name),
+            import_data.UPLOAD_FOLDER,
+        ]
+        source = next((c for c in candidates if os.path.isdir(c)), None)
+    if not source or not os.path.isdir(source):
+        return {"ok": False, "period": target,
+                "error": ("No source folder found to pull the period from. "
+                          "Set 'loan_source_folder' in the config.")}
+
+    # Compile the loan file patterns (top-level + per-extract).
+    pats = list(import_data._compile_file_patterns(
+        config.get("file_pattern"), label="top"))
+    for e in (config.get("loan_data_extracts") or []):
+        pats += import_data._compile_file_patterns(
+            (e or {}).get("file_pattern"), label=(e or {}).get("label", "?"))
+
+    # Find files under the source whose snapshot resolves to the target AND
+    # match a loan pattern.
+    matches: list[str] = []
+    seen_names: set[str] = set()
+    for root, _dirs, files in os.walk(source):
+        for fn in files:
+            if fn.startswith("~$"):
+                continue
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, source)
+            if pats and not import_data._patterns_match_any(pats, fn, rel):
+                continue
+            try:
+                snap = import_data.extract_snapshot_date(fn, config)
+            except Exception:  # noqa: BLE001
+                snap = None
+            if snap == target:
+                if fn in seen_names:
+                    continue  # avoid basename collisions when staging
+                seen_names.add(fn)
+                matches.append(full)
+    if not matches:
+        return {"ok": False, "period": target, "source_folder": source,
+                "error": f"No loan files for {target} found under {source}."}
+
+    tmp = tempfile.mkdtemp(prefix=f"cecl_reimport_{client_short_name}_")
+    try:
+        for src in matches:
+            shutil.copy2(src, os.path.join(tmp, os.path.basename(src)))
+        files_processed = import_data.process_client(
+            client_short_name, scan_folder_override=tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # Report the resulting DB row count for the period (process_client returns
+    # a file count, not a loan-row count).
+    row_count = 0
+    try:
+        from sqlalchemy import create_engine, text as _text
+        from cecl_credentials import get_database_url
+        _eng = create_engine(get_database_url())
+        with _eng.connect() as _c:
+            row_count = int(_c.execute(
+                _text("SELECT COUNT(*) FROM monthly_loan_data "
+                      "WHERE credit_union = :cu AND snapshot_date = :s"),
+                {"cu": cu_name, "s": target}).scalar() or 0)
+    except Exception:  # noqa: BLE001
+        row_count = 0
+
+    return {"ok": True, "period": target, "cu": cu_name,
+            "source_folder": source,
+            "files": [os.path.basename(m) for m in matches],
+            "files_processed": int(files_processed or 0),
+            "rows": row_count}
+
+
+
 def run_reports(
     client_short_name: str,
     snapshot_date: str | None = None,

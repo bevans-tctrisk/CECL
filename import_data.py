@@ -1392,7 +1392,7 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
     return len(clean_data)
 
 
-def process_client(client_name, specific_file=None):
+def process_client(client_name, specific_file=None, scan_folder_override=None):
     """Process all matching files for a client."""
     config = load_client_config(client_name)
     cu_name = config['credit_union']
@@ -1419,22 +1419,35 @@ def process_client(client_name, specific_file=None):
         if pats:
             extracts.append((pats, e))
 
-    # Optional custom loan source folder (absolute or relative), useful for external client folders.
-    configured_loan_folder = config.get('loan_file_folder')
-    if configured_loan_folder:
-        scan_folder = resolve_path(configured_loan_folder)
+    # Explicit scan-folder override (e.g. the "re-import a single period"
+    # action stages just that period's files into a temp folder and imports
+    # ONLY them). Takes precedence over config and is never archived.
+    if scan_folder_override:
+        scan_folder = str(scan_folder_override)
         if not os.path.isdir(scan_folder):
-            raise FileNotFoundError(f"Loan file folder not found: {scan_folder}")
+            raise FileNotFoundError(
+                f"Scan folder override not found: {scan_folder}")
+        recursive_scan = True
     else:
-        # Look in per-client subfolder first, then fallback to main Raw_Uploads
-        client_upload = os.path.join(UPLOAD_FOLDER, client_name)
-        if os.path.isdir(client_upload):
-            scan_folder = client_upload
+        # Optional custom loan source folder (absolute or relative), useful for external client folders.
+        configured_loan_folder = config.get('loan_file_folder')
+        if configured_loan_folder:
+            scan_folder = resolve_path(configured_loan_folder)
+            if not os.path.isdir(scan_folder):
+                raise FileNotFoundError(f"Loan file folder not found: {scan_folder}")
         else:
-            scan_folder = UPLOAD_FOLDER
+            # Look in per-client subfolder first, then fallback to main Raw_Uploads
+            client_upload = os.path.join(UPLOAD_FOLDER, client_name)
+            if os.path.isdir(client_upload):
+                scan_folder = client_upload
+            else:
+                scan_folder = UPLOAD_FOLDER
 
-    recursive_scan = bool(config.get('loan_file_recursive', False))
+        recursive_scan = bool(config.get('loan_file_recursive', False))
     archive_imported = bool(config.get('archive_imported_files', True))
+    if scan_folder_override:
+        # Never sweep an ad-hoc override scan into the Archive.
+        archive_imported = False
 
     client_archive = None
     if archive_imported:

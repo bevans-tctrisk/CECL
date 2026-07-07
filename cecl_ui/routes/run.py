@@ -354,6 +354,36 @@ def import_data(short_name: str):
     return redirect(url_for("run.client_dashboard", short_name=short_name))
 
 
+@run_bp.route("/<short_name>/reimport_period", methods=["POST"])
+def reimport_period(short_name: str):
+    """Force a re-import of a single older period (outlier re-runs).
+
+    Pulls just that period's loan files from the configured source folder,
+    imports only that snapshot (idempotent replace), and cleans up. The
+    current period staged in Raw_Uploads is left untouched.
+    """
+    period = (request.form.get("period") or "").strip()
+    if not period:
+        flash("Enter a period (e.g. 2025-06) to re-import.", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+    try:
+        res = pipeline_service.reimport_period(short_name, period)
+    except Exception as exc:  # noqa: BLE001
+        flash(f"Re-import failed: {exc}", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+    if res.get("ok"):
+        files = res.get("files") or []
+        flash(
+            f"Re-imported {res['period']}: {res['rows']} loan row(s) from "
+            f"{len(files)} file(s) ({', '.join(files)}). "
+            f"You can now run reports for {res['period']}.",
+            "success",
+        )
+    else:
+        flash(f"Re-import ({period}): {res.get('error')}", "warning")
+    return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+
 @run_bp.route("/<short_name>/reports", methods=["POST"])
 def reports(short_name: str):
     snap = request.form.get("snapshot_date") or None

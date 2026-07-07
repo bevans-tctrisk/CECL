@@ -52,6 +52,23 @@
   <form method="post" action="{{ url_for('run.import_data', short_name=short_name) }}">
     <button class="btn btn-secondary" type="submit">Run Importer</button>
   </form>
+
+  <div style="margin-top:14px; padding-top:12px; border-top:1px solid #eee;">
+    <strong>Re-import a previous period</strong>
+    <p class="help" style="margin:4px 0 8px;">
+      For outlier cases only. Pulls just that month&rsquo;s loan files from the
+      credit union&rsquo;s source folder, re-imports only that snapshot
+      (replacing it), and cleans up &mdash; the current period stays untouched.
+      For a normal older-period report you don&rsquo;t need this: just pick the
+      snapshot date under <em>Generate reports</em>.
+    </p>
+    <form method="post" action="{{ url_for('run.reimport_period', short_name=short_name) }}"
+          style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <input type="text" name="period" placeholder="YYYY-MM (e.g. 2025-06)"
+             pattern="\d{4}-\d{2}(-\d{2})?" required style="width:180px;">
+      <button class="btn btn-secondary" type="submit">Re-import period</button>
+    </form>
+  </div>
 </div>
 
 <div class="card">
