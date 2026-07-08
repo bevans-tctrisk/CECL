@@ -44,6 +44,21 @@ def _norm(v: Any) -> str:
     return "" if v is None else str(v).strip()
 
 
+def _digits(v: Any) -> str:
+    """Digits-only form of a member / suffix / account value.
+
+    Strips a trailing Excel ``.0`` (integer-valued floats) and any
+    non-digit characters so ``19238``, ``19238.0`` and ``'19238-'`` all
+    collapse to the comparable digit string ``'19238'``.
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return "".join(ch for ch in s if ch.isdigit())
+
+
 def _to_float(v: Any) -> float | None:
     if v is None or v == "":
         return None
@@ -621,13 +636,16 @@ def _build_loan_index(loan_path: str | Path,
             m = _coerce_member_part(raw_member)
             s = _coerce_member_part(row.get(suffix_col))
             key = f"{m}-{s}"
+            acct_raw = f"{m}{s}"
         elif mode == "delimiter":
             s_raw = _coerce_member_part(raw_member)
             if delim and delim in s_raw:
                 m, s = s_raw.split(delim, 1)
                 key = f"{m.strip()}-{s.strip()}"
+                acct_raw = f"{m.strip()}{s.strip()}"
             else:
                 key = f"{s_raw}-"
+                acct_raw = s_raw
         else:  # fixed_suffix
             s_raw = _coerce_member_part(raw_member)
             if suffix_len > 0 and len(s_raw) > suffix_len:
@@ -636,6 +654,7 @@ def _build_loan_index(loan_path: str | Path,
                 key = f"{m}-{s}"
             else:
                 key = f"{s_raw}-"
+            acct_raw = s_raw
 
         # Phase 9.24b — also carry the raw extract loan_pool_code value
         # so the impaired-step validation card can surface codes from the
@@ -651,6 +670,7 @@ def _build_loan_index(loan_path: str | Path,
             "loan_pool_code_raw": raw_pool_code,
             "credit_grade": _grade_for(row.get(fico_col)) if fico_col else no_score,
             "balance_from_loan_report": _to_float(row.get(bal_col)) if bal_col else None,
+            "_acct": _digits(acct_raw),
         }
     return index
 
@@ -742,6 +762,63 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
         # is authoritative when both exist.
         norm_index.setdefault(_nk, _v)
 
+    # Phase 9.41 — account-reconstruction index. Keyed by the digits-only
+    # combined account (member digits + suffix digits) captured when the
+    # loan index was built. Lets an impaired row whose member/suffix are
+    # split differently than the extract still resolve: e.g. the AIRES
+    # extract packs a 4-digit zero-padded loan suffix ("192380004") while
+    # the CU is configured with suffix_length=3 (so the extract mis-splits
+    # to "192380-4"), and the impaired file lists member 19238 / suffix 4.
+    # We reconstruct the extract's full account from the impaired member +
+    # a zero-padded suffix and require an EXACT account-digit match, so it
+    # cannot introduce spurious hits. Driven from the impaired side (few
+    # rows), it is a last-resort fallback after the direct / leading-zero
+    # paths miss.
+    acct_index: dict[str, dict[str, Any]] = {}
+    for _v in index.values():
+        _a = _v.get("_acct")
+        if _a:
+            acct_index.setdefault(_a, _v)
+            acct_index.setdefault(_a.lstrip("0") or "0", _v)
+
+    def _match_by_account(member: Any, suffix: Any):
+        md = _digits(member)
+        if not md:
+            return None
+        sd = _digits(suffix)
+        sd_core = sd.lstrip("0")
+        # Loan suffixes are short sequence numbers; only reconstruct when
+        # the significant suffix is small so we don't concatenate a long
+        # suffix into a *different* member's account by coincidence.
+        if len(sd_core) > 4:
+            return None
+        md_variants = [md]
+        md_stripped = md.lstrip("0")
+        if md_stripped and md_stripped != md:
+            md_variants.append(md_stripped)
+        # Reconstruct the extract account as member + the suffix zero-padded
+        # to widths from its own length up to +4 leading zeros (covers the
+        # common 2-, 3- and 4-digit zero-padded loan-suffix conventions).
+        # Longest (most-padded) width first so the structurally correct
+        # reconstruction wins before shorter, more ambiguous forms.
+        base_w = max(len(sd_core), 1)
+        for _md in md_variants:
+            cands: list[str] = []
+            for w in range(base_w + 4, base_w - 1, -1):
+                cands.append(_md + sd_core.zfill(w))
+            cands.append(_md + sd)        # suffix exactly as entered
+            if not sd_core:
+                cands.append(_md)         # no / zero suffix
+            seen: set[str] = set()
+            for c in cands:
+                if not c or c in seen:
+                    continue
+                seen.add(c)
+                hit = acct_index.get(c) or acct_index.get(c.lstrip("0") or "0")
+                if hit is not None:
+                    return hit
+        return None
+
     for row in rows:
         key = row.get("member_suffix") or _member_suffix_key(
             row.get("member"), row.get("suffix"))
@@ -754,6 +831,11 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
         if match is None:
             # Phase 9.37b — try the leading-zero-normalised index
             match = norm_index.get(_strip_lead(key))
+        if match is None:
+            # Phase 9.41 — reconstruct the extract account from the
+            # impaired member + zero-padded suffix (handles suffix-length /
+            # zero-pad disagreements between the two files).
+            match = _match_by_account(row.get("member"), row.get("suffix"))
         if match is None:
             status["unmatched"] += 1
             _fallback_from_data_entry(row)

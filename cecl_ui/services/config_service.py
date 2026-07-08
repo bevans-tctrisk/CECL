@@ -667,6 +667,25 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             if pool_map:
                 mb_block["pool_map"] = pool_map
 
+            # Pass through the supplemental monthly-balance mechanisms
+            # verbatim so advanced wiring survives wizard regeneration.
+            # A CU that starts delivering a fresh rolling workbook
+            # (``supplemental_wide``) or a per-month / formatted balance-
+            # sheet snapshot (``monthly_file_pattern`` family) alongside
+            # the historical workbook keeps that config across reruns
+            # instead of silently losing the recent month's balances.
+            sw = mb.get("supplemental_wide")
+            if sw:
+                mb_block["supplemental_wide"] = sw
+            for _k in ("monthly_file_pattern", "monthly_sheet",
+                       "monthly_label_col", "monthly_balance_col",
+                       "monthly_header_row"):
+                _v = mb.get(_k)
+                if _v not in (None, "", 0):
+                    mb_block[_k] = _v
+            if mb.get("monthly_strict_pool_map"):
+                mb_block["monthly_strict_pool_map"] = True
+
         elif mb_source == "per_month":
             layout = mb.get("per_month_layout") or {}
             mb_block["layout"] = {

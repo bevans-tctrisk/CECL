@@ -1097,7 +1097,22 @@ def load_chargeoff_recovery_history(config):
                         fl.endswith('.xlsx') or fl.endswith('.xls')
                         or fl.endswith('.csv')):
                     if _file_combined:
-                        if 'proposed' not in fl and '3yr' not in fl:
+                        _skip = ('proposed' in fl or '3yr' in fl)
+                        # Legacy combined mode gates purely on the filename
+                        # (no per-format file_pattern), so it must still
+                        # require a charge-off / recovery indicator in the
+                        # name. Otherwise it vacuums every unrelated workbook
+                        # that shares a flat Raw_Uploads folder — AIRES loan
+                        # extracts, balance sheets, credit pulls, Vizo models
+                        # — and sums their balance / member-number columns
+                        # into billions of dollars of phantom recoveries.
+                        # In multi-format mode the format's file_pattern has
+                        # already selected the file, so don't second-guess it.
+                        if not multi_format and not (
+                                ('charge' in fl and 'off' in fl)
+                                or 'recov' in fl):
+                            _skip = True
+                        if not _skip:
                             want_co = bool(_co_cfg)
                             want_rc = bool(_rc_cfg)
                     else:
@@ -1634,7 +1649,7 @@ def _merge_acl_history(alll_by_date: dict, config: dict) -> dict:
     return out
 
 
-def _load_monthly_balances_from_wizard(config, mb_cfg=None):
+def _load_monthly_balances_from_wizard(config, mb_cfg=None, with_labels=False):
     """Load monthly balances using wizard-provided cfg['monthly_balance']
     metadata (``saved_path`` + ``sheet`` + ``pool_name_col`` +
     ``first_date_col`` + ``header_row``) plus optional
@@ -1862,11 +1877,14 @@ def _load_monthly_balances_from_wizard(config, mb_cfg=None):
     for entries in by_pool.values():
         for entry in entries:
             for dt, bal in entry['rows']:
-                records.append({
+                rec = {
                     'pool': entry['pool'],
                     'date': dt,
                     'balance': bal,
-                })
+                }
+                if with_labels:
+                    rec['label'] = entry['label']
+                records.append(rec)
 
     out_df = pd.DataFrame(records)
     if out_df.empty and not alll_by_date:
@@ -1877,7 +1895,7 @@ def _load_monthly_balances_from_wizard(config, mb_cfg=None):
     return out_df, alll_by_date
 
 
-def _discover_supplemental_monthly_balances(config):
+def _discover_supplemental_monthly_balances(config, with_labels=False):
     """Discover per-month 'snapshot' balance files (e.g.
     ``June 2026 Loans by Type.xlsx``) in the data directory and return
     ``[{pool, date, balance}, ...]`` rows.
@@ -1922,6 +1940,14 @@ def _discover_supplemental_monthly_balances(config):
                 for k, v in raw_map.items()
                 if str(k).strip() and str(v).strip()}
     split = str(config.get('pool_code_split') or '/').strip()
+    # When the snapshot file is a formatted balance sheet that interleaves
+    # non-loan rows (Cash, Bonds, Allowance, subtotals) in the same balance
+    # column as the loan pools, ``monthly_strict_pool_map`` drops any label
+    # not present in ``pool_map`` instead of falling back to using the raw
+    # label as its own pool name (which would ingest those non-loan rows as
+    # phantom pools). Opt-in so existing per-month single-pool drops keep
+    # their permissive label passthrough.
+    strict_map = bool(mb.get('monthly_strict_pool_map'))
 
     try:
         from import_data import extract_snapshot_date as _esd
@@ -1991,8 +2017,13 @@ def _discover_supplemental_monthly_balances(config):
                     if pool:
                         break
             if not pool:
+                if strict_map:
+                    continue  # non-loan / subtotal row — skip
                 pool = str(label).strip()
-            records.append({'pool': pool, 'date': dt, 'balance': bal_f})
+            rec = {'pool': pool, 'date': dt, 'balance': bal_f}
+            if with_labels:
+                rec['label'] = str(label).strip()
+            records.append(rec)
 
     if seen_periods:
         print(f"    Supplemental monthly-balance snapshot file(s): "
@@ -2001,7 +2032,7 @@ def _discover_supplemental_monthly_balances(config):
     return records
 
 
-def _apply_supplemental_monthly_balances(base_df, config):
+def _apply_supplemental_monthly_balances(base_df, config, with_labels=False):
     """Merge per-month snapshot balance rows over ``base_df``.
 
     The snapshot rows win for any (year, month) they cover — the matching
@@ -2009,13 +2040,15 @@ def _apply_supplemental_monthly_balances(base_df, config):
     appended. Returns ``base_df`` unchanged when nothing is discovered.
     """
     try:
-        supp = _discover_supplemental_monthly_balances(config)
+        supp = _discover_supplemental_monthly_balances(
+            config, with_labels=with_labels)
     except Exception as exc:  # noqa: BLE001
         print(f"    Warning: supplemental monthly-balance discovery failed: {exc}")
         return base_df
     if not supp:
         return base_df
-    supp_df = pd.DataFrame(supp, columns=['pool', 'date', 'balance'])
+    _cols = ['pool', 'date', 'balance'] + (['label'] if with_labels else [])
+    supp_df = pd.DataFrame(supp, columns=_cols)
     if base_df is None or base_df.empty:
         return supp_df
     try:
@@ -2028,7 +2061,7 @@ def _apply_supplemental_monthly_balances(base_df, config):
         return base_df
 
 
-def _apply_supplemental_wide_balances(base_df, config):
+def _apply_supplemental_wide_balances(base_df, config, with_labels=False):
     """Merge one or more *wide* (multi-month) supplemental balance files
     over ``base_df``, newer months winning.
 
@@ -2080,7 +2113,8 @@ def _apply_supplemental_wide_balances(base_df, config):
             continue
         merged_cfg['saved_path'] = path
         merged_cfg['filename'] = os.path.basename(path)
-        df, _alll = _load_monthly_balances_from_wizard(config, mb_cfg=merged_cfg)
+        df, _alll = _load_monthly_balances_from_wizard(
+            config, mb_cfg=merged_cfg, with_labels=with_labels)
         if df is not None and not df.empty:
             frames.append(df)
     if not frames:
@@ -2101,10 +2135,36 @@ def _apply_supplemental_wide_balances(base_df, config):
         return base_df
 
 
-def load_monthly_balances(config):
+def load_monthly_balances(config, with_labels=False):
     """Load monthly loan balances by pool from the most recent file available.
     Returns (DataFrame with columns [pool, date, balance],
-            dict mapping date -> ALLL balance (absolute value))."""
+            dict mapping date -> ALLL balance (absolute value)).
+
+    When ``with_labels`` is True the returned DataFrame also carries a
+    ``label`` column holding the raw balance-file row label each pool
+    balance came from (used by the run-flow Loan Comparison page to show
+    which monthly-balance titles roll into each pool). Off by default so
+    the report engine's DataFrame shape is unchanged.
+    """
+    def _collapse(df):
+        # Collapse to ONE row per (pool, date) by summing balance. Balance
+        # files (and per-month snapshots like WSSC's worksheet) can map
+        # several raw labels into the same pool for the same month; several
+        # downstream consumers (build_hist_bal_from_monthly,
+        # _compute_balance_adjustments) key on (pool, date) and would
+        # otherwise keep only the FIRST/LAST label's balance and silently
+        # drop the rest. Skipped when ``with_labels`` so the Loan Comparison
+        # breakdown keeps its per-label rows.
+        if with_labels or df is None or getattr(df, 'empty', True):
+            return df
+        if not {'pool', 'date', 'balance'}.issubset(df.columns):
+            return df
+        try:
+            return (df.groupby(['pool', 'date'], as_index=False)['balance']
+                    .sum())
+        except Exception:  # noqa: BLE001
+            return df
+
     # New (May 2026): the wizard can declare three delivery modes in
     # ``config["monthly_balance"]``. Honor per_month / manual modes first;
     # fall through to the legacy data_directory scan when no block is set
@@ -2116,28 +2176,40 @@ def load_monthly_balances(config):
     if mb_source == 'per_month':
         df, alll = _load_monthly_balances_per_month(mb_cfg, acl_cfg=config.get('acl'))
         if not df.empty:
-            df = _apply_supplemental_monthly_balances(df, config)
-            df = _apply_supplemental_wide_balances(df, config)
-            return df, _merge_acl_history(alll, config)
+            df = _apply_supplemental_monthly_balances(df, config, with_labels=with_labels)
+            df = _apply_supplemental_wide_balances(df, config, with_labels=with_labels)
+            return _collapse(df), _merge_acl_history(alll, config)
         # If per_month failed (no files / unreadable), fall through to the
         # legacy scan so the user at least gets the historical context.
     if mb_source == 'per_year':
         df, alll = _load_monthly_balances_per_year(mb_cfg, acl_cfg=config.get('acl'))
         if not df.empty:
-            df = _apply_supplemental_monthly_balances(df, config)
-            df = _apply_supplemental_wide_balances(df, config)
-            return df, _merge_acl_history(alll, config)
+            df = _apply_supplemental_monthly_balances(df, config, with_labels=with_labels)
+            df = _apply_supplemental_wide_balances(df, config, with_labels=with_labels)
+            return _collapse(df), _merge_acl_history(alll, config)
 
     # Preferred path for "single" mode: use the wizard's saved_path +
     # sheet metadata directly. Honors cfg['balance_title_map'] (label
     # → pool translation) and cfg['acl']['row'/'label'] for ACL row
     # discovery. Falls through to the legacy data_directory scan when
     # the wizard metadata is missing or the file can't be read.
-    wiz_df, wiz_alll = _load_monthly_balances_from_wizard(config)
+    wiz_df, wiz_alll = _load_monthly_balances_from_wizard(config, with_labels=with_labels)
     if wiz_df is not None:
-        wiz_df = _apply_supplemental_monthly_balances(wiz_df, config)
-        wiz_df = _apply_supplemental_wide_balances(wiz_df, config)
-        return wiz_df, _merge_acl_history(wiz_alll or {}, config)
+        wiz_df = _apply_supplemental_monthly_balances(wiz_df, config, with_labels=with_labels)
+        wiz_df = _apply_supplemental_wide_balances(wiz_df, config, with_labels=with_labels)
+        return _collapse(wiz_df), _merge_acl_history(wiz_alll or {}, config)
+
+    # No wizard base workbook, but the CU may deliver ONLY per-month snapshot
+    # files (``monthly_file_pattern``) or a fresh wide workbook
+    # (``supplemental_wide``) with no historical base. Apply those discovery
+    # mechanisms against an empty base so the snapshot month still loads.
+    if mb_cfg.get('monthly_file_pattern') or mb_cfg.get('supplemental_wide'):
+        _empty_cols = ['pool', 'date', 'balance'] + (['label'] if with_labels else [])
+        base = pd.DataFrame(columns=_empty_cols)
+        base = _apply_supplemental_monthly_balances(base, config, with_labels=with_labels)
+        base = _apply_supplemental_wide_balances(base, config, with_labels=with_labels)
+        if base is not None and not base.empty:
+            return _collapse(base), _merge_acl_history(wiz_alll or {}, config)
 
     data_dir = resolve_path(config.get('data_directory', ''))
     if not data_dir or not os.path.isdir(data_dir):

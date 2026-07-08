@@ -1877,3 +1877,106 @@ def edit_pool_map(short_name: str):
         pool_distribution=pool_distribution,
         snapshots=snapshots,
     )
+
+
+@run_bp.route("/<short_name>/balance-compare", methods=["GET", "POST"])
+def balance_compare(short_name: str):
+    """Standalone loan-to-pool comparison for a user-chosen period, with an
+    inline loan-code → pool remapping editor.
+
+    Mirrors the wizard's Step 14 (Balance Adjustment) but on demand: pick
+    any imported snapshot, see the per-pool comparison (monthly balance
+    file vs the imported loan extract) plus the raw loan codes sitting in
+    each pool, and reassign a mis-mapped code to the correct pool. Saving a
+    reassignment updates ``pool_map`` and re-imports that period so the
+    stored snapshot re-stamps with the new pool.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    snapshots = pipeline_service.list_snapshots_for_cu(short_name)
+
+    if request.method == "POST":
+        period = (request.form.get("period") or "").strip()
+        map_codes = request.form.getlist("map_code")
+        map_pools = request.form.getlist("map_pool")
+        new_map = dict(cfg.get("pool_map") or {})
+        changed = 0
+        for i, code in enumerate(map_codes):
+            code = (code or "").strip()
+            if not code:
+                continue
+            new_pool = (map_pools[i] if i < len(map_pools) else "").strip()
+            old_pool = new_map.get(code, "")
+            if new_pool == "":
+                # Empty selection means "unmap" — the code then falls
+                # through to the CU's default_pool.
+                if code in new_map:
+                    del new_map[code]
+                    changed += 1
+                continue
+            if new_pool == old_pool:
+                continue
+            new_map[code] = new_pool
+            changed += 1
+
+        if not changed:
+            flash("No mapping changes detected.", "info")
+            return redirect(url_for("run.balance_compare",
+                                    short_name=short_name, period=period))
+
+        cfg["pool_map"] = new_map
+        try:
+            config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+        except (OSError, ValueError) as exc:
+            flash(f"Could not save pool mappings: {exc}", "error")
+            return redirect(url_for("run.balance_compare",
+                                    short_name=short_name, period=period))
+
+        # Re-import the selected period so its stored rows re-stamp with the
+        # new mapping and the comparison reflects the change immediately.
+        if period:
+            try:
+                res = pipeline_service.reimport_period(short_name, period)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            if res.get("ok"):
+                flash(
+                    f"Reassigned {changed} loan code(s) and re-imported "
+                    f"{res.get('period', period)}: {res.get('rows', 0)} "
+                    "loan row(s). Review the updated comparison below.",
+                    "success",
+                )
+            else:
+                flash(
+                    f"Saved {changed} mapping change(s) to the config, but "
+                    f"could not re-import {period}: {res.get('error')}. The "
+                    "mapping is saved for future runs; run Import Data (or "
+                    "Re-import that period) to apply it to stored data.",
+                    "warning",
+                )
+        else:
+            flash(f"Saved {changed} mapping change(s).", "success")
+        return redirect(url_for("run.balance_compare",
+                                short_name=short_name, period=period))
+
+    # ── GET ──────────────────────────────────────────────────────────
+    period = (request.args.get("period") or "").strip()
+    if not period and snapshots:
+        period = snapshots[0]
+    comparison = None
+    if period:
+        try:
+            comparison = balance_check_service.compare_run(
+                cfg, period, short_name=short_name)
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Comparison failed: {exc}", "error")
+    pool_choices = _all_known_pools(cfg, short_name)
+    return render_template(
+        "run/balance_compare.html",
+        short_name=short_name,
+        cfg=cfg,
+        snapshots=snapshots,
+        period=period,
+        comparison=comparison,
+        pool_choices=pool_choices,
+    )

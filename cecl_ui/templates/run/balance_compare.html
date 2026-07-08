@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Loan Comparison &mdash; {{ cfg.credit_union }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Loan Comparison by Pool &mdash; {{ cfg.credit_union }}</h2>
+  <p class="muted">
+    Compare the imported <strong>loan extract</strong> against the
+    <strong>monthly balance file</strong> for any period, pool by pool
+    &mdash; the same view as the wizard's Step 14 (Balance Adjustment).
+    Expand a pool to see the raw loan codes sitting in it and reassign a
+    mis-mapped code to the correct pool. Saving a change updates
+    <code>client_configs/{{ short_name }}.yaml</code> and re-imports the
+    selected period so the stored data re-stamps with the new mapping.
+  </p>
+  <p>
+    <a class="btn btn-secondary" href="{{ url_for('run.client_dashboard', short_name=short_name) }}">
+      &larr; Back to dashboard
+    </a>
+    <a class="btn btn-secondary" href="{{ url_for('run.edit_pool_map', short_name=short_name) }}">
+      Full Loan Code Mapping editor
+    </a>
+  </p>
+</div>
+
+<div class="card">
+  <form method="get" style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+    <div>
+      <label for="period"><strong>Comparison period</strong></label><br>
+      <select name="period" id="period" style="min-width:200px;">
+        {% for s in snapshots %}
+          <option value="{{ s }}"{% if s == period %} selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn btn-primary" type="submit">Show comparison</button>
+  </form>
+  {% if not snapshots %}
+    <p class="muted" style="margin-top:10px;">
+      No imported snapshots found for this CU. Import loan data first.
+    </p>
+  {% endif %}
+</div>
+
+{% if comparison %}
+  {% if comparison.error %}
+    <div class="card">
+      <p style="margin:0; color:#8a3a00;"><strong>Note:</strong> {{ comparison.error }}</p>
+    </div>
+  {% endif %}
+
+  <div class="card">
+    <h3 style="margin-top:0;">
+      Period <code>{{ comparison.period }}</code>
+      {% if comparison.monthly_period and comparison.monthly_period != comparison.period %}
+        <span class="muted" style="font-weight:normal;">
+          &mdash; monthly balances reflect {{ comparison.monthly_period }}
+        </span>
+      {% endif %}
+    </h3>
+
+    <table class="data-table" style="margin-bottom:8px;">
+      <thead>
+        <tr>
+          <th>Pool</th>
+          <th style="text-align:right;">Monthly Balance</th>
+          <th style="text-align:right;">Loan Extract</th>
+          <th style="text-align:right;">Difference</th>
+          <th style="text-align:right;">% Diff</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in comparison.rows %}
+        <tr>
+          <td>
+            <strong>{{ row.pool }}</strong>
+            {% if row.loan_codes %}
+              <details style="margin-top:3px;">
+                <summary style="cursor:pointer; color:#1a4480;">Loan codes
+                  <span class="muted" style="font-weight:normal;">({{ row.loan_codes|length }} code{{ '' if row.loan_codes|length == 1 else 's' }} &mdash; click to reassign)</span>
+                </summary>
+                <table style="margin-top:6px; font-size:90%; border-collapse:collapse; background:#fafafa;">
+                  <thead>
+                    <tr style="background:#f0f0f0;">
+                      <th style="text-align:left; padding:4px 8px; border:1px solid #ddd;">Loan code</th>
+                      <th style="text-align:right; padding:4px 8px; border:1px solid #ddd;">Balance</th>
+                      <th style="padding:4px 8px; border:1px solid #ddd;">Reassign to pool</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for code, bal in row.loan_codes %}
+                    <tr>
+                      <td style="padding:4px 8px; border:1px solid #ddd;"><code>{{ code }}</code></td>
+                      <td style="padding:4px 8px; border:1px solid #ddd; text-align:right;">${{ "{:,.2f}".format(bal) }}</td>
+                      <td style="padding:4px 8px; border:1px solid #ddd;">
+                        <form method="post"
+                              action="{{ url_for('run.balance_compare', short_name=short_name) }}"
+                              style="display:flex; gap:6px; margin:0;">
+                          <input type="hidden" name="period" value="{{ comparison.period }}">
+                          <input type="hidden" name="map_code" value="{{ code }}">
+                          <select name="map_pool" style="min-width:200px;">
+                            {% for choice in (pool_choices or []) %}
+                              <option value="{{ choice }}"{% if choice == row.pool %} selected{% endif %}>{{ choice }}</option>
+                            {% endfor %}
+                            <option value="Ignore"{% if row.pool == 'Ignore' %} selected{% endif %}>Ignore</option>
+                            <option value="">(unmapped &mdash; use default)</option>
+                          </select>
+                          <button class="btn btn-secondary" type="submit" style="padding:2px 10px;">Save &amp; refresh</button>
+                        </form>
+                      </td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </details>
+            {% endif %}
+            {% if row.monthly_labels %}
+              <details style="margin-top:3px;">
+                <summary style="cursor:pointer; color:#1a4480;">Monthly balance titles
+                  <span class="muted" style="font-weight:normal;">({{ row.monthly_labels|length }} row{{ '' if row.monthly_labels|length == 1 else 's' }} from the balance file)</span>
+                </summary>
+                <table style="margin-top:6px; font-size:90%; border-collapse:collapse; background:#f7fbf7;">
+                  <thead>
+                    <tr style="background:#eef4ee;">
+                      <th style="text-align:left; padding:4px 8px; border:1px solid #ddd;">Balance file title</th>
+                      <th style="text-align:right; padding:4px 8px; border:1px solid #ddd;">Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for label, bal in row.monthly_labels %}
+                    <tr>
+                      <td style="padding:4px 8px; border:1px solid #ddd;">{{ label }}</td>
+                      <td style="padding:4px 8px; border:1px solid #ddd; text-align:right;">${{ "{:,.2f}".format(bal) }}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </details>
+            {% endif %}
+          </td>
+          <td style="text-align:right;">
+            {% if row.monthly is not none %}${{ "{:,.2f}".format(row.monthly) }}{% else %}&mdash;{% endif %}
+          </td>
+          <td style="text-align:right;">
+            {% if row.loans is not none %}${{ "{:,.2f}".format(row.loans) }}{% else %}&mdash;{% endif %}
+          </td>
+          <td style="text-align:right;{% if row.diff is not none and (row.diff > 1 or row.diff < -1) %} color:#b03a2e; font-weight:600;{% endif %}">
+            {% if row.diff is not none %}${{ "{:,.2f}".format(row.diff) }}{% else %}&mdash;{% endif %}
+          </td>
+          <td style="text-align:right;{% if row.pct is not none and (row.pct > 1 or row.pct < -1) %} color:#b03a2e;{% endif %}">
+            {% if row.pct is not none %}{{ "{:,.2f}".format(row.pct) }}%{% else %}&mdash;{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        <tr style="font-weight:700; background:#f0f4f0; border-top:2px solid #2d662d;">
+          <td>Total</td>
+          <td style="text-align:right;">${{ "{:,.2f}".format(comparison.totals.monthly) }}</td>
+          <td style="text-align:right;">${{ "{:,.2f}".format(comparison.totals.loans) }}</td>
+          <td style="text-align:right;{% if comparison.totals.diff > 1 or comparison.totals.diff < -1 %} color:#b03a2e;{% endif %}">
+            ${{ "{:,.2f}".format(comparison.totals.diff) }}
+          </td>
+          <td style="text-align:right;">
+            {% if comparison.totals.monthly %}{{ "{:,.2f}".format(comparison.totals.diff / comparison.totals.monthly * 100.0) }}%{% else %}&mdash;{% endif %}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="muted" style="margin:8px 0 0;">
+      Loans imported: <strong>{{ comparison.loan_summary.row_count }}</strong>
+      row(s) at <code>{{ comparison.period }}</code>. To reassign a loan code
+      to a different pool, expand the pool name above and pick a new pool
+      &mdash; the mapping is saved and the period is re-imported so the change
+      takes effect immediately.
+    </p>
+  </div>
+{% endif %}
+{% endblock %}

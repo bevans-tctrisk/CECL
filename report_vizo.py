@@ -2231,6 +2231,12 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     grand_allowance = 0
     grand_allow_before = 0
     grand_env_allow = 0
+    # Sum of the per-pool Total balances / specific-IDs actually rendered
+    # below (both risk-rated and non-risk-rated pools). Used for the
+    # Pooled Totals line so it always reconciles to what's shown on this
+    # tab, including the loan pools that aren't broken out by grade.
+    grand_balance = 0
+    grand_spec_id = 0
     pool_starts = []
     pool_ends = []
     _bal_detail = _imp.get('pool_bal_detail', {})
@@ -2442,6 +2448,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
                 if total_spec_id == 0 and pool in spec_id_by_pool:
                     total_spec_id = sum(spec_id_by_pool[pool].values())
             total_calc_bal = total_balance - total_spec_id
+            grand_balance += total_balance or 0
+            grand_spec_id += total_spec_id or 0
 
             ws.cell(row=r, column=1, value="Total").font = V12B
             ws.cell(row=r, column=2, value=total_balance).number_format = ACCT
@@ -2496,6 +2504,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             grand_allowance += nrr_total_allow
             grand_allow_before += nrr_allow_before
             grand_env_allow += nrr_env_allow
+            grand_balance += nrr_balance or 0
+            grand_spec_id += nrr_spec_id or 0
 
             ws.cell(row=r, column=1, value="Total").font = V12B
             ws.cell(row=r, column=2, value=nrr_balance).number_format = ACCT
@@ -2522,7 +2532,13 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             r += 2
 
     # Grand totals — use computed sums across all pools
-    pooled_balance = acl_summary.get('pooled_balance', df['current_balance'].sum())
+    # Pooled balance / specific-ID are the SUM of the per-pool Total rows
+    # rendered above (risk-rated AND non-risk-rated), so the Pooled Totals
+    # line always reconciles to what's shown on this tab — including the
+    # loan pools that aren't broken out by grade. A prior report's
+    # acl_summary['pooled_balance'] silently dropped those NRR pools.
+    pooled_balance = grand_balance if grand_balance else \
+        acl_summary.get('pooled_balance', df['current_balance'].sum())
     pooled_total_allow = grand_allowance
 
     # Stash the computed pooled total back onto hist['impaired'] so the
@@ -2535,7 +2551,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
         _imp['_computed_grand_allow_before'] = grand_allow_before
         _imp['_computed_grand_env_allow'] = grand_env_allow
 
-    pooled_spec_id = acl_summary.get('pooled_spec_id', 0)
+    pooled_spec_id = grand_spec_id if grand_balance else \
+        acl_summary.get('pooled_spec_id', 0)
     # Override from Impaired Loans detail if WARM had 0
     if pooled_spec_id == 0 and spec_id_by_pool:
         pooled_spec_id = sum(sum(g.values()) for g in spec_id_by_pool.values())

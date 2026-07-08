@@ -874,9 +874,12 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
     # month, show zeros for the monthly balance instead of comparing the
     # current loan extract against a stale prior month.
     no_monthly_data = False
+    # {pool: [(raw balance-file label, balance), ...]} for the snapshot month.
+    monthly_labels_by_pool: dict[str, list] = {}
     try:
         import generate_report  # local import keeps service decoupled
-        mb_df, _alll = generate_report.load_monthly_balances(cfg)
+        mb_df, _alll = generate_report.load_monthly_balances(
+            cfg, with_labels=True)
         if mb_df is not None and not mb_df.empty \
                 and {"pool", "date", "balance"}.issubset(mb_df.columns):
             mb_df = mb_df.copy()
@@ -902,6 +905,22 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
                 monthly_by_pool = (
                     same.groupby("pool")["balance"].sum().to_dict()
                 )
+                # Per-pool raw balance-file title breakdown (which rows of
+                # the monthly balance file rolled into each pool).
+                if "label" in same.columns:
+                    for _pool, _grp in same.groupby("pool"):
+                        _by_lbl = (
+                            _grp.dropna(subset=["label"])
+                            .groupby("label")["balance"].sum()
+                        )
+                        _rows = [
+                            (str(_l), float(_b))
+                            for _l, _b in _by_lbl.items()
+                            if str(_l).strip()
+                        ]
+                        _rows.sort(key=lambda t: -abs(t[1]))
+                        if _rows:
+                            monthly_labels_by_pool[_pool] = _rows
         else:
             monthly_err = (
                 "Monthly balance file did not yield any per-pool data."
@@ -990,6 +1009,7 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
             "diff": diff,
             "pct": pct,
             "loan_codes": [],
+            "monthly_labels": [] if no_monthly_data else monthly_labels_by_pool.get(pool, []),
         })
         total_m += float(m_f or 0.0)
         total_l += float(l_f or 0.0)
@@ -1171,6 +1191,108 @@ def _build_state_for_run(cfg: dict[str, Any],
     # Raw_Uploads first so any duplicate name in Archive is skipped.
     _collect_from(raw_dir)
     _collect_from(archive_dir)
+
+    # ── Column-signature supplement ──────────────────────────────────
+    # When a CU renames its loan extracts so the filename patterns no
+    # longer match (e.g. "June 2026 ceclcc1.xlsx" -> "CECLCC1 6-30-26.xls"),
+    # the strict pass above silently drops them and the per-code breakdown
+    # comes up empty (or partial — only the extract types that still match,
+    # like a CUMA file, survive). Identify loan extracts by CONTENT instead:
+    # a spreadsheet qualifies when its header row carries the columns one of
+    # the configured extracts (or the top-level mapping) needs —
+    # member_number + current_balance + loan_pool_code — and its filename
+    # resolves to the requested snapshot (or carries no date). Non-loan
+    # files (balance sheets, impaired, recoveries, credit pulls) lack that
+    # column signature and are naturally excluded. Runs as a supplement so
+    # it fills in only the extract types the strict pass missed.
+    import pandas as _pd
+
+    _sig_candidates: list[dict] = []
+    for ex in (cfg.get("loan_data_extracts") or []):
+        if (ex or {}).get("column_mappings"):
+            _sig_candidates.append(ex)
+    if cfg.get("column_mappings"):
+        _sig_candidates.append({
+            "column_mappings": cfg.get("column_mappings") or {},
+            "has_header": cfg.get("has_header", True),
+            "member_account": cfg.get("member_account") or {},
+            "pool_code_split": cfg.get("pool_code_split") or "",
+        })
+
+    def _required_present(cols_lc: set[str], cm: dict) -> bool:
+        for field in ("member_number", "current_balance", "loan_pool_code"):
+            name = cm.get(field)
+            # Positional (integer) mappings can't be verified by header
+            # name; treat their presence as satisfied so headerless
+            # extracts still qualify.
+            if isinstance(name, int):
+                continue
+            if not name or str(name).strip().lower() not in cols_lc:
+                return False
+        return True
+
+    def _sig_collect(dir_path) -> None:
+        if not dir_path or not dir_path.is_dir() or not _sig_candidates:
+            return
+        for entry in dir_path.rglob("*"):
+            if not entry.is_file() or entry.name.startswith("~$"):
+                continue
+            if entry.suffix.lower() not in allowed:
+                continue
+            key = _norm(entry.name)
+            if key in seen_names:
+                continue
+            # Cheap filename-based snapshot filter BEFORE opening the file.
+            if snap_filter_active and _extract_date is not None:
+                try:
+                    file_snap = _extract_date(entry.name, snap_cfg)
+                except Exception:  # noqa: BLE001
+                    file_snap = None
+                if file_snap and file_snap != snapshot_iso:
+                    continue
+            matched_ex = None
+            matched_hr = None
+            for hr_try in (0, 1):
+                try:
+                    if entry.suffix.lower() == ".csv":
+                        cols = _pd.read_csv(
+                            entry, header=hr_try, nrows=0).columns
+                    else:
+                        cols = _pd.read_excel(
+                            entry, header=hr_try, nrows=0).columns
+                except Exception:  # noqa: BLE001
+                    continue
+                cols_lc = {str(c).strip().lower() for c in cols}
+                for exc in _sig_candidates:
+                    if _required_present(cols_lc,
+                                         exc.get("column_mappings") or {}):
+                        matched_ex = exc
+                        matched_hr = hr_try
+                        break
+                if matched_ex is not None:
+                    break
+            if matched_ex is None:
+                continue
+            fe: dict[str, Any] = {
+                "name": entry.name,
+                "path": str(entry),
+                "column_mappings": matched_ex.get("column_mappings") or {},
+            }
+            if matched_ex.get("has_header") is not None:
+                fe["has_header"] = matched_ex.get("has_header")
+            if matched_ex.get("header_row"):
+                fe["header_row"] = matched_ex.get("header_row")
+            elif matched_hr:
+                fe["header_row"] = matched_hr + 1
+            if "pool_code_split" in matched_ex:
+                fe["pool_code_split"] = matched_ex.get("pool_code_split") or ""
+            if matched_ex.get("member_account"):
+                fe["member_account"] = matched_ex.get("member_account") or {}
+            seen_names.add(key)
+            loan_files.append(fe)
+
+    _sig_collect(raw_dir)
+    _sig_collect(archive_dir)
 
     return {
         "column_mappings": cfg.get("column_mappings") or {},
