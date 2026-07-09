@@ -40,9 +40,12 @@ POOL_MAP.update({'Visa': 'Credit Cards', 'Student Loan': 'Student Loans',
 
 POOLS = ['Real Estate', 'Consumer Secured', 'Consumer Indirect',
          'Consumer Unsecured', 'Credit Cards', 'Student Loans', 'Business Loans']
+# Business Loans have no consumer FICO -> single-line (no grade breakout);
+# everything else is grade-rated.
+SINGLE_LINE = {'Business Loans'}
 
 def pool_entry(name):
-    return {'name': name, 'risk_rated': True, 'acl_months': 36,
+    return {'name': name, 'risk_rated': name not in SINGLE_LINE, 'acl_months': 36,
             'excluded': False, 'use_default_mgmt_adj': False, 'brr': False}
 
 pools = [pool_entry(p) for p in POOLS] + [
@@ -134,7 +137,7 @@ config = {
     ],
     'pools': pools,
     'pool_order': POOLS + ['Ignore'],
-    'not_risk_rated': [],
+    'not_risk_rated': sorted(SINGLE_LINE),
     'acl_months_by_pool': {p: 36 for p in POOLS},
     'historical_file_formats': {
         # Transaction-level "Charge off and Recovery Template MM-DD-YY.xlsx":
