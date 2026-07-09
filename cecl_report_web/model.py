@@ -74,6 +74,51 @@ class ImprDeterPage:
 
 
 @dataclass
+class MatrixCell:
+    """One cell of a risk-change matrix.
+
+    ``state`` drives the background color and is read straight from the
+    workbook fill so the rendered grid matches Excel exactly (including
+    the template's diagonal-band quirks):
+      'plain' | 'improved' (green) | 'deteriorated' (maroon) | 'header'
+    """
+
+    value: float | None
+    state: str = "plain"
+    is_pct: bool = False
+    bold: bool = False
+
+
+@dataclass
+class MatrixRow:
+    label: str
+    cells: list[MatrixCell] = field(default_factory=list)   # original-grade cols
+    total: MatrixCell | None = None
+    side: list[MatrixCell] = field(default_factory=list)     # Det/Imp/Unch
+
+
+@dataclass
+class RiskChangeMatrix:
+    """A migration matrix (dollar or percent)."""
+
+    corner: str                                    # "$ Current Grade" / "% Current Grade"
+    col_headers: list[str] = field(default_factory=list)
+    rows: list[MatrixRow] = field(default_factory=list)
+    side_headers: list[str] = field(default_factory=list)  # Deteriorated/Improved/Unchanged
+    is_pct: bool = False
+
+
+@dataclass
+class RiskChangePage:
+    """The "Risk Change Total" tab — dollar + percent migration matrices."""
+
+    credit_union: str
+    heading_lines: list[str] = field(default_factory=list)
+    matrices: list[RiskChangeMatrix] = field(default_factory=list)
+    summary: list[KeyValueRow] = field(default_factory=list)  # Balance Adj / Total in Portfolio
+
+
+@dataclass
 class ReportModel:
     """Top-level model for one report (Vizo Model or Supplemental).
 

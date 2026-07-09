@@ -116,3 +116,47 @@ html, body {
 .mig-table .r { text-align: right; font-variant-numeric: tabular-nums; }
 .by-pool { margin-left: 3.3in; }   /* sits at Excel col F */
 
+/* ---- Risk Change migration matrices ---- */
+.risk-change { font-size: 11pt; }
+
+.rc-matrix {
+  border-collapse: collapse;
+  margin: 0.15in auto 0.3in auto;
+  table-layout: fixed;
+}
+.rc-matrix th, .rc-matrix td {
+  border: 0.5px solid #ffffff;
+  padding: 3pt 6pt;
+  white-space: nowrap;
+}
+/* Header cells: dark teal, white, bold, centered (matches #0D4D5E). */
+.rc-matrix .hd {
+  background: #0D4D5E;
+  color: #ffffff;
+  font-weight: 700;
+  text-align: center;
+}
+.rc-matrix .hd.rowlabel { text-align: left; }
+.rc-matrix .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  border: 0.5px solid #d9d9d9;
+}
+/* Migration states read straight from the workbook fills. */
+.rc-matrix .improved     { background: #829901; color: #ffffff; }
+.rc-matrix .deteriorated { background: #873A3A; color: #ffffff; }
+.rc-matrix .total.b { font-weight: 700; }
+
+.rc-summary {
+  border-collapse: collapse;
+  margin: 0.1in auto 0.2in auto;
+}
+.rc-summary .hd {
+  background: #0D4D5E; color: #fff; font-weight: 700;
+  text-align: left; padding: 3pt 8pt;
+}
+.rc-summary .num {
+  text-align: right; font-variant-numeric: tabular-nums; padding: 3pt 8pt;
+}
+
+

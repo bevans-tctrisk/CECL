@@ -42,3 +42,21 @@ def pct1(v: float | int | None) -> str:
         return f"{float(v) * 100:.1f}%"
     except (TypeError, ValueError):
         return str(v)
+
+
+def pct2(v: float | int | None) -> str:
+    """Two-decimal percent: 0.0 -> '0.00%' (matches Excel 0.00%)."""
+    if v is None:
+        return ""
+    try:
+        return f"{float(v) * 100:.2f}%"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def mcell(cell) -> str:
+    """Render a MatrixCell's value using its own number format."""
+    if cell is None:
+        return ""
+    return pct2(cell.value) if getattr(cell, "is_pct", False) else acct0(cell.value)
+

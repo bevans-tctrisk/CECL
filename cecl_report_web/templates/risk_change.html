@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Risk Change — {{ page.credit_union }}{% endblock %}
+{% block body %}
+<section class="page risk-change">
+
+  <header class="rpt-header">
+    <div class="rpt-cu">{{ page.credit_union }}</div>
+    {% for line in page.heading_lines %}
+    <div class="rpt-subhead">{{ line }}</div>
+    {% endfor %}
+  </header>
+
+  {% for m in page.matrices %}
+  <table class="rc-matrix">
+    <thead>
+      <tr>
+        <th class="hd corner" colspan="2">Original Grade</th>
+        <th class="hd" colspan="{{ m.col_headers | length }}"></th>
+        <th class="hd">Grand Total</th>
+        {% for sh in m.side_headers %}<th class="hd side"></th>{% endfor %}
+      </tr>
+      <tr>
+        <th class="hd corner">{{ m.corner }}</th>
+        <th class="hd"></th>
+        {% for h in m.col_headers %}<th class="hd">{{ h }}</th>{% endfor %}
+        <th class="hd"></th>
+        {% for sh in m.side_headers %}<th class="hd side">{{ sh }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in m.rows %}
+      <tr>
+        <th class="hd rowlabel" colspan="2">{{ row.label }}</th>
+        {% for cell in row.cells %}
+        <td class="num {{ cell.state }}">{{ cell | mcell }}</td>
+        {% endfor %}
+        <td class="num total{% if row.total and row.total.bold %} b{% endif %}">{{ row.total | mcell }}</td>
+        {% for s in row.side %}<td class="num side">{{ s | mcell }}</td>{% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if loop.first and page.summary %}
+  <table class="rc-summary">
+    {% for s in page.summary %}
+    <tr><th class="hd rowlabel">{{ s.label }}</th><td class="num">{{ s.value | acct0 }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% endfor %}
+
+</section>
+{% endblock %}

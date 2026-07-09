@@ -21,7 +21,11 @@ from .model import (
     GradeMigrationRow,
     ImprDeterPage,
     KeyValueRow,
+    MatrixCell,
+    MatrixRow,
     PoolMigrationRow,
+    RiskChangeMatrix,
+    RiskChangePage,
 )
 
 _IMPR_DETER_TAB_HINTS = ("impr deter", "improved", "deteriorated")
@@ -154,3 +158,112 @@ def _find_label(ws, text: str) -> tuple[int, int] | None:
             if _cell_str(ws.cell(r, c).value).lower() == low:
                 return (r, c)
     return None
+
+
+# ── Risk Change matrices ─────────────────────────────────────────────
+
+_RISK_TAB_HINTS = ("risk change",)
+# Fill colors (last 6 hex) -> cell state.
+_FILL_STATE = {
+    "0D4D5E": "header",
+    "829901": "improved",
+    "873A3A": "deteriorated",
+}
+
+
+def _fill_state(styled_cell) -> str:
+    try:
+        fill = styled_cell.fill
+        if fill and fill.patternType:
+            rgb = fill.fgColor.rgb
+            if isinstance(rgb, str):
+                return _FILL_STATE.get(rgb[-6:].upper(), "plain")
+    except Exception:  # noqa: BLE001
+        pass
+    return "plain"
+
+
+def _read_matrix(wsv, wsf, hr: int, *, is_pct: bool) -> RiskChangeMatrix:
+    """Read one matrix whose corner ('$/% Current Grade') header is at
+    row ``hr``, column 1. Columns C..K (3..11) are original-grade
+    buckets, L (12) is Grand Total, N/O/P (14..16) are the side panel.
+    """
+    corner = _cell_str(wsv.cell(hr, 1).value)
+    col_headers = [
+        _cell_str(wsv.cell(hr, c).value) for c in range(3, 12)
+        if _cell_str(wsv.cell(hr, c).value)
+    ]
+    side_headers = [
+        _cell_str(wsv.cell(hr, c).value) for c in range(14, 17)
+        if _cell_str(wsv.cell(hr, c).value)
+    ]
+    rows: list[MatrixRow] = []
+    r = hr + 1
+    while r <= wsv.max_row:
+        label = _cell_str(wsv.cell(r, 1).value)
+        if not label or label in ("Balance Adjustment", "Total in Portfolio"):
+            break
+        is_total_row = label.lower() == "grand total"
+        cells = [
+            MatrixCell(
+                value=_num(wsv.cell(r, c).value),
+                state=_fill_state(wsf.cell(r, c)),
+                is_pct=is_pct,
+                bold=is_total_row,
+            )
+            for c in range(3, 3 + len(col_headers))
+        ]
+        total = MatrixCell(
+            value=_num(wsv.cell(r, 12).value), is_pct=is_pct, bold=True,
+        )
+        side = [
+            MatrixCell(value=_num(wsv.cell(r, c).value), is_pct=is_pct)
+            for c in range(14, 14 + len(side_headers))
+        ] if side_headers else []
+        rows.append(MatrixRow(label=label, cells=cells, total=total, side=side))
+        r += 1
+    return RiskChangeMatrix(
+        corner=corner, col_headers=col_headers, rows=rows,
+        side_headers=side_headers, is_pct=is_pct,
+    )
+
+
+def load_risk_change(report_path: str | Path) -> RiskChangePage:
+    """Read the 'Risk Change Total' tab into the model (both matrices)."""
+    wbv = load_workbook(report_path, data_only=True)
+    wbf = load_workbook(report_path, data_only=False)
+    tab = _find_tab(wbv, _RISK_TAB_HINTS)
+    if tab is None:
+        raise ValueError(
+            f"No Risk Change tab in {Path(report_path).name} "
+            f"(sheets: {wbv.sheetnames})"
+        )
+    wsv, wsf = wbv[tab], wbf[tab]
+
+    heading: list[str] = []
+    cu = _cell_str(wsv.cell(1, 1).value)
+    for r in range(2, 5):
+        v = _cell_str(wsv.cell(r, 1).value)
+        if v:
+            heading.append(v)
+
+    matrices: list[RiskChangeMatrix] = []
+    for r in range(1, wsv.max_row + 1):
+        label = _cell_str(wsv.cell(r, 1).value)
+        if label in ("$ Current Grade", "% Current Grade"):
+            matrices.append(_read_matrix(
+                wsv, wsf, r, is_pct=label.startswith("%")))
+
+    summary: list[KeyValueRow] = []
+    for name in ("Balance Adjustment", "Total in Portfolio"):
+        loc = _find_label(wsv, name)
+        if loc:
+            r, _c = loc
+            val = _num(wsv.cell(r, 12).value)  # column L
+            summary.append(KeyValueRow(label=name, value=val))
+
+    return RiskChangePage(
+        credit_union=cu, heading_lines=heading,
+        matrices=matrices, summary=summary,
+    )
+
