@@ -84,6 +84,17 @@ card_cm = {
 }
 CARD_PAT = r'(?i)^Credit Cardholder - AIRES \d{1,2}-\d{1,2}-\d{2,4}( V\d+)?\.(xlsx|xls)$'
 
+# ── Lendkey student-loan extracts (held/lender balance) ──
+student_cm = {
+    'member_number': 'Borr_ID', 'current_balance': 'Loan_Bal_-_Month_End_Lender',
+    'loan_pool_code': 'Loan Type Code',
+    'original_fico_score': 'Borr_FICO', 'current_fico_score': 'Borr_FICO',
+    'open_date': 'First_Disbursement_Date',
+    'days_delinquent': 'Days_Delinquent',
+}
+STUDENT_PAT = r'(?i)^Lendkey Student Loans \d{1,2}-\d{1,2}-\d{4}\.(xlsx|xls)$'
+CONSOL_PAT = r'(?i)^Lendkey Consolidation \d{1,2}-\d{1,2}-\d{4}\.(xlsx|xls)$'
+
 config = {
     'credit_union': 'Lanco FCU',
     'charter_number': '16657',
@@ -112,6 +123,10 @@ config = {
          'column_mappings': aires_cm, 'member_account': aires_ma, 'has_header': True},
         {'label': 'Credit Cardholder', 'file_pattern': CARD_PAT,
          'column_mappings': card_cm, 'member_account': aires_ma, 'has_header': True},
+        {'label': 'Lendkey Student Loans', 'file_pattern': STUDENT_PAT,
+         'column_mappings': student_cm, 'member_account': aires_ma, 'has_header': True},
+        {'label': 'Lendkey Consolidation', 'file_pattern': CONSOL_PAT,
+         'column_mappings': student_cm, 'member_account': aires_ma, 'has_header': True},
         {'label': 'Negative Shares', 'file_pattern': NEGSHARE_PAT,
          'column_mappings': negshare_cm,
          'member_account': {'mode': 'delimiter', 'suffix_length': 0, 'delimiter': '-'},
