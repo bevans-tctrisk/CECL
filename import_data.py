@@ -1296,7 +1296,28 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
         'loan_pool': map_pool_codes(col('loan_pool_code'), config),
     })
 
-    # Optional Business Risk Rating value (raw column content). The
+    # ── Charge-off exclusion ──
+    # Some cores leave charged-off loans in the extract under their original
+    # (active) loan-type code, carrying the written-off amount in a dedicated
+    # "charge off amount" column even though the GL / balance sheet has already
+    # removed them. When ``chargeoff_exclude_column`` is set (a header name, or
+    # a 0-based column index for headerless files), any row with a non-zero
+    # value there is routed to the ``Exclude`` pool so it drops out of the
+    # reserve population and the loan totals reconcile to the balance sheet.
+    _co_ref = config.get('chargeoff_exclude_column')
+    if _co_ref is not None and _co_ref != '':
+        try:
+            _co_series = df[_co_ref] if has_header else df.iloc[:, int(_co_ref)]
+            _co_mask = pd.to_numeric(_co_series, errors='coerce').fillna(0) != 0
+            _n_co = int(_co_mask.sum())
+            if _n_co:
+                clean_data.loc[_co_mask, 'loan_pool'] = 'Exclude'
+                print(f"    Charge-off exclusion: {_n_co} loan(s) with a non-zero "
+                      f"'{_co_ref}' routed to Exclude (already charged off).")
+        except (KeyError, IndexError, ValueError) as _co_exc:
+            print(f"    WARNING: chargeoff_exclude_column {_co_ref!r} not usable: "
+                  f"{_co_exc}")
+
     # report engine routes this through ``cecl_engine.assign_business_risk_grade``
     # when the loan's pool is flagged ``brr: true`` in the CU's YAML.
     # Stored as text so analyst-defined rating labels (e.g. "Pass",
@@ -1556,6 +1577,12 @@ def process_client(client_name, specific_file=None, scan_folder_override=None):
             # CU-level ``pool_map`` for that file so the schemes stay isolated.
             if matched_extract.get('pool_map'):
                 per_file_cfg['pool_map'] = dict(matched_extract.get('pool_map'))
+            # Per-extract charge-off exclusion column (name or index). Routes
+            # rows with a non-zero charge-off amount to the Exclude pool.
+            if matched_extract.get('chargeoff_exclude_column') not in (None, ''):
+                per_file_cfg['chargeoff_exclude_column'] = (
+                    matched_extract.get('chargeoff_exclude_column')
+                )
             label_txt = matched_extract.get('label') or '(unlabeled)'
             print(f"    Using extract mapping: {label_txt}")
         elif extracts:
