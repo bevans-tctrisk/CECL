@@ -18,6 +18,9 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 from .model import (
+    AclEnvPage,
+    AclPoolRow,
+    AdjustmentRow,
     GradeMigrationRow,
     ImprDeterPage,
     KeyValueRow,
@@ -266,4 +269,92 @@ def load_risk_change(report_path: str | Path) -> RiskChangePage:
         credit_union=cu, heading_lines=heading,
         matrices=matrices, summary=summary,
     )
+
+
+# ── ACL Env by Pool ──────────────────────────────────────────────────
+
+_ACL_TAB_HINTS = ("acl env",)
+_ACL_ADJ_LABELS = (
+    "Total Specifically Identified Allowance",
+    "Total Allowance Needed",
+    "Allowance for Credit Loss Balance",
+    "Adjustment (Overfunded)",
+)
+
+
+def _bold(wsf, r: int, c: int) -> bool:
+    try:
+        return bool(wsf.cell(r, c).font.bold)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def load_acl_env(report_path: str | Path) -> AclEnvPage:
+    """Read the 'ACL Env by Pool Mgmt Adj' tab into the model."""
+    wbv = load_workbook(report_path, data_only=True)
+    wbf = load_workbook(report_path, data_only=False)
+    tab = _find_tab(wbv, _ACL_TAB_HINTS)
+    if tab is None:
+        raise ValueError(
+            f"No ACL Env tab in {Path(report_path).name} "
+            f"(sheets: {wbv.sheetnames})"
+        )
+    wsv, wsf = wbv[tab], wbf[tab]
+
+    cu = _cell_str(wsv.cell(1, 1).value)
+    heading = [_cell_str(wsv.cell(r, 1).value)
+               for r in (2, 3) if _cell_str(wsv.cell(r, 1).value)]
+
+    hdr = _find_label(wsv, "Current Grade")
+    hr = hdr[0] if hdr else 5
+    col_headers = [
+        _cell_str(wsv.cell(hr, c).value).replace("\n", " ").strip()
+        for c in range(1, 12) if _cell_str(wsv.cell(hr, c).value)
+    ]
+
+    def _row_vals(r: int) -> dict:
+        g = lambda c: _num(wsv.cell(r, c).value)  # noqa: E731
+        return dict(
+            balance=g(2), specific_id=g(3), llc_balance=g(4),
+            base_loss_rate=g(5), mgmt_adj=g(6), allowance_factor=g(7),
+            allowance_before_env=g(8), env_factor=g(9),
+            env_allowance=g(10), total_allowance=g(11),
+        )
+
+    pool_rows: list[AclPoolRow] = []
+    pooled_totals: AclPoolRow | None = None
+    impaired_rows: list[AdjustmentRow] = []
+    adjustment_rows: list[AdjustmentRow] = []
+    current_pool: str | None = None
+    section = "pools"
+
+    for r in range(hr + 1, wsv.max_row + 1):
+        a = _cell_str(wsv.cell(r, 1).value)
+        if not a:
+            continue
+        if a == "Pooled Totals":
+            pooled_totals = AclPoolRow(pool=a, is_total=True, **_row_vals(r))
+            section = "await_impaired"
+        elif a == "Impaired Loans":
+            section = "impaired"
+        elif section == "pools":
+            if a == "Total" and current_pool:
+                pool_rows.append(AclPoolRow(pool=current_pool, **_row_vals(r)))
+            else:
+                current_pool = a
+        elif section == "impaired":
+            val = _num(wsv.cell(r, 11).value)  # column K
+            bold = _bold(wsf, r, 1)
+            row = AdjustmentRow(label=a, value=val, bold=bold)
+            if any(a.startswith(lbl) for lbl in _ACL_ADJ_LABELS):
+                adjustment_rows.append(row)
+            else:
+                impaired_rows.append(row)
+
+    return AclEnvPage(
+        credit_union=cu, heading_lines=heading, col_headers=col_headers,
+        pool_rows=pool_rows, pooled_totals=pooled_totals,
+        impaired_rows=impaired_rows, adjustment_rows=adjustment_rows,
+    )
+
 

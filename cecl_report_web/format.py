@@ -24,6 +24,21 @@ def acct0(v: float | int | None) -> str:
     return f"{n:,.0f}"
 
 
+def acct2(v: float | int | None) -> str:
+    """Accounting style, 2 decimals (matches ``_(* #,##0.00...``)."""
+    if v is None:
+        return "-"
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if round(n, 2) == 0:
+        return "-"
+    if n < 0:
+        return f"({abs(n):,.2f})"
+    return f"{n:,.2f}"
+
+
 def pct0(v: float | int | None) -> str:
     """Whole-percent: 0.0 -> '0%', 0.123 -> '12%' (Excel fraction input)."""
     if v is None:
@@ -50,6 +65,16 @@ def pct2(v: float | int | None) -> str:
         return ""
     try:
         return f"{float(v) * 100:.2f}%"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def pct4(v: float | int | None) -> str:
+    """Four-decimal percent: 0.0011 -> '0.1100%' (matches Excel 0.0000%)."""
+    if v is None:
+        return ""
+    try:
+        return f"{float(v) * 100:.4f}%"
     except (TypeError, ValueError):
         return str(v)
 

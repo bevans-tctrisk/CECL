@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Allowance & Provision — {{ page.credit_union }}{% endblock %}
+{% block body %}
+<section class="page acl-env">
+
+  <header class="rpt-header rpt-left">
+    <div class="rpt-cu">{{ page.credit_union }}</div>
+    {% for line in page.heading_lines %}
+    <div class="rpt-subhead">{{ line }}</div>
+    {% endfor %}
+  </header>
+
+  <table class="acl-table">
+    <thead>
+      <tr>
+        {% for h in page.col_headers %}<th class="hd">{{ h }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in page.pool_rows %}
+      <tr>
+        <td class="l b">{{ row.pool }}</td>
+        <td class="num">{{ row.balance | acct0 }}</td>
+        <td class="num">{{ row.specific_id | acct2 }}</td>
+        <td class="num">{{ row.llc_balance | acct0 }}</td>
+        <td class="num">{{ row.base_loss_rate | pct4 }}</td>
+        <td class="num">{{ row.mgmt_adj | pct4 }}</td>
+        <td class="num">{{ row.allowance_factor | pct4 }}</td>
+        <td class="num">{{ row.allowance_before_env | acct0 }}</td>
+        <td class="num">{{ row.env_factor | pct2 }}</td>
+        <td class="num">{{ row.env_allowance | acct0 }}</td>
+        <td class="num">{{ row.total_allowance | acct0 }}</td>
+      </tr>
+      {% endfor %}
+      {% if page.pooled_totals %}
+      {% set pt = page.pooled_totals %}
+      <tr class="pooled-total">
+        <td class="l b">{{ pt.pool }}</td>
+        <td class="num b">{{ pt.balance | acct0 }}</td>
+        <td class="num b">{{ pt.specific_id | acct2 }}</td>
+        <td class="num b">{{ pt.llc_balance | acct0 }}</td>
+        <td class="num"></td>
+        <td class="num"></td>
+        <td class="num"></td>
+        <td class="num b">{{ pt.allowance_before_env | acct0 }}</td>
+        <td class="num"></td>
+        <td class="num b">{{ pt.env_allowance | acct0 }}</td>
+        <td class="num b">{{ pt.total_allowance | acct0 }}</td>
+      </tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  <table class="acl-impaired">
+    <tr><th class="section" colspan="2">Impaired Loans</th></tr>
+    {% for row in page.impaired_rows %}
+    <tr>
+      <td class="l">{{ row.label }}</td>
+      <td class="num">{{ row.value | acct0 }}</td>
+    </tr>
+    {% endfor %}
+    {% for row in page.adjustment_rows %}
+    <tr class="{% if row.bold %}b{% endif %}">
+      <td class="l{% if row.bold %} b{% endif %}">{{ row.label }}</td>
+      <td class="num{% if row.bold %} b{% endif %}">{{ row.value | acct0 }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+</section>
+{% endblock %}

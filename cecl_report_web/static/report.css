@@ -159,4 +159,46 @@ html, body {
   text-align: right; font-variant-numeric: tabular-nums; padding: 3pt 8pt;
 }
 
+/* ---- ACL Env by Pool (allowance calculation) ---- */
+.acl-env { font-size: 11pt; }
+.rpt-left { text-align: left; }
+
+.acl-table {
+  border-collapse: collapse;
+  margin: 0.2in 0 0.3in 0;
+  width: 100%;
+}
+.acl-table th, .acl-table td {
+  border: 0.5px solid #d9d9d9;
+  padding: 3pt 6pt;
+  white-space: nowrap;
+}
+.acl-table .hd {
+  background: #0D4D5E;
+  color: #ffffff;
+  font-weight: 700;
+  text-align: center;
+  vertical-align: bottom;
+}
+.acl-table .l { text-align: left; }
+.acl-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.acl-table .b { font-weight: 700; }
+.acl-table .pooled-total td { border-top: 1.5px solid #000; }
+
+.acl-impaired {
+  border-collapse: collapse;
+  margin: 0.15in 0;
+  min-width: 4.2in;
+}
+.acl-impaired td { padding: 2pt 10pt 2pt 0; }
+.acl-impaired .section {
+  text-align: left; font-weight: 700; padding-bottom: 3pt;
+}
+.acl-impaired .l { text-align: left; padding-right: 40pt; }
+.acl-impaired .num {
+  text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.acl-impaired .b { font-weight: 700; }
+
+
 

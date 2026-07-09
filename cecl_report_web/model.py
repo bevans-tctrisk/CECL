@@ -119,6 +119,46 @@ class RiskChangePage:
 
 
 @dataclass
+class AclPoolRow:
+    """One pool's Total row on the ACL Env by Pool tab."""
+
+    pool: str
+    balance: float | None = None
+    specific_id: float | None = None
+    llc_balance: float | None = None
+    base_loss_rate: float | None = None
+    mgmt_adj: float | None = None
+    allowance_factor: float | None = None
+    allowance_before_env: float | None = None
+    env_factor: float | None = None
+    env_allowance: float | None = None
+    total_allowance: float | None = None
+    is_total: bool = False  # the "Pooled Totals" summary row
+
+
+@dataclass
+class AdjustmentRow:
+    """A labelled currency line in the impaired/adjustment section."""
+
+    label: str
+    value: float | None
+    bold: bool = False
+
+
+@dataclass
+class AclEnvPage:
+    """The "ACL Env by Pool Mgmt Adj" tab — the core allowance calc."""
+
+    credit_union: str
+    heading_lines: list[str] = field(default_factory=list)
+    col_headers: list[str] = field(default_factory=list)
+    pool_rows: list[AclPoolRow] = field(default_factory=list)
+    pooled_totals: AclPoolRow | None = None
+    impaired_rows: list[AdjustmentRow] = field(default_factory=list)
+    adjustment_rows: list[AdjustmentRow] = field(default_factory=list)
+
+
+@dataclass
 class ReportModel:
     """Top-level model for one report (Vizo Model or Supplemental).
 

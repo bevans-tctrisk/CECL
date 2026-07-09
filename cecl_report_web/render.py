@@ -41,9 +41,11 @@ def _env() -> Environment:
     )
     from . import format as _fmt
     env.filters["acct0"] = _fmt.acct0
+    env.filters["acct2"] = _fmt.acct2
     env.filters["pct0"] = _fmt.pct0
     env.filters["pct1"] = _fmt.pct1
     env.filters["pct2"] = _fmt.pct2
+    env.filters["pct4"] = _fmt.pct4
     env.filters["mcell"] = _fmt.mcell
     return env
 
