@@ -159,6 +159,36 @@ class AclEnvPage:
 
 
 @dataclass
+class GridCell:
+    """One faithfully-rendered cell for the generic grid renderer.
+
+    ``text`` is already formatted (via :func:`format.excel_format`);
+    styling is copied straight from the workbook so any labelled-grid tab
+    reproduces without a bespoke model/template.
+    """
+
+    text: str = ""
+    align: str = "left"      # left | center | right
+    bold: bool = False
+    italic: bool = False
+    fill: str | None = None  # 6-hex background
+    color: str | None = None  # 6-hex text color
+    size: float | None = None
+    colspan: int = 1
+    rowspan: int = 1
+
+
+@dataclass
+class GridPage:
+    """A whole tab rendered generically as a styled grid of cells."""
+
+    credit_union: str
+    sheet_name: str
+    rows: list[list[GridCell]] = field(default_factory=list)
+    landscape: bool = False
+
+
+@dataclass
 class ReportModel:
     """Top-level model for one report (Vizo Model or Supplemental).
 

@@ -22,6 +22,8 @@ from .model import (
     AclPoolRow,
     AdjustmentRow,
     GradeMigrationRow,
+    GridCell,
+    GridPage,
     ImprDeterPage,
     KeyValueRow,
     MatrixCell,
@@ -30,6 +32,7 @@ from .model import (
     RiskChangeMatrix,
     RiskChangePage,
 )
+from .format import excel_format
 
 _IMPR_DETER_TAB_HINTS = ("impr deter", "improved", "deteriorated")
 _CECL_LABELS = (
@@ -356,5 +359,106 @@ def load_acl_env(report_path: str | Path) -> AclEnvPage:
         pool_rows=pool_rows, pooled_totals=pooled_totals,
         impaired_rows=impaired_rows, adjustment_rows=adjustment_rows,
     )
+
+
+# ── Generic faithful grid (any labelled-grid tab) ────────────────────
+
+def _hex6(color) -> str | None:
+    """Return a 6-hex RGB string for an openpyxl color, or None.
+
+    Skips black (default text) and theme/indexed colors we can't resolve
+    to an RGB reliably.
+    """
+    try:
+        rgb = color.rgb
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(rgb, str) or len(rgb) < 6:
+        return None
+    h = rgb[-6:].upper()
+    return None if h in ("000000",) else h
+
+
+def _align(styled_cell, value) -> str:
+    h = None
+    try:
+        h = styled_cell.alignment.horizontal
+    except Exception:  # noqa: BLE001
+        pass
+    if h in ("left", "center", "right"):
+        return h
+    # Excel's "General": numbers right, text left.
+    return "right" if isinstance(value, (int, float)) else "left"
+
+
+def load_grid(report_path: str | Path, sheet: str,
+              *, landscape: bool = False) -> GridPage:
+    """Read an entire tab into a styled :class:`GridPage`.
+
+    Every cell keeps its formatted text (per its Excel number format),
+    background fill, font color, bold, and alignment, plus merged-cell
+    spans — so labelled-grid tabs render faithfully with no bespoke
+    model. Blank rows are preserved as spacers.
+    """
+    wbv = load_workbook(report_path, data_only=True)
+    wbf = load_workbook(report_path, data_only=False)
+    if sheet not in wbv.sheetnames:
+        raise ValueError(f"Sheet {sheet!r} not in {Path(report_path).name}")
+    wsv, wsf = wbv[sheet], wbf[sheet]
+
+    # Effective extent: trim trailing empty columns/rows.
+    max_r, max_c = 0, 0
+    for r in range(1, wsv.max_row + 1):
+        for c in range(1, wsv.max_column + 1):
+            if wsv.cell(r, c).value not in (None, ""):
+                max_r = max(max_r, r)
+                max_c = max(max_c, c)
+    if max_r == 0:
+        return GridPage(credit_union="", sheet_name=sheet, rows=[])
+
+    # Merged-cell handling: anchor -> (rowspan, colspan); covered cells skip.
+    anchor_span: dict[tuple[int, int], tuple[int, int]] = {}
+    covered: set[tuple[int, int]] = set()
+    for mr in wsf.merged_cells.ranges:
+        anchor_span[(mr.min_row, mr.min_col)] = (
+            mr.max_row - mr.min_row + 1, mr.max_col - mr.min_col + 1)
+        for rr in range(mr.min_row, mr.max_row + 1):
+            for cc in range(mr.min_col, mr.max_col + 1):
+                if (rr, cc) != (mr.min_row, mr.min_col):
+                    covered.add((rr, cc))
+
+    cu = _cell_str(wsv.cell(1, 1).value)
+    rows: list[list[GridCell]] = []
+    for r in range(1, max_r + 1):
+        row_cells: list[GridCell] = []
+        for c in range(1, max_c + 1):
+            if (r, c) in covered:
+                continue
+            v = wsv.cell(r, c).value
+            sc = wsf.cell(r, c)
+            fill = None
+            try:
+                if sc.fill and sc.fill.patternType:
+                    fill = _hex6(sc.fill.fgColor)
+            except Exception:  # noqa: BLE001
+                fill = None
+            f = sc.font
+            rowspan, colspan = anchor_span.get((r, c), (1, 1))
+            row_cells.append(GridCell(
+                text=excel_format(v, sc.number_format),
+                align=_align(sc, v),
+                bold=bool(f and f.bold),
+                italic=bool(f and f.italic),
+                fill=fill,
+                color=_hex6(f.color) if f and f.color else None,
+                size=float(f.size) if f and f.size else None,
+                colspan=colspan,
+                rowspan=rowspan,
+            ))
+        rows.append(row_cells)
+
+    return GridPage(credit_union=cu, sheet_name=sheet, rows=rows,
+                    landscape=landscape)
+
 
 

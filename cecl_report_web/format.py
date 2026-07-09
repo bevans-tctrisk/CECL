@@ -85,3 +85,54 @@ def mcell(cell) -> str:
         return ""
     return pct2(cell.value) if getattr(cell, "is_pct", False) else acct0(cell.value)
 
+
+import re as _re
+from datetime import date as _date, datetime as _datetime
+
+_PCT_RE = _re.compile(r"0(?:\.(0+))?%")
+
+
+def excel_format(value, numfmt: str | None) -> str:
+    """Format a cell value the way Excel would, given its number format.
+
+    Powers the generic faithful-grid renderer: text passes through, dates
+    honour mm-dd-yy, and numeric cells map to the accounting / dollar /
+    percent styles used across the reports. Good enough for the report
+    number formats in use — not a full Excel format engine.
+    """
+    if value is None or value == "":
+        return ""
+    if isinstance(value, str):
+        return value
+    fmt = (numfmt or "General").strip()
+
+    if isinstance(value, (_datetime, _date)):
+        if "mm" in fmt.lower() and "dd" in fmt.lower():
+            yy = "%Y" if "yyyy" in fmt.lower() else "%y"
+            return value.strftime(f"%m-%d-{yy}")
+        return value.strftime("%m/%d/%Y")
+
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    low = fmt.lower()
+    if "%" in fmt:
+        m = _PCT_RE.search(fmt)
+        decimals = len(m.group(1)) if (m and m.group(1)) else 0
+        return f"{n * 100:.{decimals}f}%"
+    if "$" in fmt:
+        if round(n) == 0:
+            return "-"
+        return f"(${abs(n):,.0f})" if n < 0 else f"${n:,.0f}"
+    if "#,##0.00" in fmt:
+        return acct2(n)
+    if "#,##0" in fmt:
+        return acct0(n)
+    if fmt in ("General", ""):
+        # integers show without trailing .0
+        return f"{int(n):,}" if float(n).is_integer() else str(n)
+    return str(value)
+
+

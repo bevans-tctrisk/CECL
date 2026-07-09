@@ -200,5 +200,26 @@ html, body {
 }
 .acl-impaired .b { font-weight: 700; }
 
+/* ---- Generic faithful grid (Env Factor, Hist Bal, CO-Recov-DQ, ...) ---- */
+.grid-page { font-size: 11pt; }
+.grid {
+  border-collapse: collapse;
+  width: 100%;
+  table-layout: auto;
+}
+.grid td {
+  border: none;
+  padding: 2pt 8pt;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.grid .a-left { text-align: left; }
+.grid .a-center { text-align: center; }
+.grid .a-right { text-align: right; font-variant-numeric: tabular-nums; }
+.grid .b { font-weight: 700; }
+.grid .i { font-style: italic; }
+
+
+
 
 
