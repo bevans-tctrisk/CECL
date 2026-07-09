@@ -444,8 +444,15 @@ def load_grid(report_path: str | Path, sheet: str,
                 fill = None
             f = sc.font
             rowspan, colspan = anchor_span.get((r, c), (1, 1))
+            text = excel_format(v, sc.number_format)
+            wrap = False
+            try:
+                wrap = bool(sc.alignment.wrap_text)
+            except Exception:  # noqa: BLE001
+                wrap = False
+            wrap = wrap or ("\n" in text)
             row_cells.append(GridCell(
-                text=excel_format(v, sc.number_format),
+                text=text,
                 align=_align(sc, v),
                 bold=bool(f and f.bold),
                 italic=bool(f and f.italic),
@@ -454,6 +461,7 @@ def load_grid(report_path: str | Path, sheet: str,
                 size=float(f.size) if f and f.size else None,
                 colspan=colspan,
                 rowspan=rowspan,
+                wrap=wrap,
             ))
         rows.append(row_cells)
 

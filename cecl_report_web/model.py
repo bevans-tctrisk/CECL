@@ -176,6 +176,7 @@ class GridCell:
     size: float | None = None
     colspan: int = 1
     rowspan: int = 1
+    wrap: bool = False       # wrap long text / honor embedded newlines
 
 
 @dataclass

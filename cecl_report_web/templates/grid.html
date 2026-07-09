@@ -9,7 +9,7 @@
       <td
         {% if cell.colspan > 1 %}colspan="{{ cell.colspan }}"{% endif %}
         {% if cell.rowspan > 1 %}rowspan="{{ cell.rowspan }}"{% endif %}
-        class="a-{{ cell.align }}{% if cell.bold %} b{% endif %}{% if cell.italic %} i{% endif %}"
+        class="a-{{ cell.align }}{% if cell.bold %} b{% endif %}{% if cell.italic %} i{% endif %}{% if cell.wrap %} wrap{% endif %}"
         style="{% if cell.fill %}background:#{{ cell.fill }};{% endif %}{% if cell.color %}color:#{{ cell.color }};{% endif %}{% if cell.size %}font-size:{{ cell.size }}pt;{% endif %}"
       >{{ cell.text }}</td>
       {% endfor %}

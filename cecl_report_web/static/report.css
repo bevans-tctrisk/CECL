@@ -218,6 +218,12 @@ html, body {
 .grid .a-right { text-align: right; font-variant-numeric: tabular-nums; }
 .grid .b { font-weight: 700; }
 .grid .i { font-style: italic; }
+/* Wrapped cells: honor embedded newlines and wrap long paragraphs. */
+.grid .wrap {
+  white-space: pre-line;
+  max-width: 7in;
+  vertical-align: top;
+}
 
 
 
