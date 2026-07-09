@@ -128,7 +128,11 @@ def render_pdf(
                     format=page_format,
                     landscape=landscape,
                     print_background=print_background,
-                    prefer_css_page_size=True,
+                    # NOTE: do NOT set prefer_css_page_size — it makes
+                    # Chromium honor the CSS ``@page size`` (portrait) and
+                    # silently ignore the ``landscape`` flag. Letting the
+                    # pdf() format+landscape params drive page size keeps
+                    # wide tabs (Risk Change, ACL Env, ...) landscape.
                     margin={
                         "top": margin,
                         "bottom": margin,

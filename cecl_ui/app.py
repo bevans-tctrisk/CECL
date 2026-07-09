@@ -42,6 +42,7 @@ from cecl_ui.routes.scale_setup import scale_setup_bp
 from cecl_ui.routes.scale_runs import scale_runs_bp
 from cecl_ui.routes.run import run_bp
 from cecl_ui.routes.admin import admin_bp
+from cecl_ui.routes.report_web import report_web_bp
 
 
 def create_app() -> Flask:
@@ -87,6 +88,7 @@ def create_app() -> Flask:
     app.register_blueprint(scale_runs_bp, url_prefix="/scale-runs")
     app.register_blueprint(run_bp, url_prefix="/run")
     app.register_blueprint(admin_bp, url_prefix="/admin")
+    app.register_blueprint(report_web_bp, url_prefix="/report-web")
 
     return app
 

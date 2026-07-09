@@ -7,9 +7,11 @@
    open substitute) so pagination/line-breaks stay identical. The stack
    below falls back Calibri -> Carlito -> generic sans. */
 
+/* Page size, orientation, and margins are driven by the Chromium pdf()
+   call (format + landscape + margin) so wide tabs can go landscape.
+   Declaring `size` here would override that flag, so we don't. */
 @page {
-  size: Letter portrait;
-  margin: 0.75in;
+  margin: 0;
 }
 
 * { box-sizing: border-box; }
