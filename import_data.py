@@ -1548,6 +1548,14 @@ def process_client(client_name, specific_file=None, scan_folder_override=None):
                 per_file_cfg['pool_code_split'] = (
                     matched_extract.get('pool_code_split') or ''
                 )
+            # Per-extract ``pool_map`` override. Some CUs ship a second loan
+            # extract whose loan-type codes use a *different* numbering scheme
+            # that collides with the CU-level codes (e.g. code ``10`` means
+            # one pool in the legacy AIRES file and another in a newer "v2"
+            # export). When present, the extract's map fully replaces the
+            # CU-level ``pool_map`` for that file so the schemes stay isolated.
+            if matched_extract.get('pool_map'):
+                per_file_cfg['pool_map'] = dict(matched_extract.get('pool_map'))
             label_txt = matched_extract.get('label') or '(unlabeled)'
             print(f"    Using extract mapping: {label_txt}")
         elif extracts:
