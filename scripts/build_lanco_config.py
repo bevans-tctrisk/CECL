@@ -136,6 +136,21 @@ config = {
     'pool_order': POOLS + ['Ignore'],
     'not_risk_rated': [],
     'acl_months_by_pool': {p: 36 for p in POOLS},
+    'historical_file_formats': {
+        # Transaction-level "Charge off and Recovery Template MM-DD-YY.xlsx":
+        # date(0) | account(1) | trailer(2) | name(3) | Recovery Amount(4) |
+        # Charge off Amount(5) | Loan Type Code(6) | ...  Combined mode.
+        # strict_columns=True: two amount cols (recovery vs charge-off) mean
+        # the header-text heuristic can't tell them apart, so force indices.
+        'chargeoff': {'has_header': True, 'skip_rows': 0, 'account_col': 1,
+                      'code_col': 6, 'amount_col': 5, 'date_col': 0, 'member_col': 1,
+                      'strict_columns': True,
+                      'member_account': {'mode': 'fixed_suffix', 'suffix_length': 0}},
+        'recovery': {'has_header': True, 'skip_rows': 0, 'account_col': 1,
+                     'code_col': 6, 'amount_col': 4, 'date_col': 0, 'member_col': 1,
+                     'strict_columns': True,
+                     'member_account': {'mode': 'fixed_suffix', 'suffix_length': 0}},
+    },
     'data_directory': os.path.join(WS, 'Raw_Uploads', SHORT),
     'loan_source_folder': CLIENT,
     'monthly_balance': {'source': 'single'},
