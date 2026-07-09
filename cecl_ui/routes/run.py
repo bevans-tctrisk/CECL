@@ -1452,7 +1452,7 @@ def edit_settings(short_name: str):
                 "risk_rated": rr_val == "yes",
                 "acl_months": acl_int,
                 "excluded": rr_val == "excluded",
-                "use_default_mgmt_adj": False,
+                "use_default_mgmt_adj": request.form.get(f"usedef_{i}") is not None,
             })
 
         config_service.set_pools(cfg, new_pools)
@@ -1494,6 +1494,7 @@ def edit_settings(short_name: str):
             "excluded": p["excluded"],
             "acl_months": p["acl_months"] or "",
             "mgmt_adj_pct": _overlay_pct(p["name"]),
+            "use_default": bool(p.get("use_default_mgmt_adj")),
         }
         for p in pools_list
     ]
