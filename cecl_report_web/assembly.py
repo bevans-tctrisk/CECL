@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import from_workbook as fw
 from . import render as R
+from . import charts as C
 from .model import CoverPage
 
 # Wide tabs render landscape; everything else portrait. A grid tab also
@@ -55,6 +56,11 @@ def _render_sheet(report_path: Path, sheet: str, cu: str, snap: str,
     low = sheet.strip().lower()
     landscape = any(h in low for h in _LANDSCAPE_HINTS)
     try:
+        # Any embedded charts on this sheet, re-rendered as inline SVG.
+        try:
+            svgs = C.render_charts_for_sheet(report_path, sheet)
+        except Exception:  # noqa: BLE001
+            svgs = []
         if "cover" in low:
             cover = CoverPage(
                 credit_union=cu, period_ending=snap,
@@ -62,18 +68,18 @@ def _render_sheet(report_path: Path, sheet: str, cu: str, snap: str,
             return R.render_html("cover.html", cover=cover), False
         if "impr deter" in low or ("improved" in low and "deteriorated" in low):
             page = fw.load_impr_deter(report_path)
-            return R.render_html("impr_deter.html", page=page), False
+            return R.render_html("impr_deter.html", page=page, charts=svgs), False
         if "risk change" in low:
             page = fw.load_risk_change(report_path)
-            return R.render_html("risk_change.html", page=page), True
+            return R.render_html("risk_change.html", page=page, charts=svgs), True
         if "acl env" in low:
             page = fw.load_acl_env(report_path)
-            return R.render_html("acl_env.html", page=page), True
+            return R.render_html("acl_env.html", page=page, charts=svgs), True
         # Generic faithful grid for every other tab.
         gpage = fw.load_grid(report_path, sheet, landscape=landscape)
         ncols = max((len(r) for r in gpage.rows), default=0)
         landscape = landscape or ncols > _WIDE_COL_THRESHOLD
-        return R.render_html("grid.html", page=gpage), landscape
+        return R.render_html("grid.html", page=gpage, charts=svgs), landscape
     except Exception as exc:  # noqa: BLE001
         # Never let one bad tab kill the whole preview.
         return (f'<section class="page"><p style="color:#b00">'

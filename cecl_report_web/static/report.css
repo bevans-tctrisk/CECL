@@ -227,6 +227,17 @@ html, body {
   vertical-align: top;
 }
 
+/* ---- Charts (inline SVG, 2-up grid) ---- */
+.charts-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2in;
+  margin-top: 0.25in;
+  justify-content: flex-start;
+}
+.chart-cell { flex: 0 0 auto; }
+.chart-cell svg.chart { display: block; }
+
 
 
 

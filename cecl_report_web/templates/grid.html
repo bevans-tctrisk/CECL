@@ -16,5 +16,10 @@
     </tr>
     {% endfor %}
   </table>
+  {% if charts %}
+  <div class="charts-grid">
+    {% for svg in charts %}<div class="chart-cell">{{ svg | safe }}</div>{% endfor %}
+  </div>
+  {% endif %}
 </section>
 {% endblock %}
