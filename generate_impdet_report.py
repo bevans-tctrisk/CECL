@@ -1062,6 +1062,7 @@ def _load_extract_enrichment(config, workspace_root, snap=None):
             'days_delinquent':        'days_delinquent',
             'original_loan_amount':   'original_loan_amount',
             'total_available_credit': 'total_available_credit',
+            'current_balance':        'current_balance',
         }
         # Pre-resolve column series once per field
         field_series = {}

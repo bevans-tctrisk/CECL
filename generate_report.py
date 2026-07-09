@@ -10986,6 +10986,80 @@ def sheet_all_loans(wb, cu, snap, df, grades, config):
 
 # ── Main Entry Point ──────────────────────────────────────────────
 
+def _coerce_money(value):
+    """Best-effort float from an extract cell (handles ``$``/commas/blanks)."""
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        s = str(value).strip().replace('$', '').replace(',', '')
+        if s in ('', '-'):
+            return 0.0
+        neg = s.startswith('(') and s.endswith(')')
+        s = s.strip('()')
+        try:
+            v = float(s)
+        except ValueError:
+            return 0.0
+        return -v if neg else v
+
+
+def _resolve_dynamic_oac(config, snapshot_date):
+    """Resolve any data-derived Other Allowance Considerations in-place.
+
+    An OAC entry with ``source: unfunded_available`` has its ``balance``
+    computed from the loan extracts as the sum of undrawn credit
+    (``total_available_credit`` - ``current_balance``, floored at 0) for
+    loans whose raw ``loan_pool_code`` matches ``loan_type_code``. The
+    ``amount`` is refreshed as ``balance * percentage / 100``. Both the
+    Vizo and TCT report builders read these resolved values, so computing
+    them here keeps the number current every quarter without manual entry.
+    """
+    oac = config.get('other_allowance_considerations') or []
+    dynamic = [o for o in oac
+               if str((o or {}).get('source') or '').strip() == 'unfunded_available']
+    if not dynamic:
+        return
+    try:
+        from generate_impdet_report import _load_extract_enrichment
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"  OAC: enrichment loader unavailable ({e}); balances left as configured.")
+        return
+    enrich = _load_extract_enrichment(config, BASE, snap=snapshot_date)
+    if not enrich:
+        print("  OAC: no extract data found; unfunded balances left as configured.")
+        return
+    for o in dynamic:
+        raw_codes = o.get('loan_type_code')
+        if isinstance(raw_codes, (list, tuple, set)):
+            targets = {str(c).strip() for c in raw_codes if str(c).strip()}
+        else:
+            targets = {str(raw_codes).strip()} if str(raw_codes or '').strip() else set()
+        if not targets:
+            continue
+        total_unfunded = 0.0
+        n = 0
+        for rec in enrich.values():
+            if str(rec.get('loan_type', '')).strip() not in targets:
+                continue
+            avail = _coerce_money(rec.get('total_available_credit')) \
+                - _coerce_money(rec.get('current_balance'))
+            if avail > 0:
+                total_unfunded += avail
+                n += 1
+        pct = 0.0
+        try:
+            pct = float(o.get('percentage') or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        o['balance'] = round(total_unfunded, 2)
+        o['amount'] = round(total_unfunded * pct / 100.0, 2)
+        print(f"  OAC '{o.get('title')}': code(s) {sorted(targets)} unfunded "
+              f"${total_unfunded:,.2f} from {n} loan(s) @ {pct}% "
+              f"-> allowance ${o['amount']:,.2f}")
+
+
 def generate_report(client_name, snapshot_date=None, reports=None):
     """Generate CECL reports for a client.
 
@@ -11073,6 +11147,11 @@ def generate_report(client_name, snapshot_date=None, reports=None):
 
     # Load historical data
     hist = load_historical_data(config)
+
+    # Resolve data-derived Other Allowance Considerations (e.g. unfunded
+    # commitments computed from HELOC available credit) so both the Vizo
+    # and TCT builders read an up-to-date balance for this snapshot.
+    _resolve_dynamic_oac(config, snapshot_date)
 
     # Clamp historical data to the report period. The 5300 backfill
     # (and DB-overlay tables) commonly contain quarter-end snapshots

@@ -158,6 +158,16 @@ config = {
     'loan_source_folder': CLIENT,
     'monthly_balance': {'source': 'single'},
     'acl': {'use_5300_fallback': True},
+    # Other Allowance Considerations. "Unfunded Commitments" overlays the
+    # default management-adjustment rate (0.11%) against the undrawn portion
+    # of Prime HELOC (loan type code 50) lines. balance is resolved at report
+    # time by generate_report._resolve_dynamic_oac as
+    # sum(CREDIT LIMIT - CURRENT BAL, floored at 0) across code-50 loans.
+    'other_allowance_considerations': [
+        {'title': 'Unfunded Commitments', 'loan_type_code': '50',
+         'source': 'unfunded_available', 'percentage': 0.11,
+         'balance': 0.0, 'amount': 0.0},
+    ],
 }
 
 os.makedirs(config['data_directory'], exist_ok=True)
