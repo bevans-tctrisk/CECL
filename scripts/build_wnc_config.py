@@ -92,6 +92,10 @@ config = {
     'data_directory': os.path.join(WS, 'Raw_Uploads', SHORT),
     'loan_source_folder': CLIENT,
     'monthly_balance': {'source': 'single'},
+    # Booked ACL: WNC's monthly balance file carries no ALLL/ACL row, so
+    # pull the booked "Allowance for Credit Losses on Loans" (AAS0048)
+    # straight from NCUA Form 5300 for any quarter present in the core.
+    'acl': {'use_5300_fallback': True},
 }
 
 os.makedirs(config['data_directory'], exist_ok=True)
