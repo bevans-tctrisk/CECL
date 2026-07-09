@@ -186,6 +186,10 @@ html, body {
 .acl-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .acl-table .b { font-weight: 700; }
 .acl-table .pooled-total td { border-top: 1.5px solid #000; }
+.acl-table .indent { padding-left: 18pt; }
+.acl-table .pool-header td { padding-top: 5pt; font-size: 12pt; }
+.acl-table .grade-row td { color: #333; }
+.acl-table .pool-total td { border-top: 0.75px solid #999; }
 
 .acl-impaired {
   border-collapse: collapse;

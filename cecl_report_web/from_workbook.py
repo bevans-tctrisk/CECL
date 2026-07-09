@@ -341,10 +341,20 @@ def load_acl_env(report_path: str | Path) -> AclEnvPage:
         elif a == "Impaired Loans":
             section = "impaired"
         elif section == "pools":
-            if a == "Total" and current_pool:
-                pool_rows.append(AclPoolRow(pool=current_pool, **_row_vals(r)))
-            else:
+            has_balance = _num(wsv.cell(r, 2).value) is not None
+            if a == "Total":
+                # Pool total row (bold), labelled "Total" as in Excel; the
+                # pool name sits on the header row above it.
+                pool_rows.append(AclPoolRow(
+                    pool=a, kind="total", **_row_vals(r)))
+            elif not has_balance:
+                # A pool header row (name only, no Balance) — grade-rated
+                # and single-line pools both start here.
                 current_pool = a
+                pool_rows.append(AclPoolRow(pool=a, kind="header"))
+            else:
+                # A per-grade detail row under the current pool.
+                pool_rows.append(AclPoolRow(pool=a, kind="grade", **_row_vals(r)))
         elif section == "impaired":
             val = _num(wsv.cell(r, 11).value)  # column K
             bold = _bold(wsf, r, 1)

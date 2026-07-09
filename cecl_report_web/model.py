@@ -120,9 +120,15 @@ class RiskChangePage:
 
 @dataclass
 class AclPoolRow:
-    """One pool's Total row on the ACL Env by Pool tab."""
+    """One row on the ACL Env by Pool tab.
+
+    ``kind`` distinguishes a pool ``header`` (name only, no values), a
+    per-grade ``grade`` row, and a ``total`` row — so grade-rated CUs
+    render their full breakdown, not just single-line pool totals.
+    """
 
     pool: str
+    kind: str = "total"  # "header" | "grade" | "total"
     balance: float | None = None
     specific_id: float | None = None
     llc_balance: float | None = None
