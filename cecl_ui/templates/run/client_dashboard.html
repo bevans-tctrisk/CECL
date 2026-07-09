@@ -115,6 +115,49 @@
 </div>
 
 <div class="card">
+  <h3>Edit economic data (environmental factors)</h3>
+  <p class="muted">
+    These figures feed the environmental-factor (Q-factor) overlay applied on
+    top of the WARM baseline. Saved to <code>economic_data</code> in the config
+    and applied on the next report run. Leave a field blank to keep its current
+    value.
+  </p>
+  <form method="post" action="{{ url_for('run.set_economic', short_name=short_name) }}"
+        style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+    <label>State
+      <input type="text" name="state"
+             value="{{ economic_data.get('state', '') }}">
+    </label>
+    <label>County
+      <input type="text" name="county"
+             value="{{ economic_data.get('county', '') }}">
+    </label>
+    <label>Unemployment rate (decimal)
+      <input type="number" step="0.001" min="0" max="1" name="unemployment_rate"
+             value="{{ economic_data.get('unemployment_rate', '') }}">
+    </label>
+    <label>Population
+      <input type="number" min="0" name="population"
+             value="{{ economic_data.get('population', '') }}">
+    </label>
+    <label>Bankruptcies (count)
+      <input type="number" min="0" name="bankruptcies"
+             value="{{ economic_data.get('bankruptcies', '') }}">
+    </label>
+    <label>Foreclosures (count)
+      <input type="number" min="0" name="foreclosures"
+             value="{{ economic_data.get('foreclosures', '') }}">
+    </label>
+    <button class="btn btn-primary" type="submit">Save Economic Data</button>
+  </form>
+  <p class="help" style="margin-top:8px;">
+    Unemployment rate is a decimal (e.g. <code>0.031</code> = 3.1%). For full
+    state/county auto-fetch from BLS / Census / U.S. Courts, use the setup
+    wizard's Economic Data step.
+  </p>
+</div>
+
+<div class="card">
   <h3>3. Generate reports</h3>
   <form method="post" action="{{ url_for('run.reports', short_name=short_name) }}">
     <label>Snapshot date (optional)

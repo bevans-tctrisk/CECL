@@ -256,6 +256,7 @@ def client_dashboard(short_name: str):
         snapshots=snapshots,
         pending_files=pending,
         acl_history=acl_history,
+        economic_data=cfg.get("economic_data") or {},
         report_period_end=_period_to_snapshot(cfg.get("report_period") or ""),
     )
 
@@ -527,6 +528,63 @@ def set_acl(short_name: str):
         f"Re-generate the report to apply it.",
         "success",
     )
+    return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+
+@run_bp.route("/<short_name>/set-economic", methods=["POST"])
+def set_economic(short_name: str):
+    """Edit the CU's ``economic_data`` (environmental factors) without
+    re-running the setup wizard.
+
+    Writes the submitted values into ``cfg['economic_data']`` (the same block
+    the wizard's Economic Data step populates), which feeds the environmental
+    -factor overlay in the report engine. Blank fields are left unchanged so a
+    partial edit never wipes an existing value.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    econ = dict(cfg.get("economic_data") or {})
+    errors: list[str] = []
+
+    # Text fields — update only when a non-blank value is supplied.
+    for key in ("state", "county"):
+        v = (request.form.get(key) or "").strip()
+        if v:
+            econ[key] = v
+
+    # Unemployment rate — decimal in [0, 1].
+    ur_raw = (request.form.get("unemployment_rate") or "").strip()
+    if ur_raw:
+        try:
+            ur = float(ur_raw)
+            if 0.0 <= ur <= 1.0:
+                econ["unemployment_rate"] = ur
+            else:
+                errors.append("unemployment rate must be a decimal between 0 and 1")
+        except ValueError:
+            errors.append(f"invalid unemployment rate: {ur_raw!r}")
+
+    # Integer counts.
+    for key in ("population", "bankruptcies", "foreclosures"):
+        raw = (request.form.get(key) or "").strip().replace(",", "")
+        if raw:
+            try:
+                n = int(float(raw))
+                if n < 0:
+                    errors.append(f"{key} cannot be negative")
+                else:
+                    econ[key] = n
+            except ValueError:
+                errors.append(f"invalid {key}: {raw!r}")
+
+    cfg["economic_data"] = econ
+    config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+    if errors:
+        flash("Economic data saved, but some fields were skipped: "
+              + "; ".join(errors), "error")
+    else:
+        flash("Economic data saved. Re-generate the report to apply it.",
+              "success")
     return redirect(url_for("run.client_dashboard", short_name=short_name))
 
 
