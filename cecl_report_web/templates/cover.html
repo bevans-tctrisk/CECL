@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ cover.title }} — {{ cover.credit_union }}{% endblock %}
+{% block body %}
+<section class="page cover-page">
+  <div class="cover-block">
+    <h1 class="cover-title">{{ cover.title }}</h1>
+    {% if cover.subtitle %}
+    <h2 class="cover-subtitle">{{ cover.subtitle }}</h2>
+    {% endif %}
+
+    <div class="cover-cu">{{ cover.credit_union }}</div>
+    <div class="cover-period">{{ cover.period_ending }}</div>
+
+    <div class="cover-firm">{{ cover.firm }}</div>
+
+    <div class="cover-confidential">{{ cover.confidentiality }}</div>
+  </div>
+</section>
+{% endblock %}
