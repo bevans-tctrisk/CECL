@@ -73,3 +73,46 @@ html, body {
   color: #888888;      /* matches Font(color='888888') */
   margin-top: 0.55in;
 }
+
+/* ---- Impr Deter (Executive Summary numbers) ---- */
+.impr-deter { font-size: 12pt; }
+
+.rpt-header { text-align: center; margin-bottom: 0.25in; }
+.rpt-cu { font-size: 14pt; font-weight: 700; }
+.rpt-subhead { font-size: 12pt; font-weight: 700; }
+
+/* CECL Adjustment box: bordered block, label left / value right. */
+.cecl-box {
+  border-collapse: collapse;
+  border: 1px solid #000;
+  margin: 0.15in 0 0.35in 0.9in;   /* indented like Excel col D */
+  width: 5.0in;
+}
+.cecl-title {
+  caption-side: top;
+  text-align: left;
+  font-size: 14pt;
+  padding: 2pt 6pt;
+}
+.cecl-box td { padding: 2pt 8pt; }
+.cecl-label { text-align: left; }
+.cecl-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Improved/Deteriorated migration tables (Excel renders these red). */
+.mig-table {
+  border-collapse: collapse;
+  color: #FF0000;
+  margin: 0.15in 0 0.15in 0.9in;
+}
+.mig-table th, .mig-table td {
+  padding: 1pt 14pt 1pt 0;
+  font-weight: normal;
+}
+.mig-table .l { text-align: left; padding-right: 24pt; }
+.mig-table .r { text-align: right; font-variant-numeric: tabular-nums; }
+.by-pool { margin-left: 3.3in; }   /* sits at Excel col F */
+

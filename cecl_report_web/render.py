@@ -33,12 +33,17 @@ _FONT_FACES = [
 
 
 def _env() -> Environment:
-    return Environment(
+    env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         autoescape=select_autoescape(["html", "xml"]),
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    from . import format as _fmt
+    env.filters["acct0"] = _fmt.acct0
+    env.filters["pct0"] = _fmt.pct0
+    env.filters["pct1"] = _fmt.pct1
+    return env
 
 
 def _embedded_font_css() -> str:

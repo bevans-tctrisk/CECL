@@ -29,6 +29,51 @@ class CoverPage:
 
 
 @dataclass
+class KeyValueRow:
+    """One labelled currency line (e.g. a CECL Adjustment box row)."""
+
+    label: str
+    value: float | None
+
+
+@dataclass
+class PoolMigrationRow:
+    """Improved/Deteriorated by loan type/pool (fractions, e.g. 0.12)."""
+
+    pool: str
+    improved: float | None
+    deteriorated: float | None
+    net_change: float | None
+
+
+@dataclass
+class GradeMigrationRow:
+    """Improved/Deteriorated by credit grade."""
+
+    grade: str
+    balance: float | None
+    improved: float | None
+    deteriorated: float | None
+
+
+@dataclass
+class ImprDeterPage:
+    """The "Impr Deter" tab — CECL adjustment box + migration tables.
+
+    Mirrors the numeric Executive Summary the CU cares about: the
+    headline allowance figures plus improved/deteriorated migration by
+    pool and by grade.
+    """
+
+    credit_union: str
+    period_ending: str  # display "MM-DD-YY" style handled in template
+    heading_lines: list[str] = field(default_factory=list)
+    cecl_adjustment: list[KeyValueRow] = field(default_factory=list)
+    by_pool: list[PoolMigrationRow] = field(default_factory=list)
+    by_grade: list[GradeMigrationRow] = field(default_factory=list)
+
+
+@dataclass
 class ReportModel:
     """Top-level model for one report (Vizo Model or Supplemental).
 
