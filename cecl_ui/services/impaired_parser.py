@@ -880,7 +880,13 @@ def recompute_all(impaired_state: dict[str, Any],
     Returns the lookup-status dict from ``lookup_from_loan_data``.
     """
     rows = impaired_state.get("data_rows") or []
-    types = impaired_state.get("types") or []
+    # NOTE: parse_file stores the impairment-type table under
+    # "impairment_types" (not "types"); reading the wrong key left the
+    # provision-percentage lookup empty, so every row relying on a
+    # type-table percentage (e.g. "Delinquent Loans" @ 35%) resolved to
+    # None and the verification page showed $0 provision.
+    types = (impaired_state.get("impairment_types")
+             or impaired_state.get("types") or [])
     dq = impaired_state.get("dq_ranges") or []
     compute_calculations(rows, types, dq)
     return lookup_from_loan_data(rows, wizard_state)
