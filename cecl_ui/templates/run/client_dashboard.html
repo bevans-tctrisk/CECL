@@ -190,4 +190,40 @@
     </div>
   </form>
 </div>
+
+<div class="card">
+  <h3>Preview report in browser <span class="muted">(beta)</span></h3>
+  <p class="help">Open the generated Vizo report as a web page, or download a
+    print-ready PDF. Generate the report first, then pick its snapshot.</p>
+  {% if snapshots %}
+  <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end;">
+    <label>Snapshot
+      <select id="pv-snap">
+        {% for s in snapshots %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Report
+      <select id="pv-type">
+        <option value="vizo">Vizo Model</option>
+        <option value="supp">Vizo Supplemental</option>
+      </select>
+    </label>
+  </div>
+  <div class="btn-row">
+    <button type="button" class="btn btn-secondary" onclick="openReportWeb('')">Preview in browser</button>
+    <button type="button" class="btn btn-primary" onclick="openReportWeb('/pdf')">Download PDF</button>
+  </div>
+  <script>
+    function openReportWeb(suffix) {
+      var snap = document.getElementById('pv-snap').value;
+      var type = document.getElementById('pv-type').value;
+      var base = "{{ url_for('report_web.preview', short_name=short_name, snapshot='__SNAP__') }}";
+      var url = base.replace('__SNAP__', encodeURIComponent(snap)) + suffix + '?type=' + type;
+      window.open(url, '_blank');
+    }
+  </script>
+  {% else %}
+  <span class="help">No snapshots yet &mdash; run the importer and generate a report first.</span>
+  {% endif %}
+</div>
 {% endblock %}
