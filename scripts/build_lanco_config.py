@@ -158,6 +158,14 @@ config = {
     'loan_source_folder': CLIENT,
     'monthly_balance': {'source': 'single'},
     'acl': {'use_5300_fallback': True},
+    # Credit migration via the "original score method": Lanco ships only a
+    # single AIRES "CREDIT SCORE" (the loan's origination score) with no
+    # separate bureau pull, so current==original and nothing migrates. With
+    # this flag, import derives each loan's CURRENT score from the member's
+    # most-recently-opened loan's origination score while each loan keeps its
+    # own origination score as original — producing real grade movement.
+    # Requires open_date ('LOAN DATE') to be mapped (it is).
+    'credit_pull': {'prefer_original_for_new_loans': True},
     # Other Allowance Considerations. "Unfunded Commitments" overlays the
     # default management-adjustment rate (0.11%) against the undrawn portion
     # of Prime HELOC (loan type code 50) lines. balance is resolved at report
