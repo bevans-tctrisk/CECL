@@ -36,8 +36,26 @@ def _fill_hex(spPr) -> str | None:
     return None
 
 
+def _stroke_hex(spPr) -> str | None:
+    """Return the 6-hex line/stroke color of a graphicalProperties/spPr."""
+    if spPr is None:
+        return None
+    ln = getattr(spPr, "ln", None)
+    if ln is None:
+        return None
+    sf = getattr(ln, "solidFill", None)
+    if sf is None:
+        return None
+    v = getattr(sf, "value", None) or getattr(sf, "srgbClr", None)
+    if isinstance(v, str) and len(v) == 6:
+        return "#" + v
+    rgb = getattr(v, "rgb", None) if v is not None else None
+    if isinstance(rgb, str) and len(rgb) >= 6:
+        return "#" + rgb[-6:]
+    return None
+
+
 def _lighten(hex_color: str, frac: float) -> str:
-    """Blend a #rrggbb color toward white by ``frac`` (0=base, 1=white)."""
     try:
         h = hex_color.lstrip("#")
         r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
@@ -148,13 +166,18 @@ def read_chart_specs(report_path: str | Path, sheet: str) -> list[dict]:
                     cref = s.cat.strRef.f
             except Exception:  # noqa: BLE001
                 cref = None
+            sp = getattr(s, "graphicalProperties", None)
+            _fill = _fill_hex(sp)
+            _line = _stroke_hex(sp)
             series.append({
                 "name": name,
                 "values": [_num(v) for v in _resolve(wb, vref)],
                 "cats": [("" if v is None else str(v)) for v in _resolve(wb, cref)],
-                "color": _fill_hex(getattr(s, "graphicalProperties", None)),
+                "color": _fill or _line,
+                "filled": _fill is not None,
                 "point_colors": [
-                    _fill_hex(getattr(dp, "graphicalProperties", None))
+                    (_fill_hex(getattr(dp, "graphicalProperties", None))
+                     or _stroke_hex(getattr(dp, "graphicalProperties", None)))
                     for dp in (getattr(s, "data_points", None) or [])
                 ],
                 "label_fmt": (getattr(getattr(s, "dLbls", None), "numFmt", None)
@@ -237,11 +260,19 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
     def _bar_color(s, i, n, si):
         pts = s.get("point_colors") or []
         base = s.get("color") or PALETTE[si % len(PALETTE)]
-        if pts and i < len(pts):
-            # per-point gradient: base color lightened by index
-            g = (i / (n - 1)) * 0.68 if n > 1 else 0.0
-            return _lighten(base, g)
+        distinct = {p for p in pts if p}
+        if len(distinct) > 1:
+            # genuinely per-point colors (e.g. green/maroon/teal points)
+            return pts[i] if i < len(pts) and pts[i] else base
+        if pts and s.get("filled", True) and n > 1:
+            # single color across points -> reproduce Excel's lumMod gradient
+            return _lighten(base, (i / (n - 1)) * 0.68)
         return base
+
+    def _rect_attrs(s, color):
+        if s.get("filled", True):
+            return f'fill="{color}"'
+        return f'fill="none" stroke="{color}" stroke-width="1.4"'
 
     all_vals = [v for s in series for v in s["values"]]
     ncat = len(cats)
@@ -268,7 +299,7 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
                         parts.append(
                             f'<rect x="{left + acc:.1f}" y="{cy:.1f}" '
                             f'width="{w:.1f}" height="{bar_h:.1f}" '
-                            f'fill="{_bar_color(s, i, ncat, si)}"/>')
+                            f'{_rect_attrs(s, _bar_color(s, i, ncat, si))}/>')
                         if s.get("show_labels") and abs(val) > 1e-9:
                             parts.append(
                                 f'<text x="{left + acc + w/2:.1f}" '
@@ -281,7 +312,7 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
                 w = (abs(val) / vmax) * (pw - 26)  # leave room for the end label
                 parts.append(
                     f'<rect x="{left:.1f}" y="{cy:.1f}" width="{max(0, w):.1f}" '
-                    f'height="{bar_h:.1f}" fill="{_bar_color(s, i, ncat, 0)}"/>')
+                    f'height="{bar_h:.1f}" {_rect_attrs(s, _bar_color(s, i, ncat, 0))}/>')
                 if s.get("show_labels"):
                     parts.append(
                         f'<text x="{left + w + 3:.1f}" y="{cy + bar_h/2 + 3:.1f}" '
@@ -300,7 +331,7 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
                 y = top + ph - bh
                 parts.append(
                     f'<rect x="{gx + si * bw:.1f}" y="{y:.1f}" width="{bw:.1f}" '
-                    f'height="{bh:.1f}" fill="{_bar_color(s, i, ncat, si)}"/>')
+                    f'height="{bh:.1f}" {_rect_attrs(s, _bar_color(s, i, ncat, si))}/>')
                 if s.get("show_labels") and nseries == 1:
                     # white label inside the bar near the top, rotated vertical
                     lx, ly = gx + bw / 2, y + 12
@@ -323,11 +354,17 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
 
 
 def _svg_pie(values: list[float], cats: list[str], title: str | None,
-             *, doughnut: bool) -> str:
+             *, doughnut: bool, colors: list[str] | None = None) -> str:
     import math
     cx, cy, rad = 100, 130, 78
     inner = rad * 0.55 if doughnut else 0
     total = sum(v for v in values if v > 0)
+
+    def _col(i):
+        if colors and i < len(colors) and colors[i]:
+            return colors[i]
+        return PALETTE[i % len(PALETTE)]
+
     parts: list[str] = []
     if total <= 0:
         parts.append(f'<circle cx="{cx}" cy="{cy}" r="{rad}" fill="none" '
@@ -344,7 +381,7 @@ def _svg_pie(values: list[float], cats: list[str], title: str | None,
             large = 1 if frac > 0.5 else 0
             x1, y1 = cx + rad * math.cos(ang), cy + rad * math.sin(ang)
             x2, y2 = cx + rad * math.cos(a2), cy + rad * math.sin(a2)
-            color = PALETTE[i % len(PALETTE)]
+            color = _col(i)
             if frac >= 0.999:
                 parts.append(f'<circle cx="{cx}" cy="{cy}" r="{rad}" '
                              f'fill="{color}"/>')
@@ -360,7 +397,7 @@ def _svg_pie(values: list[float], cats: list[str], title: str | None,
     parts.append(_legend(
         [(f"{cats[i] if i < len(cats) else ''} "
           f"({(values[i]/total*100 if total else 0):.0f}%)",
-          PALETTE[i % len(PALETTE)])
+          _col(i))
          for i in range(len(values))],
         195, 100))
     return _wrap("".join(parts), title)
@@ -374,7 +411,8 @@ def render_chart_svg(spec: dict) -> str:
     if "Pie" in ctype or "Doughnut" in ctype:
         s0 = series[0] if series else {"values": [], "cats": []}
         return _svg_pie(s0.get("values", []), s0.get("cats", []), title,
-                        doughnut="Doughnut" in ctype)
+                        doughnut="Doughnut" in ctype,
+                        colors=s0.get("point_colors") or None)
     # Bar/column chart.
     cats = series[0]["cats"] if series else []
     horizontal = spec.get("bar_dir") == "bar"
