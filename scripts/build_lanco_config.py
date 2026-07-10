@@ -85,7 +85,7 @@ aires_ma = {'mode': 'fixed_suffix', 'suffix_length': 4}
 # Credit Card (16-digit PAN) and Lendkey (Borr_ID) accounts are NOT
 # member+suffix formats, so they keep no suffix break.
 nosuffix_ma = {'mode': 'fixed_suffix', 'suffix_length': 0}
-AIRES_PAT = r'(?i)^Aires Loan Data \d{2}-\d{2}-\d{4} WO Charge-offs\.(xlsx|xls)$'
+AIRES_PAT = r'(?i)^Aires Loan Data \d{2}-\d{2}-\d{4} WO Charge-offs\s*\.(xlsx|xls)$'
 NEGSHARE_PAT = r'(?i)^Negative Shares \d{1,2}-\d{1,2}-\d{2,4}( V\d+)?\.(xlsx|xls)$'
 negshare_cm = {'member_number': 'Account Number', 'current_balance': 'Current Balance',
                'loan_pool_code': 'Loan Type'}
