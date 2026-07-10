@@ -100,6 +100,7 @@ class MatrixRow:
     cells: list[MatrixCell] = field(default_factory=list)   # original-grade cols
     total: MatrixCell | None = None
     side: list[MatrixCell] = field(default_factory=list)     # Det/Imp/Unch
+    range_label: str = ""                                     # score range (e.g. "730+")
 
 
 @dataclass

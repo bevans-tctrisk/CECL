@@ -14,28 +14,25 @@
   <table class="rc-matrix">
     <thead>
       <tr>
-        <th class="hd corner" colspan="2">Original Grade</th>
-        <th class="hd" colspan="{{ m.col_headers | length }}"></th>
-        <th class="hd">Grand Total</th>
-        {% for sh in m.side_headers %}<th class="hd side"></th>{% endfor %}
+        <th class="hd corner" colspan="2"></th>
+        <th class="hd" colspan="{{ m.col_headers | length }}">Original Grade</th>
+        <th class="hd"></th>
       </tr>
       <tr>
-        <th class="hd corner">{{ m.corner }}</th>
-        <th class="hd"></th>
+        <th class="hd corner" colspan="2">{{ m.corner }}</th>
         {% for h in m.col_headers %}<th class="hd">{{ h }}</th>{% endfor %}
-        <th class="hd"></th>
-        {% for sh in m.side_headers %}<th class="hd side">{{ sh }}</th>{% endfor %}
+        <th class="hd">Grand Total</th>
       </tr>
     </thead>
     <tbody>
       {% for row in m.rows %}
       <tr>
-        <th class="hd rowlabel" colspan="2">{{ row.label }}</th>
+        <th class="hd rowlabel">{{ row.label }}</th>
+        <th class="hd rowrange">{{ row.range_label }}</th>
         {% for cell in row.cells %}
         <td class="num {{ cell.state }}">{{ cell | mcell }}</td>
         {% endfor %}
         <td class="num total{% if row.total and row.total.bold %} b{% endif %}">{{ row.total | mcell }}</td>
-        {% for s in row.side %}<td class="num side">{{ s | mcell }}</td>{% endfor %}
       </tr>
       {% endfor %}
     </tbody>

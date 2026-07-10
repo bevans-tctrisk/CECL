@@ -241,16 +241,26 @@ def _fill_state(styled_cell) -> str:
 
 def _read_matrix(wsv, wsf, hr: int, *, is_pct: bool) -> RiskChangeMatrix:
     """Read one matrix whose corner ('$/% Current Grade') header is at
-    row ``hr``, column 1. Columns C..K (3..11) are original-grade
-    buckets, L (12) is Grand Total, N/O/P (14..16) are the side panel.
+    row ``hr``, column 1. Column B (2) is the score range; the original-grade
+    buckets run from C (3) up to the 'Grand Total' column (detected), which is
+    the row total. The Deteriorated/Improved/Unchanged side panel is part of the
+    workbook but NOT the printed report, so it is omitted.
     """
     corner = _cell_str(wsv.cell(hr, 1).value)
+    # Find the Grand Total column (its header may sit on row hr or the merged
+    # row above). Grade buckets are everything between C and it.
+    gt_col = None
+    for c in range(3, 25):
+        h = (_cell_str(wsv.cell(hr, c).value)
+             or _cell_str(wsv.cell(hr - 1, c).value))
+        if h and h.lower() == "grand total":
+            gt_col = c
+            break
+    if gt_col is None:
+        gt_col = 12
+    nbuckets = gt_col - 3
     col_headers = [
-        _cell_str(wsv.cell(hr, c).value) for c in range(3, 12)
-        if _cell_str(wsv.cell(hr, c).value)
-    ]
-    side_headers = [
-        _cell_str(wsv.cell(hr, c).value) for c in range(14, 17)
+        _cell_str(wsv.cell(hr, c).value) for c in range(3, gt_col)
         if _cell_str(wsv.cell(hr, c).value)
     ]
     rows: list[MatrixRow] = []
@@ -259,6 +269,7 @@ def _read_matrix(wsv, wsf, hr: int, *, is_pct: bool) -> RiskChangeMatrix:
         label = _cell_str(wsv.cell(r, 1).value)
         if not label or label in ("Balance Adjustment", "Total in Portfolio"):
             break
+        rng = _cell_str(wsv.cell(r, 2).value)
         is_total_row = label.lower() == "grand total"
         cells = [
             MatrixCell(
@@ -267,20 +278,17 @@ def _read_matrix(wsv, wsf, hr: int, *, is_pct: bool) -> RiskChangeMatrix:
                 is_pct=is_pct,
                 bold=is_total_row,
             )
-            for c in range(3, 3 + len(col_headers))
+            for c in range(3, 3 + nbuckets)
         ]
         total = MatrixCell(
-            value=_num(wsv.cell(r, 12).value), is_pct=is_pct, bold=True,
+            value=_num(wsv.cell(r, gt_col).value), is_pct=is_pct, bold=True,
         )
-        side = [
-            MatrixCell(value=_num(wsv.cell(r, c).value), is_pct=is_pct)
-            for c in range(14, 14 + len(side_headers))
-        ] if side_headers else []
-        rows.append(MatrixRow(label=label, cells=cells, total=total, side=side))
+        rows.append(MatrixRow(label=label, range_label=rng, cells=cells,
+                              total=total, side=[]))
         r += 1
     return RiskChangeMatrix(
         corner=corner, col_headers=col_headers, rows=rows,
-        side_headers=side_headers, is_pct=is_pct,
+        side_headers=[], is_pct=is_pct,
     )
 
 
@@ -315,7 +323,13 @@ def load_risk_change(report_path: str | Path) -> RiskChangePage:
         loc = _find_label(wsv, name)
         if loc:
             r, _c = loc
-            val = _num(wsv.cell(r, 12).value)  # column L
+            # value sits in the Grand Total column — take the rightmost numeric.
+            val = 0.0
+            for c in range(wsv.max_column, 2, -1):
+                cv = wsv.cell(r, c).value
+                if isinstance(cv, (int, float)):
+                    val = float(cv)
+                    break
             summary.append(KeyValueRow(label=name, value=val))
 
     return RiskChangePage(
