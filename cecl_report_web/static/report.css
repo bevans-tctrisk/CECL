@@ -36,45 +36,47 @@ html, body {
   break-after: auto;
 }
 
-/* ---- Cover page (mirrors sheet_cover_vizo: col B, rows 6..20) ---- */
+/* ---- Cover page (mirrors sheet_cover_vizo: centered, 2 logos) ---- */
 .cover-page {
-  padding-top: 1.1in;   /* approximate the row-6 start */
-  padding-left: 0.25in;
+  text-align: center;
+  padding: 0.15in 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 9.5in;
 }
-.cover-block { max-width: 6.5in; }
-
+.cover-logo-top { width: 1.85in; height: auto; margin: 0.3in 0 0; }
 .cover-title {
-  font-size: 20pt;
-  font-weight: 700;
-  margin: 0 0 0.10in 0;
+  font-size: 26pt;
+  font-weight: 400;
+  margin: 0.5in 0 0;
 }
 .cover-subtitle {
-  font-size: 16pt;
-  font-weight: 700;
-  margin: 0 0 0.15in 0;
-}
-.cover-cu {
   font-size: 18pt;
   font-weight: 700;
-  margin-top: 0.55in;
+  margin: 0.12in 0 0;
+}
+.cover-cu {
+  font-size: 26pt;
+  font-weight: 700;
+  margin: 0.5in 0 0;
 }
 .cover-period {
   font-size: 14pt;
   font-weight: 700;
-  margin-top: 0.18in;
+  margin: 0.12in 0 0;
 }
-.cover-firm {
-  font-size: 14pt;
-  font-weight: 700;
-  color: #C0392B;      /* matches Font(color='C0392B') */
-  margin-top: 0.55in;
-}
-.cover-confidential {
+.cover-paragraph {
   font-size: 10pt;
-  font-style: italic;
-  color: #888888;      /* matches Font(color='888888') */
-  margin-top: 0.55in;
+  text-align: left;
+  max-width: 6.7in;
+  margin: 0.75in auto 0;
+  white-space: pre-line;
+  line-height: 1.32;
 }
+.cover-foot-spacer { flex: 1 1 auto; min-height: 0.6in; }
+.cover-logo-bottom { width: 2.4in; height: auto; margin: 0 0 0.06in; }
+.cover-footer { font-size: 8pt; color: #000; }
 
 /* ---- Impr Deter (Executive Summary numbers) ---- */
 .impr-deter { font-size: 12pt; }

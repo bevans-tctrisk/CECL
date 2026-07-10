@@ -26,6 +26,11 @@ class CoverPage:
     subtitle: str | None = None  # e.g. "Supplemental Reports"
     firm: str = "TCT Risk Solutions"
     confidentiality: str = "All reports are confidential."
+    date_text: str | None = None       # date as shown in the workbook (e.g. "6/30/2026")
+    paragraph: str | None = None        # full confidentiality/disclaimer paragraph
+    footer: str | None = None           # e.g. "© 2026 TCT Risk Solutions"
+    top_logo: str | None = None         # data: URI (Vizo logo)
+    bottom_logo: str | None = None      # data: URI (TCT logo)
 
 
 @dataclass

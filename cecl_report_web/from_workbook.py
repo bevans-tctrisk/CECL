@@ -21,6 +21,7 @@ from .model import (
     AclEnvPage,
     AclPoolRow,
     AdjustmentRow,
+    CoverPage,
     GradeMigrationRow,
     GridCell,
     GridPage,
@@ -33,6 +34,55 @@ from .model import (
     RiskChangePage,
 )
 from .format import excel_format
+
+
+def load_cover(path, sheet: str | None = None) -> "CoverPage":
+    """Read the Vizo cover sheet faithfully: title, CU, date, disclaimer
+    paragraph, footer, and the two embedded logos (as data URIs)."""
+    import base64
+    import datetime as _dt
+
+    wb = load_workbook(path)  # NOT read_only — need ws._images
+    if sheet is None:
+        sheet = next((s for s in wb.sheetnames if "cover" in s.lower()),
+                     wb.sheetnames[0])
+    ws = wb[sheet]
+
+    def _txt(coord):
+        v = ws[coord].value
+        return None if v is None else str(v).strip()
+
+    title = _txt("A14") or "CECL Credit Migration Report"
+    cu = _txt("A16") or ""
+    dv = ws["A17"].value
+    if isinstance(dv, (_dt.datetime, _dt.date)):
+        date_text = f"{dv.month}/{dv.day}/{dv.year}"
+    else:
+        date_text = None if dv is None else str(dv).strip()
+    para = ws["B21"].value
+    paragraph = None if para is None else str(para)
+    footer = _txt("B44")
+
+    logos = []
+    for im in getattr(ws, "_images", []):
+        try:
+            data = im._data()
+            row = im.anchor._from.row
+            fmt = getattr(im, "format", "png") or "png"
+            logos.append((row, f"data:image/{fmt};base64,"
+                          + base64.b64encode(data).decode("ascii")))
+        except Exception:  # noqa: BLE001
+            continue
+    logos.sort(key=lambda x: x[0])
+    top_logo = logos[0][1] if logos else None
+    bottom_logo = logos[-1][1] if len(logos) > 1 else None
+    wb.close()
+
+    return CoverPage(
+        credit_union=cu, period_ending=date_text or "", title=title,
+        date_text=date_text, paragraph=paragraph, footer=footer,
+        top_logo=top_logo, bottom_logo=bottom_logo)
+
 
 _IMPR_DETER_TAB_HINTS = ("impr deter", "improved", "deteriorated")
 _CECL_LABELS = (

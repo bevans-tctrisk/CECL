@@ -62,9 +62,10 @@ def _render_sheet(report_path: Path, sheet: str, cu: str, snap: str,
         except Exception:  # noqa: BLE001
             svgs = []
         if "cover" in low:
-            cover = CoverPage(
-                credit_union=cu, period_ending=snap,
-                subtitle="Supplemental Reports" if supplemental else None)
+            cover = fw.load_cover(report_path, sheet)
+            cover.credit_union = cover.credit_union or cu
+            if supplemental:
+                cover.subtitle = "Supplemental Reports"
             return R.render_html("cover.html", cover=cover), False
         if "impr deter" in low or ("improved" in low and "deteriorated" in low):
             page = fw.load_impr_deter(report_path)
