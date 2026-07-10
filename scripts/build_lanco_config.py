@@ -43,9 +43,14 @@ POOLS = ['Real Estate', 'Consumer Secured', 'Consumer Indirect',
 # Business Loans have no consumer FICO -> single-line (no grade breakout);
 # everything else is grade-rated.
 SINGLE_LINE = {'Business Loans'}
+# Per-pool ACL loss-rate lookback window (months). Long-lived, low-frequency-
+# loss pools use a longer window to capture enough loss events from the 5300
+# history: Real Estate 84mo (7yr), Business Loans 60mo (5yr). Consumer pools
+# use the 36mo default.
+ACL_MONTHS = {'Real Estate': 84, 'Business Loans': 60}
 
 def pool_entry(name):
-    return {'name': name, 'risk_rated': name not in SINGLE_LINE, 'acl_months': 36,
+    return {'name': name, 'risk_rated': name not in SINGLE_LINE, 'acl_months': ACL_MONTHS.get(name, 36),
             'excluded': False, 'use_default_mgmt_adj': False, 'brr': False}
 
 pools = [pool_entry(p) for p in POOLS] + [
@@ -147,7 +152,7 @@ config = {
     'pools': pools,
     'pool_order': POOLS + ['Ignore'],
     'not_risk_rated': sorted(SINGLE_LINE),
-    'acl_months_by_pool': {p: 36 for p in POOLS},
+    'acl_months_by_pool': {p: ACL_MONTHS.get(p, 36) for p in POOLS},
     'historical_file_formats': {
         # Transaction-level "Charge off and Recovery Template MM-DD-YY.xlsx":
         # date(0) | account(1) | trailer(2) | name(3) | Recovery Amount(4) |
