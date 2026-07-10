@@ -19,6 +19,36 @@ from openpyxl.utils import range_boundaries, get_column_letter
 # Excel 2016+ default series palette.
 PALETTE = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47"]
 
+
+def _fill_hex(spPr) -> str | None:
+    """Return the 6-hex solid fill of a graphicalProperties/spPr, or None."""
+    if spPr is None:
+        return None
+    sf = getattr(spPr, "solidFill", None)
+    if sf is None:
+        return None
+    v = getattr(sf, "value", None) or getattr(sf, "srgbClr", None)
+    if isinstance(v, str) and len(v) == 6:
+        return "#" + v
+    rgb = getattr(v, "rgb", None) if v is not None else None
+    if isinstance(rgb, str) and len(rgb) >= 6:
+        return "#" + rgb[-6:]
+    return None
+
+
+def _lighten(hex_color: str, frac: float) -> str:
+    """Blend a #rrggbb color toward white by ``frac`` (0=base, 1=white)."""
+    try:
+        h = hex_color.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except (ValueError, IndexError):
+        return hex_color
+    f = max(0.0, min(1.0, frac))
+    r = round(r + (255 - r) * f)
+    g = round(g + (255 - g) * f)
+    b = round(b + (255 - b) * f)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
 _REF_RE = re.compile(r"^(?:'([^']+)'|([^!]+))!(.+)$")
 
 
@@ -52,6 +82,20 @@ def _resolve(wb, ref: str | None) -> list[Any]:
 def _resolve_scalar(wb, ref: str | None) -> Any:
     vals = _resolve(wb, ref)
     return vals[0] if vals else None
+
+
+def _ref_numfmt(wb, ref: str | None) -> str | None:
+    """Number format of the first cell of a value range (used for data labels)."""
+    if not ref:
+        return None
+    sheet, a1 = _split_ref(ref)
+    ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+    a1 = a1.replace("$", "")
+    try:
+        min_c, min_r, _, _ = range_boundaries(a1)
+        return ws.cell(min_r, min_c).number_format
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _num(v) -> float:
@@ -108,6 +152,16 @@ def read_chart_specs(report_path: str | Path, sheet: str) -> list[dict]:
                 "name": name,
                 "values": [_num(v) for v in _resolve(wb, vref)],
                 "cats": [("" if v is None else str(v)) for v in _resolve(wb, cref)],
+                "color": _fill_hex(getattr(s, "graphicalProperties", None)),
+                "point_colors": [
+                    _fill_hex(getattr(dp, "graphicalProperties", None))
+                    for dp in (getattr(s, "data_points", None) or [])
+                ],
+                "label_fmt": (getattr(getattr(s, "dLbls", None), "numFmt", None)
+                              or getattr(getattr(ch, "dLbls", None), "numFmt", None)
+                              or _ref_numfmt(wb, vref)),
+                "show_labels": bool(getattr(s, "dLbls", None)
+                                    or getattr(ch, "dLbls", None)),
             })
         specs.append({
             "type": ctype,
@@ -141,9 +195,19 @@ def _wrap(inner: str, title: str | None, w: int = _W, h: int = _H) -> str:
     )
 
 
-def _legend(items: list[tuple[str, str]], x: int, y: int) -> str:
-    """items = [(label, color)]. Vertical legend."""
+def _legend(items: list[tuple[str, str]], x: int, y: int,
+            *, horizontal: bool = False) -> str:
+    """items = [(label, color)]. Vertical (default) or horizontal legend."""
     out = []
+    if horizontal:
+        cx = x
+        for label, color in items:
+            out.append(
+                f'<rect x="{cx}" y="{y}" width="10" height="10" fill="{color}"/>'
+                f'<text x="{cx + 14}" y="{y + 9}" font-size="9" fill="#000">'
+                f'{_esc(label)}</text>')
+            cx += 22 + len(str(label)) * 5.2
+        return "".join(out)
     for i, (label, color) in enumerate(items):
         yy = y + i * 16
         out.append(
@@ -155,62 +219,79 @@ def _legend(items: list[tuple[str, str]], x: int, y: int) -> str:
 
 def _svg_bar(series: list[dict], cats: list[str], title: str | None,
              *, horizontal: bool, stacked: bool) -> str:
-    # Horizontal bars need a wider left gutter for category labels.
-    top, right, bottom = 28, 12, 46
-    left = 98 if horizontal else 46
+    from .format import excel_format
+
+    top, right, bottom = 30, 14, 40
+    left = 150 if horizontal else 40
     pw, ph = _W - left - right, _H - top - bottom
     nseries = max(1, len(series))
     multi = nseries > 1
-    if multi:
-        pw -= 70  # room for legend
-    # Max magnitude across data (handle negatives for Net Change).
-    all_vals = [v for s in series for v in s["values"]]
-    if stacked:
-        # per-category sum
-        ncat = len(cats)
-        sums = [sum(s["values"][i] for s in series if i < len(s["values"]))
-                for i in range(ncat)]
-        vmax = max([abs(x) for x in sums] + [0.0])
-    else:
-        vmax = max([abs(v) for v in all_vals] + [0.0])
-    vmax = vmax or 1.0
 
-    parts = [f'<rect x="{left}" y="{top}" width="{pw}" height="{ph}" '
-             f'fill="none" stroke="#d9d9d9"/>']
+    def _fmt(val, s):
+        fmt = s.get("label_fmt") or "0%"
+        try:
+            return excel_format(val, fmt)
+        except Exception:  # noqa: BLE001
+            return f"{val*100:.0f}%"
+
+    def _bar_color(s, i, n, si):
+        pts = s.get("point_colors") or []
+        base = s.get("color") or PALETTE[si % len(PALETTE)]
+        if pts and i < len(pts):
+            # per-point gradient: base color lightened by index
+            g = (i / (n - 1)) * 0.68 if n > 1 else 0.0
+            return _lighten(base, g)
+        return base
+
+    all_vals = [v for s in series for v in s["values"]]
     ncat = len(cats)
-    group_w = pw / max(1, ncat)
+    if stacked:
+        sums = [sum(abs(s["values"][i]) for s in series if i < len(s["values"]))
+                for i in range(ncat)]
+        vmax = max(sums + [0.0]) or 1.0
+    else:
+        vmax = max([abs(v) for v in all_vals] + [0.0]) or 1.0
+
+    parts: list[str] = []
 
     if horizontal:
-        # categories stacked vertically; bars extend right.
         row_h = ph / max(1, ncat)
-        bar_h = row_h * 0.55
+        bar_h = min(row_h * 0.62, 18)
         for i, cat in enumerate(cats):
             cy = top + i * row_h + (row_h - bar_h) / 2
-            x0 = left
             if stacked:
                 acc = 0.0
                 for si, s in enumerate(series):
                     val = s["values"][i] if i < len(s["values"]) else 0.0
-                    w = (val / vmax) * pw
-                    parts.append(
-                        f'<rect x="{x0 + acc:.1f}" y="{cy:.1f}" '
-                        f'width="{max(0, w):.1f}" height="{bar_h:.1f}" '
-                        f'fill="{PALETTE[si % len(PALETTE)]}"/>')
+                    w = (abs(val) / vmax) * pw
+                    if w > 0.5:
+                        parts.append(
+                            f'<rect x="{left + acc:.1f}" y="{cy:.1f}" '
+                            f'width="{w:.1f}" height="{bar_h:.1f}" '
+                            f'fill="{_bar_color(s, i, ncat, si)}"/>')
+                        if s.get("show_labels") and abs(val) > 1e-9:
+                            parts.append(
+                                f'<text x="{left + acc + w/2:.1f}" '
+                                f'y="{cy + bar_h/2 + 3:.1f}" text-anchor="middle" '
+                                f'font-size="8" fill="#fff">{_esc(_fmt(val, s))}</text>')
                     acc += w
             else:
-                sh = bar_h / nseries
-                for si, s in enumerate(series):
-                    val = s["values"][i] if i < len(s["values"]) else 0.0
-                    w = (val / vmax) * pw
+                s = series[0]
+                val = s["values"][i] if i < len(s["values"]) else 0.0
+                w = (abs(val) / vmax) * (pw - 26)  # leave room for the end label
+                parts.append(
+                    f'<rect x="{left:.1f}" y="{cy:.1f}" width="{max(0, w):.1f}" '
+                    f'height="{bar_h:.1f}" fill="{_bar_color(s, i, ncat, 0)}"/>')
+                if s.get("show_labels"):
                     parts.append(
-                        f'<rect x="{x0:.1f}" y="{cy + si * sh:.1f}" '
-                        f'width="{max(0, w):.1f}" height="{sh:.1f}" '
-                        f'fill="{PALETTE[si % len(PALETTE)]}"/>')
+                        f'<text x="{left + w + 3:.1f}" y="{cy + bar_h/2 + 3:.1f}" '
+                        f'font-size="8" fill="#000">{_esc(_fmt(val, s))}</text>')
             parts.append(
-                f'<text x="{left - 4}" y="{top + i * row_h + row_h/2 + 3:.1f}" '
+                f'<text x="{left - 5}" y="{top + i * row_h + row_h/2 + 3:.1f}" '
                 f'text-anchor="end" font-size="8" fill="#000">{_esc(cat)}</text>')
     else:
-        bw = group_w * 0.7 / nseries
+        group_w = pw / max(1, ncat)
+        bw = min(group_w * 0.72 / nseries, 40)
         for i, cat in enumerate(cats):
             gx = left + i * group_w + (group_w - bw * nseries) / 2
             for si, s in enumerate(series):
@@ -218,9 +299,15 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
                 bh = (abs(val) / vmax) * ph
                 y = top + ph - bh
                 parts.append(
-                    f'<rect x="{gx + si * bw:.1f}" y="{y:.1f}" '
-                    f'width="{bw:.1f}" height="{bh:.1f}" '
-                    f'fill="{PALETTE[si % len(PALETTE)]}"/>')
+                    f'<rect x="{gx + si * bw:.1f}" y="{y:.1f}" width="{bw:.1f}" '
+                    f'height="{bh:.1f}" fill="{_bar_color(s, i, ncat, si)}"/>')
+                if s.get("show_labels") and nseries == 1:
+                    # white label inside the bar near the top, rotated vertical
+                    lx, ly = gx + bw / 2, y + 12
+                    parts.append(
+                        f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="middle" '
+                        f'font-size="8" fill="#fff" transform="rotate(-90 {lx:.1f} {ly:.1f})">'
+                        f'{_esc(_fmt(val, s))}</text>')
             parts.append(
                 f'<text x="{left + i * group_w + group_w/2:.1f}" '
                 f'y="{top + ph + 12}" text-anchor="middle" font-size="8" '
@@ -228,9 +315,10 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
 
     if multi:
         parts.append(_legend(
-            [(s["name"] or f"Series {i+1}", PALETTE[i % len(PALETTE)])
+            [(s["name"] or f"Series {i+1}",
+              s.get("color") or PALETTE[i % len(PALETTE)])
              for i, s in enumerate(series)],
-            left + pw + 12, top + 4))
+            left, top + ph + 22, horizontal=True))
     return _wrap("".join(parts), title)
 
 

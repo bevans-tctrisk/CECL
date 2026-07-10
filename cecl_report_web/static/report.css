@@ -85,20 +85,20 @@ html, body {
 .rpt-cu { font-size: 14pt; font-weight: 700; }
 .rpt-subhead { font-size: 12pt; font-weight: 700; }
 
-/* CECL Adjustment box: bordered block, label left / value right. */
+/* CECL Adjustment box: teal-bordered block, label left / value right. */
 .cecl-box {
   border-collapse: collapse;
-  border: 1px solid #000;
-  margin: 0.15in 0 0.35in 0.9in;   /* indented like Excel col D */
-  width: 5.0in;
+  border: 2px solid #0D4D5E;
+  margin: 0.12in auto 0.28in;   /* centered on the page like the reference */
+  width: 6.0in;
 }
 .cecl-title {
   caption-side: top;
   text-align: left;
-  font-size: 14pt;
-  padding: 2pt 6pt;
+  font-size: 13pt;
+  padding: 3pt 8pt 1pt;
 }
-.cecl-box td { padding: 2pt 8pt; }
+.cecl-box td { padding: 1.5pt 10pt; font-size: 12pt; }
 .cecl-label { text-align: left; }
 .cecl-value {
   text-align: right;
@@ -243,6 +243,16 @@ html, body {
 }
 .chart-cell { flex: 0 0 auto; }
 .chart-cell svg.chart { display: block; }
+
+/* Chart-centric pages (e.g. Impr Deter): 2x2 grid, charts fill the width. */
+.charts-grid.impr-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.1in 0.2in;
+  margin-top: 0.15in;
+}
+.impr-charts .chart-cell { width: 100%; }
+.impr-charts svg.chart { width: 100%; height: auto; }
 
 
 

@@ -22,54 +22,8 @@
   </table>
   {% endif %}
 
-  {% if page.by_pool %}
-  <table class="mig-table by-pool">
-    <thead>
-      <tr>
-        <th class="l">Loan Type</th>
-        <th class="r">Improved</th>
-        <th class="r">Deteriorated</th>
-        <th class="r">Net Change</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in page.by_pool %}
-      <tr>
-        <td class="l">{{ row.pool }}</td>
-        <td class="r">{{ row.improved | pct0 }}</td>
-        <td class="r">{{ row.deteriorated | pct0 }}</td>
-        <td class="r">{{ row.net_change | pct1 }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
-  {% if page.by_grade %}
-  <table class="mig-table by-grade">
-    <thead>
-      <tr>
-        <th class="l">Grade</th>
-        <th class="r">Balance</th>
-        <th class="r">Improved %</th>
-        <th class="r">Deteriorated %</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in page.by_grade %}
-      <tr>
-        <td class="l">{{ row.grade }}</td>
-        <td class="r">{{ row.balance | acct0 }}</td>
-        <td class="r">{{ row.improved | pct0 }}</td>
-        <td class="r">{{ row.deteriorated | pct0 }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
   {% if charts %}
-  <div class="charts-grid">
+  <div class="charts-grid impr-charts">
     {% for svg in charts %}<div class="chart-cell">{{ svg | safe }}</div>{% endfor %}
   </div>
   {% endif %}

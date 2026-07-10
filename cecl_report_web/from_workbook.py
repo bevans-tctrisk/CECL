@@ -136,7 +136,7 @@ def load_impr_deter(report_path: str | Path) -> ImprDeterPage:
         if r == 1:
             cu = _cell_str(v)
         elif hasattr(v, "strftime"):
-            period = v.strftime("%m-%d-%y")
+            period = f"{v.month}/{v.day}/{v.year}"
             heading.append(period)
         else:
             heading.append(_cell_str(v))
