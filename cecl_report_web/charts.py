@@ -244,7 +244,8 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
              *, horizontal: bool, stacked: bool) -> str:
     from .format import excel_format
 
-    top, right, bottom = 30, 14, 40
+    top, right = 30, 14
+    bottom = 56 if (not horizontal and len(cats) > 16) else 40
     left = 150 if horizontal else 40
     pw, ph = _W - left - right, _H - top - bottom
     nseries = max(1, len(series))
@@ -322,34 +323,63 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
                 f'text-anchor="end" font-size="8" fill="#000">{_esc(cat)}</text>')
     else:
         group_w = pw / max(1, ncat)
-        bw = min(group_w * 0.72 / nseries, 40)
-        for i, cat in enumerate(cats):
-            gx = left + i * group_w + (group_w - bw * nseries) / 2
-            for si, s in enumerate(series):
-                val = s["values"][i] if i < len(s["values"]) else 0.0
-                bh = (abs(val) / vmax) * ph
-                y = top + ph - bh
-                parts.append(
-                    f'<rect x="{gx + si * bw:.1f}" y="{y:.1f}" width="{bw:.1f}" '
-                    f'height="{bh:.1f}" {_rect_attrs(s, _bar_color(s, i, ncat, si))}/>')
-                if s.get("show_labels") and nseries == 1:
-                    # white label inside the bar near the top, rotated vertical
-                    lx, ly = gx + bw / 2, y + 12
+        # thin crowded x-axis labels (e.g. 40-month time series)
+        lbl_step = max(1, (ncat + 11) // 12) if ncat > 16 else 1
+        rot = ncat > 16
+
+        def _catlabel(i, cat):
+            if i % lbl_step:
+                return ""
+            cx = left + i * group_w + group_w / 2
+            txt = _esc(str(cat)[:7] if len(str(cat)) > 7 else cat)
+            if rot:
+                yy = top + ph + 8
+                return (f'<text x="{cx:.1f}" y="{yy:.1f}" text-anchor="end" '
+                        f'font-size="7" fill="#000" '
+                        f'transform="rotate(-55 {cx:.1f} {yy:.1f})">{txt}</text>')
+            return (f'<text x="{cx:.1f}" y="{top + ph + 12}" text-anchor="middle" '
+                    f'font-size="8" fill="#000">{txt}</text>')
+
+        if stacked:
+            bw = min(group_w * 0.8, 40)
+            for i, cat in enumerate(cats):
+                gx = left + i * group_w + (group_w - bw) / 2
+                acc = 0.0
+                for si, s in enumerate(series):
+                    val = s["values"][i] if i < len(s["values"]) else 0.0
+                    bh = (abs(val) / vmax) * ph
+                    y = top + ph - acc - bh
                     parts.append(
-                        f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="middle" '
-                        f'font-size="8" fill="#fff" transform="rotate(-90 {lx:.1f} {ly:.1f})">'
-                        f'{_esc(_fmt(val, s))}</text>')
-            parts.append(
-                f'<text x="{left + i * group_w + group_w/2:.1f}" '
-                f'y="{top + ph + 12}" text-anchor="middle" font-size="8" '
-                f'fill="#000">{_esc(cat)}</text>')
+                        f'<rect x="{gx:.1f}" y="{y:.1f}" width="{bw:.1f}" '
+                        f'height="{bh:.1f}" {_rect_attrs(s, _bar_color(s, i, ncat, si))}/>')
+                    acc += bh
+                parts.append(_catlabel(i, cat))
+        else:
+            bw = min(group_w * 0.72 / nseries, 40)
+            for i, cat in enumerate(cats):
+                gx = left + i * group_w + (group_w - bw * nseries) / 2
+                for si, s in enumerate(series):
+                    val = s["values"][i] if i < len(s["values"]) else 0.0
+                    bh = (abs(val) / vmax) * ph
+                    y = top + ph - bh
+                    parts.append(
+                        f'<rect x="{gx + si * bw:.1f}" y="{y:.1f}" width="{bw:.1f}" '
+                        f'height="{bh:.1f}" {_rect_attrs(s, _bar_color(s, i, ncat, si))}/>')
+                    if s.get("show_labels") and nseries == 1:
+                        lx, ly = gx + bw / 2, y + 12
+                        parts.append(
+                            f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="middle" '
+                            f'font-size="8" fill="#fff" transform="rotate(-90 {lx:.1f} {ly:.1f})">'
+                            f'{_esc(_fmt(val, s))}</text>')
+                parts.append(_catlabel(i, cat))
 
     if multi:
         parts.append(_legend(
             [(s["name"] or f"Series {i+1}",
               s.get("color") or PALETTE[i % len(PALETTE)])
              for i, s in enumerate(series)],
-            left, top + ph + 22, horizontal=True))
+            left, top + ph + (34 if (not horizontal and ncat > 16) else 22),
+            horizontal=True))
     return _wrap("".join(parts), title)
 
 
