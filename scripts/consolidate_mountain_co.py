@@ -33,11 +33,16 @@ def code_to_pool(v):
     return DEFAULT_POOL
 
 def period_from_name(fn):
-    m = re.search(r'([A-Za-z]{3})\s*[_\-]?\s*(\d{2})\b', fn)
+    # Handles varied names: 'APR26', 'DEC25', 'Jan2025', 'June25', 'SEP25',
+    # 'Sept 2025'. Finds a month word followed by a 2- or 4-digit year.
+    m = re.search(r'([A-Za-z]{3,9})[\s_\-]*(\d{2,4})', fn)
     if not m:
         return ''
-    mo = MON.get(m.group(1).lower())
-    return '20%s-%02d' % (m.group(2), mo) if mo else ''
+    mo = MON.get(m.group(1)[:3].lower())
+    if not mo:
+        return ''
+    yy = int(m.group(2)[-2:])
+    return '20%02d-%02d' % (yy, mo)
 
 files = sorted(f for f in os.listdir(DD)
                if f.lower().startswith('loan') and 'charge' in f.lower()
