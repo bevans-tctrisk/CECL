@@ -70,7 +70,16 @@ aires_cm = {
     'interest_rate': 'INT RATE', 'total_available_credit': 'CREDIT LIMIT',
     'days_delinquent': 'DAYS DQ',
 }
-aires_ma = {'mode': 'fixed_suffix', 'suffix_length': 0}
+# Aires 'Account Number' is <member><4-digit loan suffix> (variable-length,
+# 7-9 digits): the RIGHT 4 digits are the loan suffix and everything to the
+# left is the member number. Breaking off the suffix groups a member's loans
+# together (2350 members, 237 with >1 loan) so credit migration and the
+# impaired member/suffix split work. suffix_length:0 (no break) made every
+# loan its own "member" and suppressed migration.
+aires_ma = {'mode': 'fixed_suffix', 'suffix_length': 4}
+# Credit Card (16-digit PAN) and Lendkey (Borr_ID) accounts are NOT
+# member+suffix formats, so they keep no suffix break.
+nosuffix_ma = {'mode': 'fixed_suffix', 'suffix_length': 0}
 AIRES_PAT = r'(?i)^Aires Loan Data \d{2}-\d{2}-\d{4} WO Charge-offs\.(xlsx|xls)$'
 NEGSHARE_PAT = r'(?i)^Negative Shares \d{1,2}-\d{1,2}-\d{2,4}( V\d+)?\.(xlsx|xls)$'
 negshare_cm = {'member_number': 'Account Number', 'current_balance': 'Current Balance',
@@ -105,7 +114,7 @@ config = {
     'file_pattern': AIRES_PAT,
     'date_pattern': r'(\d{2})-(\d{2})-(\d{4})',
     'date_format': 'MMDDYYYY',
-    'account_suffix_length': 0,
+    'account_suffix_length': 4,
     'member_account': aires_ma,
     'has_header': True,
     'column_mappings': aires_cm,
@@ -125,11 +134,11 @@ config = {
         {'label': 'Aires Loan Data', 'file_pattern': AIRES_PAT,
          'column_mappings': aires_cm, 'member_account': aires_ma, 'has_header': True},
         {'label': 'Credit Cardholder', 'file_pattern': CARD_PAT,
-         'column_mappings': card_cm, 'member_account': aires_ma, 'has_header': True},
+         'column_mappings': card_cm, 'member_account': nosuffix_ma, 'has_header': True},
         {'label': 'Lendkey Student Loans', 'file_pattern': STUDENT_PAT,
-         'column_mappings': student_cm, 'member_account': aires_ma, 'has_header': True},
+         'column_mappings': student_cm, 'member_account': nosuffix_ma, 'has_header': True},
         {'label': 'Lendkey Consolidation', 'file_pattern': CONSOL_PAT,
-         'column_mappings': student_cm, 'member_account': aires_ma, 'has_header': True},
+         'column_mappings': student_cm, 'member_account': nosuffix_ma, 'has_header': True},
         {'label': 'Negative Shares', 'file_pattern': NEGSHARE_PAT,
          'column_mappings': negshare_cm,
          'member_account': {'mode': 'delimiter', 'suffix_length': 0, 'delimiter': '-'},
