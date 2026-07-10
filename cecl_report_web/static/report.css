@@ -173,8 +173,8 @@ html, body {
   width: 100%;
 }
 .acl-table th, .acl-table td {
-  border: 0.5px solid #d9d9d9;
-  padding: 3pt 6pt;
+  border: none;
+  padding: 2.5pt 6pt;
   white-space: nowrap;
 }
 .acl-table .hd {
@@ -191,7 +191,7 @@ html, body {
 .acl-table .indent { padding-left: 18pt; }
 .acl-table .pool-header td { padding-top: 5pt; font-size: 12pt; }
 .acl-table .grade-row td { color: #333; }
-.acl-table .pool-total td { border-top: 0.75px solid #999; }
+.acl-table .pool-total td { padding-top: 3pt; }
 
 .acl-impaired {
   border-collapse: collapse;
