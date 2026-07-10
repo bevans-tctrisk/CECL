@@ -292,11 +292,15 @@ def _read_matrix(wsv, wsf, hr: int, *, is_pct: bool) -> RiskChangeMatrix:
     )
 
 
-def load_risk_change(report_path: str | Path) -> RiskChangePage:
-    """Read the 'Risk Change Total' tab into the model (both matrices)."""
+def load_risk_change(report_path: str | Path, sheet: str | None = None) -> RiskChangePage:
+    """Read a 'Risk Change' tab into the model (both matrices).
+
+    ``sheet`` selects a specific worksheet (e.g. a per-pool 'Risk Chg <pool>'
+    tab); when omitted the main Risk Change Total tab is auto-detected.
+    """
     wbv = load_workbook(report_path, data_only=True)
     wbf = load_workbook(report_path, data_only=False)
-    tab = _find_tab(wbv, _RISK_TAB_HINTS)
+    tab = sheet if (sheet and sheet in wbv.sheetnames) else _find_tab(wbv, _RISK_TAB_HINTS)
     if tab is None:
         raise ValueError(
             f"No Risk Change tab in {Path(report_path).name} "

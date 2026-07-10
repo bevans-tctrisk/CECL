@@ -70,8 +70,8 @@ def _render_sheet(report_path: Path, sheet: str, cu: str, snap: str,
         if "impr deter" in low or ("improved" in low and "deteriorated" in low):
             page = fw.load_impr_deter(report_path)
             return R.render_html("impr_deter.html", page=page, charts=svgs), False
-        if "risk change" in low:
-            page = fw.load_risk_change(report_path)
+        if "risk change" in low or "risk chg" in low:
+            page = fw.load_risk_change(report_path, sheet)
             return R.render_html("risk_change.html", page=page, charts=svgs), True
         if "acl env" in low:
             page = fw.load_acl_env(report_path)
