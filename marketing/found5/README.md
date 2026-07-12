@@ -12,9 +12,12 @@ Darts-board marketing print for the Found 5 Dollars app. If you get it, you get 
 | `found5_be_curious_print_BEVAN_transparent.png` | "Be Curious" variant, transparent for dark-garment DTG |
 | `found5_be_curious_not_judgmental_print_BEVAN_4500x5400.png` | Full quote, two stacked lines, black background |
 | `found5_be_curious_not_judgmental_print_BEVAN_transparent.png` | Full quote variant, transparent for dark-garment DTG |
-| `found5_barbecue_sauce_print_source_4500x5400.png` | Original source print (pre-Bevan title) |
+| `found5_quote_be_curious_print_BEVAN_*.png` | "Be Curious" above the board, "Barbecue Sauce" below |
+| `found5_quote_full_print_BEVAN_*.png` | "Be curious, not judgmental" above, "Barbecue Sauce" below |
+| `found5_barbecue_sauce_print_source_4500x5400.png` | Original source print (pre-Bevan title, transparent bg) |
 | `make_bevan_print.py` | Regenerates the Barbecue Sauce outputs from the source (requires Pillow) |
 | `make_variant_prints.py` | Regenerates the Be Curious title variants (requires Pillow) |
+| `make_quote_above_prints.py` | Regenerates the quote-above + Barbecue Sauce prints (requires Pillow) |
 | `fonts/Bevan-Regular.ttf` | Bevan typeface used for the title |
 
 ## Font
