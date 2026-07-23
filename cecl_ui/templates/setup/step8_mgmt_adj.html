@@ -175,6 +175,113 @@
       </div>
     </div>
 
+    {# ── Negative Share Provision (data-derived) ───────────── #}
+    {% set ns = state.negative_share or {} %}
+    <h3 style="margin-top:24px; padding-top:14px; border-top:2px solid #ddd;">
+      Negative Share Provision
+      <span class="badge-optional">Optional &middot; Data-derived</span>
+    </h3>
+    <label class="checkbox-label" style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+      <input type="checkbox" name="include_negative_share"
+             id="include-ns-cb"
+             {% if state.include_negative_share %}checked{% endif %}
+             onchange="document.getElementById('ns-section').hidden = !this.checked;">
+      <strong>Include Negative Share Provision</strong>
+    </label>
+
+    <div id="ns-section" {% if not state.include_negative_share %}hidden{% endif %}>
+      <p class="muted">
+        A reusable Other Allowance Consideration for negative shares. Each
+        quarter the model recomputes a <strong>life-of-loan loss rate</strong>
+        &mdash; trailing months of net charge-offs (charge-offs &minus;
+        recoveries) &divide; the current negative-share balance &mdash; and
+        applies it to the balance pulled from the current-month extract. The
+        credit union sends a separate negative-share balance extract and a
+        charge-off / recovery file; point the fields below at the folder that
+        holds them.
+      </p>
+      <div class="field-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; max-width:900px;">
+        <label style="display:flex; flex-direction:column; gap:4px;">
+          <span>Title (report label)</span>
+          <input type="text" name="ns_title"
+                 value="{{ ns.title or 'Negative Share Provision' }}">
+        </label>
+        <label style="display:flex; flex-direction:column; gap:4px;">
+          <span>Life of loan (months)</span>
+          <input type="number" step="1" min="1" name="ns_life_months"
+                 value="{{ ns.life_of_loan_months or 12 }}">
+          <span class="help">Loss-rate window. Default <code>12</code>.</span>
+        </label>
+        <label style="display:flex; flex-direction:column; gap:4px; grid-column:1 / -1;">
+          <span>Source folder (scanned recursively for the files below)</span>
+          <input type="text" name="ns_source_folder"
+                 value="{{ ns.source_folder or '' }}"
+                 placeholder="e.g. Z:\Shared\Clients\...\CECL Migration IDRL">
+        </label>
+        <label style="display:flex; flex-direction:column; gap:4px;">
+          <span>Balance extract filename pattern</span>
+          <input type="text" name="ns_balance_pattern"
+                 value="{{ ns.balance_pattern or '(?i)Negative Share File' }}">
+        </label>
+        <label style="display:flex; flex-direction:column; gap:4px;">
+          <span>Balance (exposure) column</span>
+          <input type="text" name="ns_balance_column"
+                 value="{{ ns.balance_column or 'Current Balance' }}">
+        </label>
+        <label style="display:flex; flex-direction:column; gap:4px;">
+          <span>Monthly CO/recovery summary pattern</span>
+          <input type="text" name="ns_co_summary_pattern"
+                 value="{{ ns.co_summary_pattern or '(?i)Negative Shares Charge Off and Recovery' }}">
+        </label>
+        <label style="display:flex; flex-direction:column; gap:4px;">
+          <span>Quarterly CO/recovery file pattern</span>
+          <input type="text" name="ns_co_quarterly_pattern"
+                 value="{{ ns.co_quarterly_pattern or '(?i)Share COs?\\s*-\\s*Recoveries' }}">
+        </label>
+      </div>
+    </div>
+
+    {# ── Unfunded Commitments (data-derived) ────────────────── #}
+    {% set uc = state.unfunded_commitment or {} %}
+    <h3 style="margin-top:24px; padding-top:14px; border-top:2px solid #ddd;">
+      Unfunded Commitments
+      <span class="badge-optional">Optional &middot; Data-derived</span>
+    </h3>
+    <label class="checkbox-label" style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+      <input type="checkbox" name="include_unfunded_commitment"
+             id="include-uc-cb"
+             {% if state.include_unfunded_commitment %}checked{% endif %}
+             onchange="document.getElementById('uc-section').hidden = !this.checked;">
+      <strong>Include Unfunded Commitments</strong>
+    </label>
+
+    <div id="uc-section" {% if not state.include_unfunded_commitment %}hidden{% endif %}>
+      <p class="muted">
+        Unfunded commitments are the undrawn dollars on lines of credit
+        (LOCs, credit cards, HELOCs) that are <strong>not unconditionally
+        cancelable</strong>. Enter the loan type codes the credit union
+        flagged as not unconditionally cancelable. Each quarter the model
+        sums the undrawn credit (Credit Limit &minus; Current Balance) for
+        those codes from the loan extract, <strong>groups it by pool</strong>,
+        and applies that pool's ACL loss rate &mdash; producing one
+        <em>Unfunded Commitments &ndash; Pool Name</em> row per pool.
+      </p>
+      <div class="field-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; max-width:900px;">
+        <label style="display:flex; flex-direction:column; gap:4px;">
+          <span>Title (report label prefix)</span>
+          <input type="text" name="uc_title"
+                 value="{{ uc.title or 'Unfunded Commitments' }}">
+        </label>
+        <label style="display:flex; flex-direction:column; gap:4px;">
+          <span>Loan type codes (not unconditionally cancelable)</span>
+          <input type="text" name="uc_loan_type_codes"
+                 value="{{ (uc.loan_type_codes or [])|join(', ') }}"
+                 placeholder="e.g. 70, 80, 8020">
+          <span class="help">Separate codes with commas or spaces.</span>
+        </label>
+      </div>
+    </div>
+
     <script>
       (function () {
         function fmt(n) {

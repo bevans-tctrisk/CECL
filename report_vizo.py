@@ -327,13 +327,11 @@ def _resolve_mgmt_adj_grade(pool, grade_label, grade_idx, no_score_label,
                              base_rate=None):
     """Per-(pool, grade) mgmt adj resolver — mirrors report_tct.py.
 
-    Precedence: prior report value > manual overlay×dist > admin
-    default×dist (only when use_default AND no manual AND
-    base_rate==0) > 0.
+    Precedence: manual overlay×dist > admin default×dist (only when
+    use_default AND no manual AND base_rate==0) > prior report value
+    (carry-forward fallback, only when no current-period adjustment is
+    established) > 0.
     """
-    pm = prior_mgmt_adj_map.get(pool, {}) if prior_mgmt_adj_map else {}
-    if grade_label in pm:
-        return pm[grade_label]
     dist = (_dist_factor(len(DIST_FACTORS) - 1)
             if grade_label == no_score_label
             else _dist_factor(grade_idx))
@@ -344,6 +342,11 @@ def _resolve_mgmt_adj_grade(pool, grade_label, grade_idx, no_score_label,
             and admin_default
             and (base_rate is None or float(base_rate or 0) == 0)):
         return float(admin_default) * dist
+    # Carry-forward fallback: prior period's per-grade value applies only
+    # when the current period has no established adjustment above.
+    pm = prior_mgmt_adj_map.get(pool, {}) if prior_mgmt_adj_map else {}
+    if grade_label in pm:
+        return pm[grade_label]
     return 0.0
 
 
@@ -629,7 +632,14 @@ def _compute_acl_totals(df, grades, config, hist, snap=''):
         'spec_id_label': 'Total Specifically Identified Allowance',
         'needed_label': 'Total Allowance Needed',
         'balance_label': f'Allowance for Credit Loss Balance as of {snap_str}',
-        'adjustment_label': 'Adjustment (Overfunded)',
+        # Positive adjustment (needed > balance) means the CU must add to
+        # the allowance, i.e. it is UNDERfunded; negative means overfunded.
+        # Matches the convention in generate_report.py.
+        'adjustment_label': (
+            'Adjustment (Underfunded)'
+            if (total_needed - acl_balance) >= 0
+            else 'Adjustment (Overfunded)'
+        ),
     }
 
 
@@ -2231,6 +2241,10 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     grand_allowance = 0
     grand_allow_before = 0
     grand_env_allow = 0
+    # Per-pool effective ACL loss rate (total allowance / calc balance),
+    # captured as each pool's Total row is computed. Unfunded-commitment
+    # OAC rows apply their pool's rate to the pool's undrawn credit.
+    pool_eff_rate = {}
     # Sum of the per-pool Total balances / specific-IDs actually rendered
     # below (both risk-rated and non-risk-rated pools). Used for the
     # Pooled Totals line so it always reconciles to what's shown on this
@@ -2450,6 +2464,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             total_calc_bal = total_balance - total_spec_id
             grand_balance += total_balance or 0
             grand_spec_id += total_spec_id or 0
+            pool_eff_rate[pool] = (total_allow / total_calc_bal) \
+                if total_calc_bal else 0
 
             ws.cell(row=r, column=1, value="Total").font = V12B
             ws.cell(row=r, column=2, value=total_balance).number_format = ACCT
@@ -2470,11 +2486,21 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             r += 2
         else:
             # ── Non-risk-rated pool: show only Total row with rate columns ──
+            # Balance precedence mirrors the risk-rated branch's Total row:
+            #   monthly balance-sheet total > WARM balance > actual loan
+            #   extract balance (pool_total). Previously this hard-coded a
+            #   0 default when neither the Pool_Balance Adjust detail nor a
+            #   WARM workbook was available, which silently zeroed out NRR
+            #   pools (e.g. Credit Cards) for CUs with no monthly-by-pool
+            #   detail and no prior WARM file — dropping their real balance
+            #   and reserve from the ACL tab and Pooled Totals.
             _ptd_nrr = _bal_detail.get(pool, {}).get('Total', {})
             if _ptd_nrr and _ptd_nrr.get('balance_sheet_total') is not None:
                 nrr_balance = _ptd_nrr['balance_sheet_total']
+            elif warm_total:
+                nrr_balance = warm_total.get('balance', pool_total)
             else:
-                nrr_balance = warm_total.get('balance', 0)
+                nrr_balance = pool_total
             nrr_spec_id = warm_total.get('spec_id', 0)
             if nrr_spec_id == 0 and pool in spec_id_by_pool:
                 nrr_spec_id = sum(spec_id_by_pool[pool].values())
@@ -2506,6 +2532,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             grand_env_allow += nrr_env_allow
             grand_balance += nrr_balance or 0
             grand_spec_id += nrr_spec_id or 0
+            pool_eff_rate[pool] = (nrr_total_allow / nrr_calc_bal) \
+                if nrr_calc_bal else 0
 
             ws.cell(row=r, column=1, value="Total").font = V12B
             ws.cell(row=r, column=2, value=nrr_balance).number_format = ACCT
@@ -2584,6 +2612,14 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
         ws.cell(row=r, column=1, value=lbl).font = V12
         ws.cell(row=r, column=11, value=imp_val).number_format = ACCT
     total_spec_allow = acl_summary.get('total_spec_allow', sum(acl_impaired.values()))
+    # Expand any Unfunded-Commitment OAC templates into per-pool rows now
+    # that every pool's effective ACL rate is known. Mutates config in place
+    # so the Impr Deter summary (built next) reads the same resolved rows.
+    try:
+        import generate_report as _gr
+        _gr._expand_unfunded_commitment_oac(config, pool_eff_rate, snap)
+    except Exception as _e:  # noqa: BLE001
+        print(f"  OAC unfunded expansion skipped: {_e}")
     oac_rows = _other_allowance_considerations(config)
     oac_total = sum(o['amount'] for o in oac_rows)
     total_allow_needed = pooled_total_allow + total_spec_allow + oac_total
@@ -2615,7 +2651,12 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     ws.cell(row=r, column=1, value=f"Allowance for Credit Loss Balance as of {snap}").font = V12
     ws.cell(row=r, column=11, value=acl_bal).number_format = ACCT
     r += 1
-    ws.cell(row=r, column=1, value="Adjustment (Overfunded)").font = V12B
+    # Positive adjustment (needed > balance) => CU is UNDERfunded.
+    _adj_label = (
+        "Adjustment (Underfunded)" if adjustment >= 0
+        else "Adjustment (Overfunded)"
+    )
+    ws.cell(row=r, column=1, value=_adj_label).font = V12B
     ws.cell(row=r, column=11, value=adjustment).number_format = ACCT
     ws.cell(row=r, column=11).font = V12B
 
@@ -3255,20 +3296,32 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
             return yearly_data.get(year, {}).get(pool, 0)
         # Partial year – sum monthly data from earliest_month onward
         partial = 0
-        has_monthly = False
+        has_window_monthly = False
         for m in range(earliest_month, 13):
             v = monthly_data.get((year, m), {}).get(pool, 0)
             if v:
-                has_monthly = True
+                has_window_monthly = True
             partial += v
-        if has_monthly:
+        # Whether the pool has ANY monthly detail for this year — including
+        # months BEFORE the window. When it does, the monthly series fully
+        # accounts for the annual total (both are built from the same rows),
+        # so the windowed sum is authoritative — possibly 0 when all of the
+        # year's activity fell before earliest_month (e.g. a lone June
+        # charge-off with a July lookback start). Prorating in that case would
+        # fabricate in-window charge-offs from activity that is actually
+        # OUTSIDE the lookback window.
+        has_any_monthly = has_window_monthly or any(
+            monthly_data.get((year, m), {}).get(pool, 0)
+            for m in range(1, earliest_month)
+        )
+        if has_any_monthly:
             # Monthly recovery data may be stored negative; align sign
             # with the yearly convention
             full_year = yearly_data.get(year, {}).get(pool, 0)
-            if full_year and (full_year > 0) != (partial > 0):
+            if full_year and partial and (full_year > 0) != (partial > 0):
                 partial = -partial
             return partial
-        # Fallback: prorate the yearly total
+        # Fallback: no monthly granularity at all — prorate the yearly total
         full = yearly_data.get(year, {}).get(pool, 0)
         months_in_window = 12 - earliest_month + 1
         return full * months_in_window / 12 if full else 0
@@ -5751,6 +5804,13 @@ def compose_vizo_main(client, snap, df, config, grades, hist=None):
             pass
 
     _sheet_env_ranges(wb, cu, snap, hist)
+
+    # Change Analysis (period-over-period) — always last.
+    try:
+        from change_analysis import append_change_analysis
+        append_change_analysis(wb, cu, snap, config, "Vizo_Model")
+    except Exception as _ce:  # noqa: BLE001
+        print(f"  Change Analysis sheet skipped: {_ce}")
 
     safe_cu = cu.replace(' ', '_').replace('/', '-')
     fname = f"{snap}_CECL_Migration_{safe_cu}_Vizo_Model.xlsx"

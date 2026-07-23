@@ -428,6 +428,52 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         if oac:
             cfg["other_allowance_considerations"] = oac
 
+    # Data-derived "Negative Share Provision" OAC. Emitted as an
+    # other_allowance_considerations entry with source: negative_share so the
+    # report engine recomputes balance / rate / amount each quarter.
+    if state.get("include_negative_share"):
+        ns = state.get("negative_share") or {}
+        try:
+            life_months = int(ns.get("life_of_loan_months") or 12)
+        except (TypeError, ValueError):
+            life_months = 12
+        ns_entry = {
+            "title": str(ns.get("title") or "").strip() or "Negative Share Provision",
+            "source": "negative_share",
+            "life_of_loan_months": life_months,
+            "source_folder": str(ns.get("source_folder") or "").strip(),
+            "balance_column": str(ns.get("balance_column") or "").strip()
+            or "Current Balance",
+            "balance_pattern": str(ns.get("balance_pattern") or "").strip()
+            or r"(?i)Negative Share File",
+            "co_summary_pattern": str(ns.get("co_summary_pattern") or "").strip()
+            or r"(?i)Negative Shares Charge Off and Recovery",
+            "co_quarterly_pattern": str(ns.get("co_quarterly_pattern") or "").strip()
+            or r"(?i)Share COs?\s*-\s*Recoveries",
+            "percentage": 0.0,
+            "balance": 0.0,
+            "amount": 0.0,
+        }
+        cfg.setdefault("other_allowance_considerations", []).append(ns_entry)
+
+    # Data-derived "Unfunded Commitments" OAC. Emitted with
+    # source: unfunded_commitment; the report engine sums undrawn credit for
+    # the configured codes grouped by pool and applies each pool's ACL rate.
+    if state.get("include_unfunded_commitment"):
+        uc = state.get("unfunded_commitment") or {}
+        codes = [str(c).strip() for c in (uc.get("loan_type_codes") or [])
+                 if str(c).strip()]
+        if codes:
+            uc_entry = {
+                "title": str(uc.get("title") or "").strip() or "Unfunded Commitments",
+                "source": "unfunded_commitment",
+                "loan_type_codes": codes,
+                "percentage": 0.0,
+                "balance": 0.0,
+                "amount": 0.0,
+            }
+            cfg.setdefault("other_allowance_considerations", []).append(uc_entry)
+
     if state.get("data_directory"):
         cfg["data_directory"] = state["data_directory"]
 
@@ -679,7 +725,7 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
                 mb_block["supplemental_wide"] = sw
             for _k in ("monthly_file_pattern", "monthly_sheet",
                        "monthly_label_col", "monthly_balance_col",
-                       "monthly_header_row"):
+                       "monthly_header_row", "monthly_start_marker"):
                 _v = mb.get(_k)
                 if _v not in (None, "", 0):
                     mb_block[_k] = _v
@@ -863,6 +909,24 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
                 crp_block[side] = side_block
         if crp_block:
             cfg["co_recov_provenance"] = crp_block
+
+    # ---- WARM auto-derive: reserve pinning + monthly book ----
+    # Populated by the setup wizard's WARM upload (the ``warm_autoderive``
+    # bridge) with the validated resolver-path derivations that this function
+    # does not otherwise produce: col-G per-grade base-loss pins, warm-allowance
+    # pools, balance-only ``not_risk_rated`` (detected from the WARM ACL tab, not
+    # the coarse risk-rated flag), and the WARM's manual monthly book. These are
+    # what make a WARM-sourced config tie to the analyst's WARM. Overlaid only
+    # when present, so non-WARM CUs are unaffected.
+    wr = state.get("warm_reserve") or {}
+    if wr.get("base_loss_rate_by_pool_grade"):
+        cfg["base_loss_rate_by_pool_grade"] = wr["base_loss_rate_by_pool_grade"]
+    if wr.get("warm_allowance_pools"):
+        cfg["warm_allowance_pools"] = wr["warm_allowance_pools"]
+    if wr.get("not_risk_rated"):
+        cfg["not_risk_rated"] = wr["not_risk_rated"]
+    if wr.get("monthly_balance") and not cfg.get("monthly_balance"):
+        cfg["monthly_balance"] = wr["monthly_balance"]
 
     return cfg
 

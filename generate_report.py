@@ -503,8 +503,12 @@ def _parse_chargeoff_file(filepath, parse_config=None):
                 result = result.dropna(subset=['amount'])
                 if not result.empty:
                     return result
-                if not result.empty:
-                    return result
+            # strict_columns: the explicit amount_col is authoritative. An
+            # empty result means "no charge-offs in this file", NOT a cue to
+            # fall through to auto-detect (which in a combined Charge-Off /
+            # Recovery workbook would wrongly grab the recovery-amount column).
+            if parse_config.get('strict_columns'):
+                return pd.DataFrame(columns=['code', 'amount', 'date'])
 
     # Check if first row is a header.  Require col 0 to NOT be numeric (a real
     # header has 'Account Number'-style text in col 0; a data row starts with
@@ -664,6 +668,12 @@ def _parse_recovery_file(filepath, parse_config=None):
                 result = result.dropna(subset=['amount'])
                 if not result.empty:
                     return result
+            # strict_columns: the explicit amount_col is authoritative. An
+            # empty result means "no recoveries in this file", NOT a cue to
+            # fall through to auto-detect (which in a combined Charge-Off /
+            # Recovery workbook would wrongly grab the charge-off-amount column).
+            if parse_config.get('strict_columns'):
+                return pd.DataFrame(columns=['code', 'amount', 'date'])
 
     # Check if first row is a header (see _parse_chargeoff_file for rationale)
     first_row = df.iloc[0]
@@ -1068,6 +1078,45 @@ def load_chargeoff_recovery_history(config):
                     iso = _cfg_file_iso(fname, config)
                 except Exception:  # noqa: BLE001
                     iso = None
+            # Last resort: a spelled-out / abbreviated month name adjacent to a
+            # 2- or 4-digit year in the filename (e.g. "MAY26", "Aug25",
+            # "Jan2025", "June 25"). Common for CUs whose combined CO/recovery
+            # files are named by period in a non-ISO layout AND whose recovery
+            # ROWS carry no date cell. Without this every such dateless row
+            # defaults to today's year -> cross-year leakage (all recoveries
+            # piled into a phantom December bucket; a prior year's recoveries
+            # vanish to $0).
+            if not iso or len(iso) < 7:
+                _mn = re.search(
+                    r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*'
+                    r'[\s_\-\.]*((?:19|20)?\d{2})(?!\d)',
+                    fname, re.IGNORECASE)
+                if _mn:
+                    _mo = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5,
+                           'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10,
+                           'nov': 11, 'dec': 12}[_mn.group(1)[:3].lower()]
+                    _yr = int(_mn.group(2))
+                    if _yr < 100:
+                        _yr += 2000
+                    if 2000 <= _yr <= 2099:
+                        return _yr, _mo
+            # Also handle COMPACT NUMERIC month+year tokens with no month name:
+            # "MMYY" / "MMYYYY" / "MM-YY" (e.g. "...0226" -> Feb 2026,
+            # "...122022" -> Dec 2022, "...07-23" -> Jul 2023). Common for
+            # per-month charge-off/recovery files whose recovery ROWS carry no
+            # date cell. A valid 01-12 month plus word boundaries are required
+            # so a longer digit run (account #s, YYYYMMDD) doesn't false-match;
+            # runs only after the ISO / config / month-name parsers all fail.
+            if not iso or len(iso) < 7:
+                _num = re.search(
+                    r'\b(0[1-9]|1[0-2])[-_\. ]?((?:19|20)?\d{2})\b', fname)
+                if _num:
+                    _mo = int(_num.group(1))
+                    _yr = int(_num.group(2))
+                    if _yr < 100:
+                        _yr += 2000
+                    if 2000 <= _yr <= 2099:
+                        return _yr, _mo
             if not iso or len(iso) < 7:
                 return None
             try:
@@ -1264,7 +1313,14 @@ def _col_letter_to_idx(letter):
 
 
 def _load_monthly_balances_manual(mb_cfg):
-    """Build (df, alll_by_date) from a wizard-entered pool × month grid."""
+    """Build (df, alll_by_date) from a wizard-entered pool × month grid.
+
+    The optional ``alll`` block (``{YYYY-MM-DD: balance}``) carries the ACL /
+    ALLL balance per month — e.g. the "ALLL Balance" row of a Monthly
+    Balances by Pool file. Values are stored as absolute amounts keyed by a
+    month-end timestamp, matching the per_month / per_year loaders so the
+    downstream ACL-balance consumer picks up the snapshot month.
+    """
     entries = mb_cfg.get('entries') or {}
     records = []
     for pool, row in entries.items():
@@ -1284,7 +1340,65 @@ def _load_monthly_balances_manual(mb_cfg):
             records.append({'pool': str(pool).strip(),
                             'date': dt,
                             'balance': bal})
-    return pd.DataFrame(records, columns=['pool', 'date', 'balance']), {}
+    alll_by_date: dict = {}
+    for d, v in (mb_cfg.get('alll') or {}).items():
+        dt = pd.to_datetime(d, errors='coerce')
+        if pd.isna(dt):
+            continue
+        try:
+            alll_by_date[dt] = abs(float(v))
+        except (TypeError, ValueError):
+            continue
+    return pd.DataFrame(records, columns=['pool', 'date', 'balance']), alll_by_date
+
+
+def _pm_effective_balance_idx(df, start_row, label_idx, configured_idx):
+    """Return the 0-based column index to read balances from for THIS file.
+
+    Normally the configured ``balance_col``. But when a workbook's title or
+    header wraps into an extra leading column, the balances shift one column
+    to the right, leaving the configured column empty for that file. In that
+    case fall back to the densest numeric column at/after the label column so
+    the period still loads. Only overrides when the configured column has NO
+    numeric values for this file, so files that already parse are never
+    affected.
+    """
+    try:
+        ncols = int(df.shape[1])
+    except Exception:  # noqa: BLE001
+        return configured_idx
+    if configured_idx is None:
+        configured_idx = 0
+
+    def _numeric_count(c):
+        if c is None or c < 0 or c >= ncols:
+            return 0
+        n = 0
+        for i in range(max(0, start_row), df.shape[0]):
+            lbl = (df.iat[i, label_idx]
+                   if (label_idx is not None and 0 <= label_idx < ncols)
+                   else None)
+            if lbl is None or str(lbl).strip() == '':
+                continue
+            if _coerce_balance(df.iat[i, c]) is not None:
+                n += 1
+        return n
+
+    if 0 <= configured_idx < ncols and _numeric_count(configured_idx) > 0:
+        return configured_idx
+    # Configured column is empty for this file — auto-detect the densest
+    # numeric column to the right of the label column.
+    best_c, best_n = configured_idx, 0
+    lo = (label_idx + 1) if label_idx is not None else 0
+    for c in range(max(0, lo), ncols):
+        n = _numeric_count(c)
+        if n > best_n:
+            best_n, best_c = n, c
+    if best_n > 0 and best_c != configured_idx:
+        print(f"    Monthly-balance: configured balance column was empty for "
+              f"this file; using detected column {best_c} instead.")
+        return best_c
+    return configured_idx
 
 
 def _load_monthly_balances_per_month(mb_cfg, acl_cfg=None):
@@ -1369,6 +1483,11 @@ def _load_monthly_balances_per_month(mb_cfg, acl_cfg=None):
             continue
         if df is None or df.empty or df.shape[1] <= max(label_idx, balance_idx):
             continue
+        # Determine the effective balance column for THIS file (bulletproof
+        # against a wrapped title/header pushing balances one column right,
+        # which leaves the configured column empty for that file only).
+        eff_balance_idx = _pm_effective_balance_idx(
+            df, header_row, label_idx, balance_idx)
         # Pull the ACL value for this period from the configured row+col
         # (defaults to balance_col). The wizard's "monthly_file" source
         # captures one row number that applies across every period file.
@@ -1380,7 +1499,7 @@ def _load_monthly_balances_per_month(mb_cfg, acl_cfg=None):
                     alll_by_date[dt] = abs(_av)
         for i in range(header_row, df.shape[0]):
             label = df.iat[i, label_idx]
-            bal = df.iat[i, balance_idx]
+            bal = df.iat[i, eff_balance_idx]
             if pd.isna(label) or str(label).strip() == '':
                 continue
             if pd.isna(bal):
@@ -1895,6 +2014,34 @@ def _load_monthly_balances_from_wizard(config, mb_cfg=None, with_labels=False):
     return out_df, alll_by_date
 
 
+_SUPP_MONTH_NAMES = {
+    'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
+    'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+    'aug': 8, 'august': 8, 'sep': 9, 'sept': 9, 'september': 9,
+    'oct': 10, 'october': 10, 'nov': 11, 'november': 11,
+    'dec': 12, 'december': 12,
+}
+
+
+def _period_from_month_name_in(name):
+    """Return 'YYYY-MM-DD' (month-end) for a filename that carries a
+    spelled-out month + 4-digit year (e.g. 'Balance Sheet June 2026.xlsx'),
+    else None. Complements the numeric filename date parsing so CUs that
+    name their balance sheets by month name still resolve a period."""
+    import re as _re
+    import calendar as _cal
+    stem = os.path.splitext(os.path.basename(str(name)))[0]
+    m = _re.search(r'(?<![A-Za-z])([A-Za-z]{3,9})[\s\-_]+(20\d{2})(?!\d)', stem)
+    if not m:
+        return None
+    mo = _SUPP_MONTH_NAMES.get(m.group(1).strip().lower())
+    if not mo:
+        return None
+    y = int(m.group(2))
+    last = _cal.monthrange(y, mo)[1]
+    return f"{y:04d}-{mo:02d}-{last:02d}"
+
+
 def _discover_supplemental_monthly_balances(config, with_labels=False):
     """Discover per-month 'snapshot' balance files (e.g.
     ``June 2026 Loans by Type.xlsx``) in the data directory and return
@@ -1933,6 +2080,13 @@ def _discover_supplemental_monthly_balances(config, with_labels=False):
     label_idx = _col_letter_to_idx(mb.get('monthly_label_col') or 'A')
     balance_idx = _col_letter_to_idx(mb.get('monthly_balance_col') or 'B')
     header_row = int(mb.get('monthly_header_row') or 1)
+    # Optional section anchor: when set, each file is scanned for a row
+    # containing this text (case-insensitive) and extraction begins on the
+    # row BELOW it. Lets a combined balance sheet (e.g. a Deposit Account
+    # Summary above a Loan Account Summary) be parsed without leaking the
+    # non-loan section into pool balances -- robust to the upper section
+    # changing length month to month.
+    start_marker = str(mb.get('monthly_start_marker') or '').strip().lower()
     sheet = str(mb.get('monthly_sheet') or '').strip()
     base_name = str(mb.get('filename') or '').strip().lower()
     raw_map = mb.get('pool_map') or {}
@@ -1979,6 +2133,10 @@ def _discover_supplemental_monthly_balances(config, with_labels=False):
             iso = _esd(fn, {'date_pattern': r'(20\d{2})-(\d{2})',
                             'date_format': 'YYYY-MM'})
         if not iso:
+            # Fall back to a spelled-out month name in the filename
+            # (e.g. 'Balance Sheet June 2026.xlsx').
+            iso = _period_from_month_name_in(fn)
+        if not iso:
             continue
         period = iso[:7]  # YYYY-MM
         if period in seen_periods:
@@ -1999,8 +2157,26 @@ def _discover_supplemental_monthly_balances(config, with_labels=False):
             continue
         if df is None or df.empty or df.shape[1] <= max(label_idx, balance_idx):
             continue
+        # Resolve the first data row. Default to the configured header
+        # offset; when a section marker is set, anchor below the marker
+        # row so anything above it (e.g. a Deposit Account Summary) is
+        # ignored regardless of its length.
+        start_i = header_row
+        if start_marker:
+            for _mi in range(df.shape[0]):
+                _hit = False
+                for _c in range(df.shape[1]):
+                    _v = df.iat[_mi, _c]
+                    if isinstance(_v, str):
+                        _vs = _v.strip().lower()
+                        if _vs == start_marker or _vs.startswith(start_marker):
+                            _hit = True
+                            break
+                if _hit:
+                    start_i = _mi + 1
+                    break
         seen_periods.add(period)
-        for i in range(header_row, df.shape[0]):
+        for i in range(start_i, df.shape[0]):
             label = df.iat[i, label_idx]
             bal = df.iat[i, balance_idx]
             if pd.isna(label) or str(label).strip() == '':
@@ -4754,6 +4930,7 @@ def load_impaired_data(config, snap):
     acl_summary = {}   # pooled_total_spec_id, total_spec_allow, total_allow_needed, acl_bal, adjustment
     current_pool = None
     current_grades = {}
+    in_impaired = False   # inside the 'Impaired Loans' breakout section
     for idx in range(len(acl_df)):
         a_val = acl_df.iloc[idx, 0]
         if pd.isna(a_val):
@@ -4827,11 +5004,27 @@ def load_impaired_data(config, snap):
             acl_summary['pooled_env_allow'] = float(acl_df.iloc[idx, 9]) if pd.notna(acl_df.iloc[idx, 9]) else 0.0
             acl_summary['pooled_total_allow'] = float(acl_df.iloc[idx, 10]) if pd.notna(acl_df.iloc[idx, 10]) else 0.0
 
-        # Impaired Loans section
-        if label in ('Delinquent Loans', 'Known Losses', 'Repossessions',
-                      'Foreclosed Real Estate', 'Deceased', 'Bankruptcy'):
-            k = acl_df.iloc[idx, 10] if acl_df.shape[1] > 10 else 0
-            acl_impaired[label] = float(k) if pd.notna(k) else 0.0
+        # Impaired Loans section. The breakout categories vary by CU:
+        # standard TCT names (Delinquent Loans / Known Losses / ...) or the
+        # CU's own codes (e.g. Erie: DQ / DQ90 / REPO / BK / BKNOTDQ). They
+        # render under an 'Impaired Loans' header with the per-category
+        # allowance in the 'Allowance' column (index 9; some layouts use
+        # index 10). Track the section so pool / other-provision rows aren't
+        # mis-captured, and read whichever allowance column is populated.
+        if label == 'Impaired Loans':
+            in_impaired = True
+        elif (label.startswith('Total Specifically Identified')
+              or label.startswith('Pooled Totals')
+              or label.startswith('Total Other Provision')):
+            in_impaired = False
+        elif in_impaired and label and not label.upper().startswith('HIDE') \
+                and label.lower() not in ('amount at risk', 'allowance',
+                                          'allowance %'):
+            _v9 = acl_df.iloc[idx, 9] if acl_df.shape[1] > 9 else None
+            _v10 = acl_df.iloc[idx, 10] if acl_df.shape[1] > 10 else None
+            _v = _v9 if pd.notna(_v9) else _v10
+            if pd.notna(_v):
+                acl_impaired[label] = float(_v)
 
         if label == 'Total Specifically Identified Allowance':
             k = acl_df.iloc[idx, 10] if acl_df.shape[1] > 10 else 0
@@ -6434,6 +6627,67 @@ def _load_dq_history_from_db(config):
     return out
 
 
+def _select_validated_impaired_candidate(paths, snap_prefix):
+    """From impaired-NAMED but date-less candidate files, return the best one
+    that validates against the impaired workbook FORMAT, or ``None``.
+
+    "Matches the format" = ``impaired_parser.parse_file`` returns ok AND the
+    workbook exposes the Impairment-Type header structure (a data header row
+    and/or recognised impairment types). When a candidate carries an internal
+    Period Ending that resolves to a DIFFERENT ``YYYY-MM`` than the snapshot it
+    is rejected (it belongs to another period). Ties break by: internal period
+    matches the snapshot, then has data rows, then newest mtime.
+    """
+    uniq = list(dict.fromkeys(paths or []))
+    if not uniq:
+        return None
+    try:
+        from cecl_ui.services import impaired_parser
+    except Exception:  # noqa: BLE001
+        return None
+
+    def _period_ym(parsed):
+        pe = parsed.get('period_ending')
+        if not pe:
+            return None
+        s = str(pe)
+        m = re.search(r'(20\d{2})[-/](\d{1,2})', s)
+        if m:
+            return f"{m.group(1)}-{int(m.group(2)):02d}"
+        try:
+            d = pd.to_datetime(s, errors='coerce')
+            if pd.notna(d):
+                return f"{d.year:04d}-{d.month:02d}"
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    scored = []
+    for p in uniq:
+        try:
+            parsed = impaired_parser.parse_file(p)
+        except Exception:  # noqa: BLE001
+            continue
+        if not parsed.get('ok'):
+            continue
+        if not (parsed.get('data_header_row') or parsed.get('impairment_types')):
+            continue  # doesn't match the impaired layout
+        ym = _period_ym(parsed)
+        if ym and snap_prefix and ym != snap_prefix:
+            continue  # internal period says a different month
+        try:
+            mtime = os.path.getmtime(p)
+        except OSError:
+            mtime = 0.0
+        period_match = 1 if (ym and ym == snap_prefix) else 0
+        has_rows = 1 if (parsed.get('data_rows') or []) else 0
+        scored.append((period_match, has_rows, mtime, p))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    return scored[0][3]
+
+
 def find_standalone_impaired_file(config, snap):
     """Locate the standalone Impaired Loans workbook for ``snap``.
 
@@ -6515,6 +6769,20 @@ def find_standalone_impaired_file(config, snap):
         if not os.path.isabs(fb_folder):
             fb_folder = os.path.join(BASE, fb_folder)
         search_dirs.append(fb_folder)
+    # Also scan the CU's client source folder (``loan_source_folder``). Many
+    # CUs' impaired-loans export never lands in ``data_directory``; it is
+    # dropped straight into the period folder of the client drive (e.g. Vizo
+    # IDLR: ".../CECL Migration IDLR/2026/June 2026/...Impaired Loans...xlsx").
+    # ``data_directory`` (and any credit-pull fallback) is searched first, so a
+    # dated/period-matching file there still wins; the source folder is only
+    # walked when nothing there matched — which is exactly the case that
+    # previously left the impaired section empty for these CUs.
+    src_folder = config.get('loan_source_folder', '')
+    if src_folder:
+        if not os.path.isabs(src_folder):
+            src_folder = os.path.join(BASE, src_folder)
+        if src_folder not in search_dirs:
+            search_dirs.append(src_folder)
 
     # Robust filename-date extractor (handles YYYY-MM, MMDDYYYY, YYYYMMDD,
     # MM-DD-YYYY, month names, ...). Used to match an impaired file to the
@@ -6525,6 +6793,38 @@ def find_standalone_impaired_file(config, snap):
         from import_data import _try_common_date_layouts as _file_iso
     except Exception:  # noqa: BLE001
         _file_iso = None
+
+    # Extract a YYYY-MM period from a folder-path fragment (or None). Handles
+    # "2026-06" / "2026_06" / "2026 06" and month-name variants in either
+    # order ("June 2026" / "2026 June"). Used to bind a date-stripped impaired
+    # export to the period folder it was dropped into, so a filename with no
+    # date still resolves to the correct snapshot (and is skipped for other
+    # periods on historical re-runs).
+    _months_abbr = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5,
+                    'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10,
+                    'nov': 11, 'dec': 12}
+
+    def _path_period(text):
+        if not text:
+            return None
+        m = re.search(r'(20\d{2})[-_/.\s]{1,3}(0?[1-9]|1[0-2])(?!\d)', text)
+        if m:
+            return f"{m.group(1)}-{int(m.group(2)):02d}"
+        m = re.search(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*'
+                      r'[-_/.\s]*((?:19|20)\d{2})', text, re.IGNORECASE)
+        if m:
+            return f"{int(m.group(2)):04d}-{_months_abbr[m.group(1)[:3].lower()]:02d}"
+        m = re.search(r'((?:19|20)\d{2})[-_/.\s]*'
+                      r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*',
+                      text, re.IGNORECASE)
+        if m:
+            return f"{int(m.group(1)):04d}-{_months_abbr[m.group(2)[:3].lower()]:02d}"
+        return None
+
+    # Impaired-NAMED files with NO resolvable date anywhere in the filename
+    # are held here and resolved via a format-validated fallback after every
+    # date-based attempt fails (so dated files always win for their period).
+    _dateless_impaired_candidates: list[str] = []
 
     for sdir in search_dirs:
         if not os.path.isdir(sdir):
@@ -6563,11 +6863,41 @@ def find_standalone_impaired_file(config, snap):
                 # changes (e.g. a trailing MMDDYYYY token like 06302026).
                 if _loose_date_rx is not None and _loose_date_rx.search(f):
                     return os.path.join(root, f)
-                if _file_iso is not None and snap_prefix:
-                    iso = _file_iso(f)
-                    if iso and iso[:7] == snap_prefix:
-                        return os.path.join(root, f)
-    return None
+                _iso = (_file_iso(f)
+                        if (_file_iso is not None and snap_prefix) else None)
+                if _iso and _iso[:7] == snap_prefix:
+                    return os.path.join(root, f)
+                if not _iso:
+                    # No date in the FILENAME. Some CUs drop a date-stripped
+                    # export into a period-named folder (e.g. Vizo IDLR:
+                    # ".../2026/June 2026/CECL-WARM ... Impaired Loans NEW.xlsx").
+                    # Bind the file to the period encoded in its containing
+                    # folder path when present: an exact snapshot-period folder
+                    # wins immediately; a DIFFERENT-period folder is skipped so
+                    # historical re-runs never grab the wrong month's file.
+                    try:
+                        _rel_dir = os.path.relpath(root, sdir)
+                    except ValueError:
+                        _rel_dir = root
+                    _folder_ym = _path_period(_rel_dir)
+                    if _folder_ym and snap_prefix:
+                        if _folder_ym == snap_prefix:
+                            return os.path.join(root, f)
+                        continue  # folder path says a different period
+                    # No date in filename OR folder path — hold as a candidate
+                    # for the format-validated fallback below (handles CUs
+                    # that dropped the date token, e.g. NOVA's
+                    # "TCT CECL-WARM ... Impaired Loans NEW.xlsx").
+                    _dateless_impaired_candidates.append(
+                        os.path.join(root, f))
+
+    # FINAL fallback: nothing matched the snapshot period by filename date.
+    # Validate any date-less impaired-NAMED candidate against the impaired
+    # workbook FORMAT and return the best match, so a CU can rename/date-strip
+    # its export as long as the words "Impaired Loans" remain and the layout
+    # is intact.
+    return _select_validated_impaired_candidate(
+        _dateless_impaired_candidates, snap_prefix)
 
 
 def load_standalone_impaired(config, snap, df=None):
@@ -6724,7 +7054,9 @@ def load_standalone_impaired(config, snap, df=None):
     # key AND several normalized variants (leading-zero-stripped, and
     # int(member)+int(suffix) with the DB-detected total width).
     grade_lookup = {}  # {member_suffix_str: grade}
+    pool_lookup = {}   # {member_suffix_str: loan_pool} — AIRES-matched pool
     _db_key_len = 0
+    _has_pool_col = df is not None and 'loan_pool' in df.columns
     if df is not None and 'member_number' in df.columns and 'current_grade' in df.columns:
         for _, r in df.iterrows():
             mem = str(r['member_number']).strip()
@@ -6732,6 +7064,17 @@ def load_standalone_impaired(config, snap, df=None):
             if not mem:
                 continue
             grade_lookup[mem] = grade
+            # Pull the pool the loan actually sits in from the extract so
+            # impaired rows are removed from the SAME pool the loan is
+            # reserved in (rather than re-deriving a pool from the impaired
+            # file's own loan-type code, which can use a different taxonomy).
+            _pool_val = ''
+            if _has_pool_col:
+                _pv = r['loan_pool']
+                if pd.notna(_pv):
+                    _pool_val = str(_pv).strip()
+            if _pool_val:
+                pool_lookup[mem] = _pool_val
             # Also store the leading-zero-stripped variant so bare
             # int(member)+int(suffix) forms from the impaired workbook
             # can find a hit even when the DB pads the concatenated key.
@@ -6739,6 +7082,8 @@ def load_standalone_impaired(config, snap, df=None):
                 stripped = str(int(mem))
                 if stripped != mem:
                     grade_lookup.setdefault(stripped, grade)
+                    if _pool_val:
+                        pool_lookup.setdefault(stripped, _pool_val)
             except (TypeError, ValueError):
                 pass
             if not _db_key_len:
@@ -6768,21 +7113,27 @@ def load_standalone_impaired(config, snap, df=None):
         if removed_val <= 0:
             continue
 
-        # Map loan type to pool
+        # Resolve the pool by MATCHING the impaired loan against the loan
+        # extract (member+suffix), so the balance is removed from the pool
+        # the loan is actually reserved in. The impaired file's own
+        # loan-type code is only a FALLBACK for rows that don't match any
+        # extract record (its codes may use a different taxonomy than the
+        # top-level pool_map — e.g. an AIRES code that resolves to a
+        # different pool). Grade comes from the same matched extract row.
         lt = str(loan_type).strip() if loan_type else ''
-        pool = pool_map.get(lt, default_pool)
+        _code_pool = pool_map.get(lt, default_pool)
 
-        # Look up grade from df using member+suffix
         grade = ''
+        matched_pool = None
         if member is not None and suffix is not None:
             try:
                 mem_int = int(float(member))
                 suf_int = int(float(suffix))
             except (TypeError, ValueError):
                 # Spreadsheet placeholders like 'xxxx' or blanks — skip
-                # grade lookup for this row rather than crashing the
+                # extract lookup for this row rather than crashing the
                 # whole report. The balance still aggregates into the
-                # pool below.
+                # fallback pool below.
                 mem_int = suf_int = None
             if mem_int is not None:
                 # Try multiple key variants because YAML's suffix_length
@@ -6790,11 +7141,12 @@ def load_standalone_impaired(config, snap, df=None):
                 # the raw source actually has a 2-digit padded suffix)
                 # frequently disagrees with the DB's concatenated form.
                 # We test the configured width AND every plausible
-                # suffix-padding width; the first hit against
-                # grade_lookup (which stores both the padded DB key and
+                # suffix-padding width; the first key present in the
+                # extract lookup (which stores both the padded DB key and
                 # a leading-zero-stripped variant) wins.
                 _candidate_widths = [suffix_len, 0, 1, 2, 3, 4, 5]
                 _tried: set[str] = set()
+                _hit_key = None
                 for _w in _candidate_widths:
                     if _w < 0:
                         continue
@@ -6805,14 +7157,14 @@ def load_standalone_impaired(config, snap, df=None):
                     if mem_key in _tried:
                         continue
                     _tried.add(mem_key)
-                    grade = grade_lookup.get(mem_key, '')
-                    if grade:
+                    if mem_key in grade_lookup:
+                        _hit_key = mem_key
                         break
                 # As a final safety net, if the DB uses a fixed total
                 # key length (e.g. 11-char zero-padded), try matching
                 # against that width by zero-padding the member side
                 # for each candidate suffix width.
-                if not grade and _db_key_len:
+                if _hit_key is None and _db_key_len:
                     for _sw in (2, 3, 1, 4):
                         _mw = _db_key_len - _sw
                         if _mw <= 0:
@@ -6821,9 +7173,16 @@ def load_standalone_impaired(config, snap, df=None):
                         if mem_key in _tried:
                             continue
                         _tried.add(mem_key)
-                        grade = grade_lookup.get(mem_key, '')
-                        if grade:
+                        if mem_key in grade_lookup:
+                            _hit_key = mem_key
                             break
+                if _hit_key is not None:
+                    grade = grade_lookup.get(_hit_key, '') or ''
+                    matched_pool = pool_lookup.get(_hit_key)
+
+        # Matched extract pool wins; otherwise fall back to the impaired
+        # file's loan-type code mapping.
+        pool = matched_pool if matched_pool else _code_pool
 
         spec_id_by_pool.setdefault(pool, {})
         spec_id_by_pool[pool][grade] = (
@@ -6995,12 +7354,10 @@ def _resolve_mgmt_adj_grade(pool, grade_label, grade_idx, num_grades,
                              admin_default, prior_mgmt_adj_map,
                              base_rate=None):
     """Mirror of report_tct's resolver for the legacy generate_report
-    path. Precedence: prior > manual×dist > admin×dist (only when
-    use_default AND no manual AND base_rate==0) > 0.
+    path. Precedence: manual×dist > admin×dist (only when use_default
+    AND no manual AND base_rate==0) > prior (carry-forward fallback,
+    only when no current-period adjustment is established) > 0.
     """
-    pm = prior_mgmt_adj_map.get(pool, {}) if prior_mgmt_adj_map else {}
-    if grade_label in pm:
-        return pm[grade_label]
     dist = get_dist_factor(grade_idx, num_grades)
     manual = mgmt_adj_by_pool.get(pool, 0) or 0
     if manual:
@@ -7009,6 +7366,11 @@ def _resolve_mgmt_adj_grade(pool, grade_label, grade_idx, num_grades,
             and admin_default
             and (base_rate is None or float(base_rate or 0) == 0)):
         return float(admin_default) * dist
+    # Carry-forward fallback: prior period's per-grade value applies only
+    # when the current period has no established adjustment above.
+    pm = prior_mgmt_adj_map.get(pool, {}) if prior_mgmt_adj_map else {}
+    if grade_label in pm:
+        return pm[grade_label]
     return 0.0
 
 
@@ -11005,18 +11367,564 @@ def _coerce_money(value):
         return -v if neg else v
 
 
+def _neg_share_period_from_text(text):
+    """Return ``(year, month)`` from a spelled-out or numeric month token in
+    ``text`` (e.g. ``"Jun 2026"``, ``"July 2025"``, ``"6-30-26"``), else None."""
+    stem = str(text)
+    m = re.search(r'(?<![A-Za-z])([A-Za-z]{3,9})[\s\-_]+(20\d{2})(?!\d)', stem)
+    if m:
+        mo = _SUPP_MONTH_NAMES.get(m.group(1).strip().lower())
+        if mo:
+            return int(m.group(2)), mo
+    m = re.search(r'(?<!\d)(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})(?!\d)', stem)
+    if m:
+        mo = int(m.group(1))
+        yy = int(m.group(3))
+        if yy < 100:
+            yy += 2000
+        if 1 <= mo <= 12 and 2000 <= yy <= 2099:
+            return yy, mo
+    return None
+
+
+def _neg_share_period_from_path(path):
+    """Period ``(year, month)`` for a negative-share file — prefer the file's
+    own name, then walk up the folder names (e.g. ``.../Jun 2026/...``)."""
+    p = _neg_share_period_from_text(os.path.basename(path))
+    if p:
+        return p
+    for part in reversed(os.path.dirname(path).split(os.sep)):
+        p = _neg_share_period_from_text(part)
+        if p:
+            return p
+    return None
+
+
+def _resolve_negative_share_oac(o, config, snapshot_date):
+    """Resolve one ``source: negative_share`` OAC entry in-place.
+
+    Computes a life-of-loan loss rate for the credit union's negative shares
+    using the same WARM logic as the loan pools: trailing
+    ``life_of_loan_months`` (default 12) of net charge-offs (charge-offs minus
+    recoveries) divided by the current negative-share balance. The balance is
+    the summed exposure column of the current month's negative-share extract;
+    the charge-off / recovery history is gathered from the client's monthly
+    summary files plus any multi-month quarterly charge-off file. Sets
+    ``balance``, ``percentage`` and ``amount`` for the current snapshot so the
+    Vizo and TCT builders render an up-to-date line every quarter.
+    """
+    try:
+        snap = pd.to_datetime(snapshot_date)
+        snap_year, snap_month = int(snap.year), int(snap.month)
+    except Exception:
+        print("  OAC negative_share: bad snapshot_date; skipped.")
+        return
+    try:
+        life_months = int(o.get('life_of_loan_months') or 12)
+    except (TypeError, ValueError):
+        life_months = 12
+    folder = o.get('source_folder') or config.get('data_directory') or ''
+    folder = os.path.expanduser(os.path.expandvars(str(folder)))
+    if not folder or not os.path.isdir(folder):
+        print(f"  OAC '{o.get('title')}': source folder not found "
+              f"({folder!r}); balance left as configured.")
+        return
+    bal_pat = re.compile(o.get('balance_pattern') or r'(?i)Negative Share File')
+    sum_pat = re.compile(o.get('co_summary_pattern')
+                         or r'(?i)Negative Shares Charge Off and Recovery')
+    qtr_pat = re.compile(o.get('co_quarterly_pattern')
+                         or r'(?i)Share COs?\s*-\s*Recoveries')
+    bal_col_pref = o.get('balance_column') or 'Current Balance'
+
+    bal_files, sum_files, qtr_files = [], [], []
+    for dp, _dn, fn in os.walk(folder):
+        for f in fn:
+            if not f.lower().endswith(('.xlsx', '.xls', '.csv')):
+                continue
+            full = os.path.join(dp, f)
+            if bal_pat.search(f):
+                bal_files.append(full)
+            elif sum_pat.search(f):
+                sum_files.append(full)
+            elif qtr_pat.search(f):
+                qtr_files.append(full)
+
+    # Current-month negative-share balance (member exposure to the CU).
+    target = (snap_year, snap_month)
+    bal_total = 0.0
+    bal_pick = next(
+        (f for f in bal_files if _neg_share_period_from_path(f) == target), None)
+    if bal_pick:
+        try:
+            bdf = pd.read_excel(bal_pick, header=0)
+            col = bal_col_pref if bal_col_pref in bdf.columns else (
+                'Current Balance' if 'Current Balance' in bdf.columns
+                else ('Balance' if 'Balance' in bdf.columns else None))
+            if col is not None:
+                bal_total = float(
+                    pd.to_numeric(bdf[col], errors='coerce').abs().sum())
+        except Exception as e:  # noqa: BLE001
+            print(f"  OAC '{o.get('title')}': could not read balance file ({e}).")
+    else:
+        print(f"  OAC '{o.get('title')}': no negative-share balance file for "
+              f"{snap_year}-{snap_month:02d}; balance left as configured.")
+
+    # Monthly net charge-off history keyed by (year, month).
+    co_by_ym = {}
+    for f in sum_files:
+        per = _neg_share_period_from_path(f)
+        if not per:
+            continue
+        try:
+            d = pd.read_excel(f)
+        except Exception:  # noqa: BLE001
+            continue
+        cols = {str(c).strip().lower(): c for c in d.columns}
+        co_c = next((cols[k] for k in cols if 'charge' in k), None)
+        rc_c = next((cols[k] for k in cols if 'recover' in k), None)
+        if not co_c:
+            continue
+        co = float(pd.to_numeric(d[co_c], errors='coerce').sum())
+        rc = float(pd.to_numeric(d[rc_c], errors='coerce').sum()) if rc_c else 0.0
+        co_by_ym[per] = (co, rc)
+    # Multi-month quarterly files take precedence (freshest delivery, and
+    # they carry month-end dates so their period is unambiguous).
+    for f in qtr_files:
+        try:
+            raw = pd.read_excel(f, header=None)
+        except Exception:  # noqa: BLE001
+            continue
+        hdr = None
+        for i in range(min(15, len(raw))):
+            vals = [str(x).strip().lower() for x in raw.iloc[i].tolist()]
+            if (any(v == 'co' or 'charge' in v for v in vals)
+                    and any('rec' in v for v in vals)):
+                hdr = i
+                break
+        if hdr is None:
+            continue
+        try:
+            d = pd.read_excel(f, header=hdr)
+        except Exception:  # noqa: BLE001
+            continue
+        date_c = d.columns[0]
+        cols = {str(c).strip().lower(): c for c in d.columns}
+        co_c = next((cols[k] for k in cols if k == 'co' or 'charge' in k), None)
+        rc_c = next((cols[k] for k in cols if 'rec' in k), None)
+        for _, row in d.iterrows():
+            dt = pd.to_datetime(row[date_c], errors='coerce')
+            if pd.isna(dt):
+                continue
+            co = _coerce_money(row[co_c]) if co_c else 0.0
+            rc = _coerce_money(row[rc_c]) if rc_c else 0.0
+            co_by_ym[(int(dt.year), int(dt.month))] = (co, rc)
+
+    end = snap_year * 12 + snap_month
+    start = end - life_months + 1
+    window = {ym: v for ym, v in co_by_ym.items()
+              if start <= (ym[0] * 12 + ym[1]) <= end}
+    net_total = sum((co - rc) for co, rc in window.values())
+
+    calc_pct = (net_total / bal_total * 100.0) if bal_total > 0 else 0.0
+    # Manual override from the Run Reports "Other Allowance Considerations"
+    # page. When set (non-blank), it replaces the calculated life-of-loan
+    # rate; the balance is still pulled from the current extract.
+    override = o.get('override_percentage')
+    use_override = override is not None and str(override).strip() != ''
+    try:
+        pct = float(override) if use_override else calc_pct
+    except (TypeError, ValueError):
+        pct = calc_pct
+        use_override = False
+    o['balance'] = round(bal_total, 2)
+    o['percentage'] = round(pct, 6)
+    o['amount'] = round(bal_total * pct / 100.0, 2)
+    config.setdefault('_oac_calc', {})[o.get('title') or 'Negative Share Provision'] = {
+        'kind': 'negative_share',
+        'balance': round(bal_total, 2),
+        'calculated_percentage': round(calc_pct, 6),
+        'override_percentage': (round(float(override), 6) if use_override else None),
+        'amount': o['amount'],
+    }
+    _tag = f" -> OVERRIDE {pct:.4f}%" if use_override else ""
+    print(f"  OAC '{o.get('title')}': neg-share balance ${bal_total:,.2f}, "
+          f"trailing {len(window)}/{life_months}mo net CO ${net_total:,.2f} "
+          f"-> life-of-loan loss rate {calc_pct:.4f}%{_tag} "
+          f"-> allowance ${o['amount']:,.2f}")
+
+
+def _unfunded_undrawn_by_pool(config, snapshot_date, codes):
+    """Return ``{pool_name: undrawn_dollars}`` for the unfunded-commitment
+    codes.
+
+    Reads the current-snapshot loan extract only (files whose filename/folder
+    period matches ``snapshot_date``; undated files are allowed) and, for
+    every loan whose raw ``loan_pool_code`` is one of ``codes``, adds the
+    undrawn credit (``total_available_credit`` - ``current_balance``, floored
+    at 0) to the pool that code maps to via ``config['pool_map']``. Codes are
+    compared with leading zeros stripped so ``'0080'`` and ``'80'`` match.
+    Only the snapshot file is used so an earlier month's extract sitting in
+    the archive can't contaminate the drawn balances.
+    """
+    def _norm(c):
+        s = str(c).strip()
+        return s.lstrip('0') or '0'
+
+    want = {_norm(c) for c in (codes or []) if str(c).strip()}
+    if not want:
+        return {}
+    try:
+        # generate_impdet_report builds a module-level engine from
+        # os.getenv('DATABASE_URL'); make sure it's populated for standalone
+        # report runs that only resolve the URL via cecl_credentials.
+        if not os.getenv('DATABASE_URL'):
+            os.environ['DATABASE_URL'] = get_database_url()
+        from generate_impdet_report import _resolve_extract_path
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"  OAC unfunded: extract resolver unavailable ({e}).")
+        return {}
+
+    try:
+        _snap = pd.to_datetime(snapshot_date)
+        target = (int(_snap.year), int(_snap.month))
+    except Exception:
+        target = None
+
+    # Build the same search directories _load_extract_enrichment uses.
+    data_dir = config.get('data_directory', '')
+    if data_dir and not os.path.isabs(data_dir):
+        data_dir = os.path.join(BASE, data_dir)
+    search_dirs = []
+    if data_dir and os.path.isdir(data_dir):
+        search_dirs.append(data_dir)
+    archive_cfg = config.get('archive_directory')
+    if archive_cfg:
+        archive_dir = archive_cfg if os.path.isabs(archive_cfg) \
+            else os.path.join(BASE, archive_cfg)
+    else:
+        client_short = os.path.basename(os.path.normpath(data_dir)) if data_dir else ''
+        archive_dir = os.path.join(BASE, 'Archive', client_short) if client_short else ''
+    if archive_dir and os.path.isdir(archive_dir) and archive_dir not in search_dirs:
+        search_dirs.append(archive_dir)
+    loan_folder = config.get('loan_file_folder')
+    if loan_folder:
+        loan_dir = loan_folder if os.path.isabs(loan_folder) \
+            else os.path.join(BASE, loan_folder)
+        if os.path.isdir(loan_dir) and loan_dir not in search_dirs:
+            search_dirs.append(loan_dir)
+
+    extracts = list(config.get('loan_data_extracts') or [])
+    if not extracts:
+        extracts = [{
+            'file_pattern': config.get('file_pattern'),
+            'column_mappings': config.get('column_mappings') or {},
+            'has_header': config.get('has_header', True),
+            'header_row': config.get('header_row'),
+        }]
+
+    pool_map = config.get('pool_map') or {}
+    norm_pool_map = {}
+    for k, v in pool_map.items():
+        norm_pool_map.setdefault(_norm(k), v)
+    default_pool = config.get('default_pool', 'Ignore')
+
+    def _norm_hdr(x):
+        return re.sub(r'\s+', ' ', str(x)).strip()
+
+    # Resolve each extract to a file, tagging whether its period is
+    # confirmed as the snapshot month, unknown (undated path), or wrong.
+    confirmed, unknown = [], []
+    seen_paths = set()
+    for ex in extracts:
+        col_map = dict(ex.get('column_mappings') or {})
+        if col_map.get('loan_pool_code') is None \
+                or col_map.get('current_balance') is None \
+                or col_map.get('total_available_credit') is None:
+            continue
+        path = _resolve_extract_path(ex.get('file_pattern'), search_dirs,
+                                     snapshot_date, config)
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        per = _neg_share_period_from_path(path) if target is not None else None
+        entry = (ex, col_map, path)
+        if target is not None and per == target:
+            confirmed.append(entry)
+        elif per is None or target is None:
+            unknown.append(entry)
+        # period != target -> drop (an earlier month sitting in the archive)
+    # Prefer files confirmed to be the snapshot month; only fall back to
+    # undated files when nothing confirms the snapshot (so a stale month in
+    # the archive can't contaminate the current-quarter undrawn totals).
+    chosen = confirmed if confirmed else unknown
+
+    by_pool = {}
+    counts = {}
+    for ex, col_map, path in chosen:
+        code_key = col_map.get('loan_pool_code')
+        bal_key = col_map.get('current_balance')
+        lim_key = col_map.get('total_available_credit')
+        has_header = ex.get('has_header', True)
+        try:
+            hr = int(ex.get('header_row') or 0)
+        except (TypeError, ValueError):
+            hr = 0
+        pd_header = (hr - 1) if hr > 1 else 0
+        ext_lc = os.path.splitext(path)[1].lower()
+        try:
+            if ext_lc == '.csv':
+                fdf = pd.read_csv(path, header=(pd_header if has_header else None))
+            else:
+                fdf = pd.read_excel(path, header=(pd_header if has_header else None))
+        except Exception as e:  # noqa: BLE001
+            print(f"  OAC unfunded: could not read extract '{path}' ({e}).")
+            continue
+
+        if has_header:
+            norm_cols = {_norm_hdr(c): c for c in fdf.columns}
+
+            def _series(key):
+                actual = norm_cols.get(_norm_hdr(key))
+                if actual is None and key in fdf.columns:
+                    actual = key
+                return fdf[actual] if actual is not None else None
+        else:
+            def _series(key):
+                try:
+                    return fdf.iloc[:, int(key)]
+                except (KeyError, IndexError, ValueError):
+                    return None
+
+        codes_ser = _series(code_key)
+        bal_ser = _series(bal_key)
+        lim_ser = _series(lim_key)
+        if codes_ser is None or bal_ser is None or lim_ser is None:
+            print(f"  OAC unfunded: extract '{os.path.basename(path)}' missing "
+                  f"code/balance/limit column; skipped.")
+            continue
+        print(f"  OAC unfunded: reading {os.path.basename(path)}")
+        for i in range(len(fdf)):
+            lt = _norm(codes_ser.iloc[i])
+            if lt not in want:
+                continue
+            avail = _coerce_money(lim_ser.iloc[i]) - _coerce_money(bal_ser.iloc[i])
+            if avail <= 0:
+                continue
+            pool = norm_pool_map.get(lt, default_pool)
+            by_pool[pool] = by_pool.get(pool, 0.0) + avail
+            counts[pool] = counts.get(pool, 0) + 1
+
+    for pool in sorted(by_pool):
+        print(f"  OAC unfunded: pool '{pool}' undrawn ${by_pool[pool]:,.2f} "
+              f"from {counts.get(pool, 0)} loan(s)")
+    return by_pool
+
+
+def _expand_unfunded_commitment_oac(config, pool_eff_rate, snapshot_date):
+    """Expand ``source: unfunded_commitment`` OAC templates into one resolved
+    row per pool.
+
+    Each template lists the ``loan_type_codes`` the CU flagged as *not*
+    unconditionally cancelable. This computes the undrawn credit for those
+    codes grouped by pool, then applies that pool's effective ACL loss rate
+    (``pool_eff_rate[pool]`` — the same rate the homogeneous-pool ACL
+    calculation applies to the pool) to produce the allowance. Codes that map
+    to different pools each get their own ``Unfunded Commitments - <Pool>``
+    row. Called from the ACL Env sheet builder (which owns the pool rates);
+    idempotent because the template entry is removed once expanded.
+    """
+    oac = config.get('other_allowance_considerations')
+    if not oac:
+        return
+    if not any(str((o or {}).get('source') or '').strip() == 'unfunded_commitment'
+               for o in oac):
+        return
+    pool_eff_rate = pool_eff_rate or {}
+    new_list = []
+    for o in oac:
+        if str((o or {}).get('source') or '').strip() != 'unfunded_commitment':
+            new_list.append(o)
+            continue
+        codes = o.get('loan_type_codes')
+        if codes is None:
+            codes = o.get('loan_type_code')
+        if isinstance(codes, (str, int)):
+            codes = [codes]
+        base_title = (str(o.get('title') or 'Unfunded Commitments').strip()
+                      or 'Unfunded Commitments')
+        # Per-pool manual overrides from the Run Reports "Other Allowance
+        # Considerations" page, keyed by pool name (percentage points).
+        overrides = o.get('override_percentage_by_pool') or {}
+        by_pool = _unfunded_undrawn_by_pool(config, snapshot_date, codes or [])
+        for pool in sorted(by_pool):
+            bal = round(by_pool[pool], 2)
+            calc_rate = float(pool_eff_rate.get(pool, 0) or 0)  # decimal
+            ov = overrides.get(pool)
+            use_override = ov is not None and str(ov).strip() != ''
+            try:
+                rate = (float(ov) / 100.0) if use_override else calc_rate
+            except (TypeError, ValueError):
+                rate = calc_rate
+                use_override = False
+            amt = round(bal * rate, 2)
+            new_list.append({
+                'title': f"{base_title} - {pool}",
+                'balance': bal,
+                'percentage': round(rate * 100.0, 6),
+                'amount': amt,
+            })
+            config.setdefault('_oac_calc', {})[f"{base_title} - {pool}"] = {
+                'kind': 'unfunded_commitment',
+                'pool': pool,
+                'base_title': base_title,
+                'balance': bal,
+                'calculated_percentage': round(calc_rate * 100.0, 6),
+                'override_percentage': (round(float(ov), 6) if use_override else None),
+                'amount': amt,
+            }
+            _tag = f" -> OVERRIDE {rate * 100:.4f}%" if use_override else ""
+            print(f"  OAC '{base_title} - {pool}': undrawn ${bal:,.2f} @ pool "
+                  f"ACL rate {calc_rate * 100:.4f}%{_tag} -> allowance ${amt:,.2f}")
+    config['other_allowance_considerations'] = new_list
+
+
+def _persist_oac_calc(client, calc, snapshot_date):
+    """Write the latest calculated OAC values back to the client YAML under
+    ``oac_last_calculated`` so the Run Reports override page can display them.
+
+    Re-reads the YAML from disk (rather than dumping the in-memory config,
+    which has had its OAC list expanded and carries transient keys) and only
+    touches the ``oac_last_calculated`` block.
+    """
+    try:
+        path = os.path.join(CFG_DIR, f'{client}.yaml')
+        with open(path, 'r', encoding='utf-8') as f:
+            raw = yaml.safe_load(f) or {}
+        raw['oac_last_calculated'] = {
+            'asof': str(snapshot_date),
+            'rows': calc,
+        }
+        with open(path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(raw, f, sort_keys=False, allow_unicode=True)
+        print(f"  OAC: cached {len(calc)} calculated value(s) to {client}.yaml")
+    except Exception as e:  # noqa: BLE001
+        print(f"  OAC: could not persist calculated snapshot ({e}).")
+
+
+def _apply_chargeoff_exclusions(hist, config):
+    """Remove specific charge-off / recovery records from the assembled
+    history per ``config['chargeoff_exclusions']``.
+
+    Each exclusion identifies a record the CU asked to drop from the analysis.
+    Matching is by year+month (from ``date``), pool (given explicitly or
+    derived from ``code`` via ``pool_map``) and ``amount``. The amount is
+    subtracted from the annual ``chargeoffs`` total, the ``co_monthly`` cell,
+    and — when present — ``impaired.warm_net_co`` so the life-of-loan loss
+    rate, the Display CO-Recov-DQ tab, and the charge-off history sheet all
+    reflect the removal. Recovery exclusions (``recovery_amount``) are handled
+    symmetrically. This honors a removal request without editing source files
+    or re-importing.
+    """
+    exclusions = config.get('chargeoff_exclusions') or []
+    if not exclusions or not isinstance(hist, dict):
+        return
+
+    def _norm_code(c):
+        s = str(c).strip()
+        return s.lstrip('0') or '0'
+
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    pm = config.get('pool_map') or {}
+    npm = {}
+    for k, v in pm.items():
+        npm.setdefault(_norm_code(k), v)
+    default_pool = config.get('default_pool', 'Ignore')
+    imp = hist.get('impaired') if isinstance(hist.get('impaired'), dict) else {}
+    warm_net_co = imp.get('warm_net_co') \
+        if isinstance(imp.get('warm_net_co'), dict) else None
+
+    for ex in exclusions:
+        if not isinstance(ex, dict):
+            continue
+        yr = ex.get('year')
+        mo = ex.get('month')
+        if (yr is None or mo is None) and ex.get('date'):
+            try:
+                d = pd.to_datetime(ex.get('date'))
+                yr, mo = int(d.year), int(d.month)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            yr = int(yr) if yr is not None else None
+            mo = int(mo) if mo is not None else None
+        except (TypeError, ValueError):
+            yr = mo = None
+        pool = str(ex.get('pool') or '').strip()
+        if not pool and ex.get('code') is not None:
+            pool = npm.get(_norm_code(ex.get('code')), default_pool)
+        co_amt = _f(ex.get('amount') if ex.get('amount') is not None
+                    else ex.get('chargeoff_amount'))
+        rc_amt = _f(ex.get('recovery_amount'))
+        label = str(ex.get('reason') or ex.get('account') or '').strip()
+        if yr is None or not pool:
+            print(f"  CO exclusion skipped (need year + pool/code): {ex}")
+            continue
+
+        def _subtract(annual, monthly, amt, kind):
+            if amt <= 0:
+                return
+            cur = (annual.get(yr, {}) or {}).get(pool, 0.0)
+            if cur < amt - 0.01:
+                print(f"  WARNING: {kind} exclusion ${amt:,.2f} exceeds available "
+                      f"${cur:,.2f} for {pool} {yr}; subtracting available only.")
+                amt = cur
+            if amt <= 0:
+                return
+            if yr in annual and pool in annual[yr]:
+                annual[yr][pool] = round(annual[yr][pool] - amt, 2)
+            if mo is not None and (yr, mo) in monthly and pool in monthly[(yr, mo)]:
+                monthly[(yr, mo)][pool] = round(monthly[(yr, mo)][pool] - amt, 2)
+
+        if co_amt > 0:
+            _subtract(hist.setdefault('chargeoffs', {}),
+                      hist.setdefault('co_monthly', {}), co_amt, 'charge-off')
+            if warm_net_co is not None and pool in warm_net_co:
+                warm_net_co[pool] = round(warm_net_co[pool] - co_amt, 2)
+        if rc_amt > 0:
+            _subtract(hist.setdefault('recoveries', {}),
+                      hist.setdefault('rc_monthly', {}), rc_amt, 'recovery')
+            if warm_net_co is not None and pool in warm_net_co:
+                warm_net_co[pool] = round(warm_net_co[pool] + rc_amt, 2)
+        print(f"  CO exclusion applied: {pool} {yr}-{(mo or 0):02d} "
+              f"-CO ${co_amt:,.2f}"
+              + (f" -Rec ${rc_amt:,.2f}" if rc_amt else "")
+              + (f"  ({label})" if label else ""))
+
+
 def _resolve_dynamic_oac(config, snapshot_date):
     """Resolve any data-derived Other Allowance Considerations in-place.
 
     An OAC entry with ``source: unfunded_available`` has its ``balance``
     computed from the loan extracts as the sum of undrawn credit
     (``total_available_credit`` - ``current_balance``, floored at 0) for
-    loans whose raw ``loan_pool_code`` matches ``loan_type_code``. The
-    ``amount`` is refreshed as ``balance * percentage / 100``. Both the
-    Vizo and TCT report builders read these resolved values, so computing
-    them here keeps the number current every quarter without manual entry.
+    loans whose raw ``loan_pool_code`` matches ``loan_type_code``. An entry
+    with ``source: negative_share`` gets a life-of-loan loss rate computed
+    from the CU's negative-share balance extract and charge-off / recovery
+    history (see ``_resolve_negative_share_oac``). The ``amount`` is refreshed
+    as ``balance * percentage / 100``. Both the Vizo and TCT report builders
+    read these resolved values, so computing them here keeps the number
+    current every quarter without manual entry.
     """
     oac = config.get('other_allowance_considerations') or []
+    for o in oac:
+        if str((o or {}).get('source') or '').strip() == 'negative_share':
+            _resolve_negative_share_oac(o, config, snapshot_date)
+
     dynamic = [o for o in oac
                if str((o or {}).get('source') or '').strip() == 'unfunded_available']
     if not dynamic:
@@ -11147,6 +12055,11 @@ def generate_report(client_name, snapshot_date=None, reports=None):
 
     # Load historical data
     hist = load_historical_data(config)
+
+    # Honor CU-requested charge-off / recovery removals
+    # (config['chargeoff_exclusions']) without editing source files or
+    # re-importing — subtract them from the assembled history in place.
+    _apply_chargeoff_exclusions(hist, config)
 
     # Resolve data-derived Other Allowance Considerations (e.g. unfunded
     # commitments computed from HELOC available credit) so both the Vizo
@@ -11824,6 +12737,13 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         print(f"\n  {len(saved)} report(s) saved to {RPT_DIR}")
     else:
         print(f"\n  No reports were generated.")
+
+    # Persist the resolved Other Allowance Consideration values so the Run
+    # Reports "Other Allowance Considerations" override page can show the
+    # latest calculated rate/balance/amount alongside any manual override.
+    _oac_calc = config.get('_oac_calc')
+    if _oac_calc:
+        _persist_oac_calc(client_name, _oac_calc, snapshot_date)
 
     return saved
 

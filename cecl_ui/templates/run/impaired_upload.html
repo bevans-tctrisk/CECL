@@ -11,6 +11,32 @@
     impaired list for that period's next report run.
   </p>
 
+  {# View the validation for an already-saved impaired file, no upload / #}
+  {# no new-quarter run needed. #}
+  <div style="margin:12px 0 4px; padding:12px 14px; background:#f3f8ff; border:1px solid #b9cbe0; border-radius:6px;">
+    <strong>View an already-saved impaired file</strong>
+    <p class="muted" style="margin:4px 0 8px;">
+      See the grade/pool validation for a period whose impaired file is
+      already in place &mdash; no upload or new-quarter run required.
+    </p>
+    <form method="get"
+          action="{{ url_for('run.upload_impaired_form', short_name=short_name) }}"
+          style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <label for="view_snap" class="muted">Period</label>
+      {% if snapshots %}
+        <select id="view_snap" name="snapshot_date" style="max-width:200px;">
+          {% for s in snapshots %}
+            <option value="{{ s }}"{% if s == default_snap %} selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <input id="view_snap" type="date" name="snapshot_date"
+               value="{{ default_snap }}" style="max-width:200px;">
+      {% endif %}
+      <button class="btn btn-primary" type="submit">View validation</button>
+    </form>
+  </div>
+
   <form method="post"
         enctype="multipart/form-data"
         action="{{ url_for('run.upload_impaired', short_name=short_name) }}">
@@ -149,6 +175,65 @@
         </p>
       {% endif %}
 
+      {# Grade & Pool distribution (resolved from the AIRES extract) ----- #}
+      {% set dist = impaired.distribution %}
+      {% if dist and dist.by_pool %}
+        <div style="margin-bottom:18px;">
+          <h4 style="margin:0 0 4px;">Grade &amp; Pool Distribution
+            <span class="muted" style="font-weight:400; font-size:85%;">
+              &mdash; grade &amp; pool resolved from the AIRES loan data{% if impaired.source %}
+              ({{ impaired.source }}){% endif %}
+            </span>
+          </h4>
+          <p class="muted" style="margin:4px 0 10px; font-size:88%;">
+            Confirm each impaired loan lands in the expected pool and credit
+            grade. Each loan's grade comes from the FICO score and its pool
+            from the loan code in the matched AIRES record. Pools shaded
+            <span style="background:#fff3d6; padding:0 3px;">yellow</span>
+            route to <code>Ignore</code>/<code>Exclude</code>; a non-zero
+            <strong style="color:#b03a2e;">Not in AIRES</strong> count means
+            those loans were not found in the extract and fell back to their
+            entered loan-type code with grade <em>Not Reported</em>.
+          </p>
+          <table class="data-table" style="font-size:90%;">
+            <thead>
+              <tr>
+                <th>Pool</th>
+                {% for g in dist.grades %}<th style="text-align:right;">{{ g }}</th>{% endfor %}
+                <th style="text-align:right;">#&nbsp;Loans</th>
+                <th style="text-align:right;">Not in AIRES</th>
+                <th style="text-align:right;">Current Balance</th>
+                <th style="text-align:right;">Provision</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for p in dist.by_pool %}
+              <tr {% if p.is_ignore %}style="background:#fff3d6;"{% endif %}>
+                <td>{% if p.is_ignore %}<em style="color:#b03a2e;">{{ p.pool }}</em>{% else %}{{ p.pool }}{% endif %}</td>
+                {% for g in dist.grades %}
+                <td style="text-align:right;">{{ p.grades.get(g, 0) or '' }}</td>
+                {% endfor %}
+                <td style="text-align:right;">{{ p.count }}</td>
+                <td style="text-align:right;{% if p.unmatched %} color:#b03a2e; font-weight:600;{% endif %}">{{ p.unmatched or '' }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(p.current_balance) }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(p.provision_amount) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot>
+              <tr style="font-weight:600; border-top:2px solid #999;">
+                <td>Total</td>
+                {% for g in dist.grades %}<td style="text-align:right;">{{ dist.grade_totals.get(g, 0) or '' }}</td>{% endfor %}
+                <td style="text-align:right;">{{ dist.totals.count }}</td>
+                <td style="text-align:right;{% if dist.totals.unmatched %} color:#b03a2e;{% endif %}">{{ dist.totals.unmatched or '' }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(dist.totals.current_balance) }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(dist.totals.provision_amount) }}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      {% endif %}
+
       {# Data rows preview (top 200) ------------------------------------- #}
       {% if impaired.data_rows %}
         <details {% if iv.get('unmapped_codes') %}{% else %}open{% endif %} style="margin-bottom:8px;">
@@ -163,6 +248,7 @@
                 <th>Type</th>
                 <th>Loan Pool</th>
                 <th>Credit Grade</th>
+                <th>In AIRES?</th>
                 <th style="text-align:right;">Current Balance</th>
                 <th style="text-align:right;">Balance (Loan Rpt)</th>
                 <th style="text-align:right;">Diff</th>
@@ -180,6 +266,7 @@
                 <td><code>{{ row.loan_type or '' }}</code></td>
                 <td>{% if _is_ignore %}<em style="color:#b03a2e;">Ignore</em>{% else %}{{ _lp }}{% endif %}</td>
                 <td>{{ row.credit_grade or '' }}</td>
+                <td>{% if _unmatched %}<span style="color:#b03a2e;">No</span>{% else %}<span style="color:#2d662d;">Yes</span>{% endif %}</td>
                 <td style="text-align:right;">
                   {% if row.current_balance is not none %}${{ "{:,.2f}".format(row.current_balance|float) }}{% else %}—{% endif %}
                 </td>

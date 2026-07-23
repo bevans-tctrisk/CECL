@@ -1277,6 +1277,44 @@ def analyse_per_month_file(
     }
 
 
+def _pm_effective_balance_col_idx(rows, start, label_col_idx, balance_col_idx):
+    """Return the 1-based balance column for THIS file's ``rows`` grid.
+
+    Normally the configured ``balance_col_idx``. When a wrapped title/header
+    pushes an extra empty leading column in, the balances shift one column to
+    the right and the configured column is empty for that file; fall back to
+    the densest numeric column at/after the label column so the period still
+    loads. Only overrides when the configured column has NO numeric values,
+    so files that parse today are unaffected.
+    """
+    ncols = max((len(r) for r in rows[start:]), default=0)
+    if ncols <= 0:
+        return balance_col_idx
+
+    def _numeric_count(ci0):
+        if ci0 < 0 or ci0 >= ncols:
+            return 0
+        n = 0
+        for r in range(start, len(rows)):
+            row = rows[r]
+            li = label_col_idx - 1
+            lbl = row[li] if 0 <= li < len(row) else None
+            if not isinstance(lbl, str) or not lbl.strip():
+                continue
+            if ci0 < len(row) and _coerce_number(row[ci0]) is not None:
+                n += 1
+        return n
+
+    if _numeric_count(balance_col_idx - 1) > 0:
+        return balance_col_idx
+    best_ci0, best_n = balance_col_idx - 1, 0
+    for ci0 in range(label_col_idx, ncols):  # 0-based cols after the label
+        n = _numeric_count(ci0)
+        if n > best_n:
+            best_n, best_ci0 = n, ci0
+    return (best_ci0 + 1) if best_n > 0 else balance_col_idx
+
+
 def pool_balances_for_per_month_files(
     monthly_files: list[dict[str, Any]],
     layout: dict[str, Any],
@@ -1343,6 +1381,10 @@ def pool_balances_for_per_month_files(
         # Vizo-hierarchical parent-summary rows so summing is always safe.
         row_agg: dict[str, dict[str, Any]] = {}
         start = max(header_row, 1)
+        # Bulletproof against a wrapped title shifting balances one column
+        # right (leaving the configured column empty for this file only).
+        eff_balance_col_idx = _pm_effective_balance_col_idx(
+            rows, start, label_col_idx, balance_col_idx)
         # When the user supplied a manual stop_row we cap the scan there;
         # otherwise we scan the whole grid and rely on substring totals
         # detection to bail out.
@@ -1373,8 +1415,8 @@ def pool_balances_for_per_month_files(
                 # Stop at the first totals/end marker.
                 break
             key = label.lower()
-            bal = (_coerce_number(row[balance_col_idx - 1])
-                   if balance_col_idx - 1 < len(row) else None)
+            bal = (_coerce_number(row[eff_balance_col_idx - 1])
+                   if eff_balance_col_idx - 1 < len(row) else None)
             is_excluded = key in excl
             mapped = "" if is_excluded else ltp.get(key, "")
 

@@ -87,6 +87,7 @@ def verify_for_run(cfg: dict[str, Any], snapshot_iso: str,
             "counts": {},
             "pool_choices": [],
         },
+        "distribution": {},
     }
 
     if not snapshot_iso:
@@ -137,7 +138,7 @@ def verify_for_run(cfg: dict[str, Any], snapshot_iso: str,
     try:
         from cecl_ui.services import balance_check
         state = balance_check._build_state_for_run(  # noqa: SLF001
-            cfg, short_name, snapshot_iso)
+            cfg, short_name, snapshot_iso, include_source_folder=True)
     except Exception as exc:  # noqa: BLE001
         result["error"] = f"Could not build extract state: {exc}"
         return result
@@ -235,5 +236,101 @@ def verify_for_run(cfg: dict[str, Any], snapshot_iso: str,
         "pool_choices": pool_choices,
     }
 
+    # 7) Grade × pool distribution — lets the user verify that every
+    # impaired loan lands in the expected pool and credit grade as
+    # resolved from the AIRES loan extract (grade is derived from the
+    # extract's FICO score; pool from the extract's loan-code map). Rows
+    # that never matched the extract fall back to grade "Not Reported"
+    # and their entered loan-type code, and are counted under
+    # ``unmatched`` so they surface for review.
+    result["distribution"] = _build_distribution(cfg, data_rows)
+
     result["ok"] = True
     return result
+
+
+def _build_distribution(cfg: dict[str, Any],
+                        data_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate impaired rows into a pool × grade matrix for the review UI.
+
+    Returns ``{"grades": [...], "grade_totals": {...}, "by_pool": [...],
+    "totals": {...}}`` where ``by_pool`` is ordered by the CU's configured
+    ``pool_order`` and grade columns follow the configured ``credit_grades``
+    order (with any fallback grade such as "Not Reported" appended).
+    """
+    def _num(v: Any) -> float:
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    # Configured grade order (+ the no-score fallback label).
+    grade_order: list[str] = []
+    for g in (cfg.get("credit_grades") or []):
+        lbl = str((g.get("label") if isinstance(g, dict) else g) or "").strip()
+        if lbl and lbl not in grade_order:
+            grade_order.append(lbl)
+    no_score = str(cfg.get("no_score_label") or "Not Reported").strip()
+    if no_score and no_score not in grade_order:
+        grade_order.append(no_score)
+
+    # Configured pool order (fall back to the pools registry).
+    pool_order: list[str] = []
+    for p in (cfg.get("pool_order") or []):
+        s = str(p or "").strip()
+        if s and s not in pool_order:
+            pool_order.append(s)
+    if not pool_order:
+        for p in (cfg.get("pools") or []):
+            n = str((p.get("name") if isinstance(p, dict) else p) or "").strip()
+            if n and n not in pool_order:
+                pool_order.append(n)
+
+    pools_acc: dict[str, dict[str, Any]] = {}
+    grades_present: list[str] = []
+    grade_totals: dict[str, int] = {}
+    tot = {"count": 0, "matched": 0, "unmatched": 0,
+           "current_balance": 0.0, "provision_amount": 0.0}
+
+    for r in data_rows:
+        pool = str(r.get("loan_pool") or "").strip() or "Ignore"
+        grade = str(r.get("credit_grade") or "").strip() or no_score
+        is_matched = not r.get("unmatched_in_loan_data")
+        cb = _num(r.get("current_balance"))
+        prov = _num(r.get("provision_amount"))
+        p = pools_acc.setdefault(pool, {
+            "pool": pool, "count": 0, "matched": 0, "unmatched": 0,
+            "current_balance": 0.0, "provision_amount": 0.0, "grades": {},
+            "is_ignore": pool.strip().lower() in ("ignore", "exclude"),
+        })
+        p["count"] += 1
+        p["matched"] += 1 if is_matched else 0
+        p["unmatched"] += 0 if is_matched else 1
+        p["current_balance"] += cb
+        p["provision_amount"] += prov
+        p["grades"][grade] = p["grades"].get(grade, 0) + 1
+        if grade not in grades_present:
+            grades_present.append(grade)
+        grade_totals[grade] = grade_totals.get(grade, 0) + 1
+        tot["count"] += 1
+        tot["matched"] += 1 if is_matched else 0
+        tot["unmatched"] += 0 if is_matched else 1
+        tot["current_balance"] += cb
+        tot["provision_amount"] += prov
+
+    ordered_grades = [g for g in grade_order if g in grades_present]
+    for g in grades_present:
+        if g not in ordered_grades:
+            ordered_grades.append(g)
+
+    ordered_pools = [p for p in pool_order if p in pools_acc]
+    for p in pools_acc:
+        if p not in ordered_pools:
+            ordered_pools.append(p)
+
+    return {
+        "grades": ordered_grades,
+        "grade_totals": grade_totals,
+        "by_pool": [pools_acc[p] for p in ordered_pools],
+        "totals": tot,
+    }

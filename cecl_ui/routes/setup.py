@@ -192,6 +192,15 @@ def _default_state() -> dict[str, Any]:
         # downstream step. Persisted so the user can re-scan after
         # adding more files to the folder.
         "raw_data_folder": "",
+        # Multiple raw-data folder paths (WARM history, client uploads,
+        # credit pulls, ...). The wizard classifies + merges them and
+        # decides how to set the CU up. ``raw_data_folder`` mirrors the
+        # first path for single-folder self-heal reuse.
+        "raw_data_folders": [],
+        # Optional per-folder type hints, parallel to ``raw_data_folders``
+        # ("" = auto-detect). Informational only — the classifier still
+        # decides file types by content/name.
+        "raw_data_folder_types": [],
         # Report period (YYYY-MM) the user is configuring this CU to
         # run reports for. Acts as the global "as-of" anchor: any
         # source file / column whose period is AFTER this is ignored
@@ -481,6 +490,33 @@ def _default_state() -> dict[str, Any]:
         # The product (balance * percentage) is computed at render/save time.
         "include_other_allowance": False,
         "other_allowance_considerations": [],
+        # Data-derived "Negative Share Provision" overlay (Step 8). When
+        # enabled, the report engine computes a life-of-loan loss rate for the
+        # CU's negative shares (trailing N months of net charge-offs / current
+        # negative-share balance) and applies it as an Other Allowance
+        # Consideration. Reusable across CUs — only the file patterns/folder
+        # differ. See generate_report._resolve_negative_share_oac.
+        "include_negative_share": False,
+        "negative_share": {
+            "title": "Negative Share Provision",
+            "life_of_loan_months": 12,
+            "source_folder": "",
+            "balance_column": "Current Balance",
+            "balance_pattern": r"(?i)Negative Share File",
+            "co_summary_pattern": r"(?i)Negative Shares Charge Off and Recovery",
+            "co_quarterly_pattern": r"(?i)Share COs?\s*-\s*Recoveries",
+        },
+        # Data-derived "Unfunded Commitments" overlay (Step 8). When enabled,
+        # the report engine sums undrawn credit (credit limit - current
+        # balance) for the loan type codes the CU flagged as NOT
+        # unconditionally cancelable, grouped by pool, and applies each pool's
+        # ACL loss rate. One "Unfunded Commitments - <Pool>" row per pool.
+        # See generate_report._expand_unfunded_commitment_oac.
+        "include_unfunded_commitment": False,
+        "unfunded_commitment": {
+            "title": "Unfunded Commitments",
+            "loan_type_codes": [],
+        },
         # Sample files step uploads and optional flags
         "sample_uploads": {
             "loan_balance_files": [],
@@ -692,7 +728,7 @@ def _wizard_ctx(active: str) -> dict[str, Any]:
                 flash(f"Recovered from adopted config: {_m}", "success")
     except Exception:  # noqa: BLE001
         pass
-    if st.get("_auto_scan_completed"):
+    if st.get("_auto_scan_completed") or (st.get("autoderive") or {}).get("ok"):
         try:
             from cecl_ui.services import auto_setup
             # Proactive self-heal: stale drafts saved before the
@@ -990,86 +1026,17 @@ def root():
 
 @setup_bp.route("/start", methods=["GET", "POST"])
 def start_warm_choice():
-    """Sub-choice after picking the CECL-Migration model.
+    """Entry point for the CECL-Migration model.
 
-    The user can either upload a WARM workbook (which pre-fills Step 1
-    Identity from ``BS CO DQ Data Enter`` cells M1-M3 / L7-Q7) or start
-    from scratch and type identity by hand.
+    The old binary "upload a WARM workbook vs. start from scratch" gate has
+    been replaced by a single Identity step that lets the user add one or
+    more raw-data folder paths (WARM history, client uploads, credit pulls,
+    ...) and let the wizard classify them and decide how to set the CU up —
+    including whether a WARM workbook is available for the WARM -> CM
+    comparison. This endpoint is kept so existing links resolve; it simply
+    forwards to the Identity step.
     """
-    state = _state()
-    if request.method == "POST":
-        action = request.form.get("action", "")
-
-        if action == "scratch":
-            state["has_warm_files"] = "no"
-            _save_state(state)
-            return redirect(url_for("setup.step1_identity"))
-
-        if action == "warm":
-            f = request.files.get("warm_file")
-            if not f or not f.filename:
-                flash("Pick a WARM workbook first, or choose 'Start from scratch'.",
-                      "error")
-                return render_template("setup/start_warm_choice.html",
-                                       **_wizard_ctx("identity"))
-            try:
-                saved = _save_warm_upload(f)
-                analysis = warm_parser.analyse_warm_file(
-                    saved, original_filename=f.filename
-                )
-                if not analysis.get("ok"):
-                    flash(f"Could not parse WARM file: {analysis.get('error')}",
-                          "error")
-                    return render_template("setup/start_warm_choice.html",
-                                           **_wizard_ctx("identity"))
-                analysis["saved_path"] = str(saved)
-                state["has_warm_files"] = "yes"
-                _apply_warm_to_state(state, analysis)
-
-                # Auto-import the historical baseline so the user doesn't
-                # have to click a button on Step 2.
-                bid = analysis.get("baseline_identity") or {}
-                cu_name = (state.get("credit_union")
-                           or bid.get("cu_name")
-                           or analysis.get("cu_name") or "")
-                as_of = analysis.get("as_of_date") or bid.get("period_end_date") or ""
-                if cu_name and as_of:
-                    try:
-                        result = pipeline_service.import_warm_as_baseline(
-                            cu_name=cu_name,
-                            warm_source_path=str(saved),
-                            as_of_date=as_of,
-                            overwrite=False,
-                        )
-                        if result.get("ok"):
-                            analysis["baseline_imported_to"] = result["dest_path"]
-                            analysis["baseline_filename"] = result["filename"]
-                            analysis["baseline_already_existed"] = bool(
-                                result.get("skipped")
-                            )
-                    except Exception:  # noqa: BLE001
-                        # Non-fatal — user can still trigger it from Step 2.
-                        pass
-
-                _save_state(state)
-                bid = analysis.get("baseline_identity") or {}
-                msg = (
-                    f"Parsed {f.filename!s}: {len(analysis['pools'])} pools, "
-                    f"{len(analysis['grades'])} grades."
-                )
-                if bid.get("cu_name"):
-                    msg += f" Identity for '{bid['cu_name']}' pre-filled below."
-                if analysis.get("baseline_filename"):
-                    msg += " Historical baseline imported."
-                flash(msg, "success")
-                return redirect(url_for("setup.step1_identity"))
-            except Exception as exc:  # noqa: BLE001
-                flash(f"Upload failed: {exc}", "error")
-                return render_template("setup/start_warm_choice.html",
-                                       **_wizard_ctx("identity"))
-
-    return render_template("setup/start_warm_choice.html",
-                           **_wizard_ctx("identity"))
+    return redirect(url_for("setup.step1_identity"))
 
 
 @setup_bp.route("/step/identity", methods=["GET", "POST"])
@@ -1121,10 +1088,42 @@ def step1_identity():
             # wizard (Files step), not on this Identity step.
             state["economic_data"]["state"] = request.form.get("state", "").strip()
             state["economic_data"]["county"] = request.form.get("county", "").strip()
-            # Raw-data folder for auto-scan (Step 1 paste field).
-            state["raw_data_folder"] = (
+            # Raw-data folders for auto-scan (Step 1 paste fields). The user
+            # can add multiple paths (e.g. a WARM-history folder, a client
+            # data-upload folder, a credit-pull folder), optionally tag each
+            # with a type hint, and let the wizard decide how to set the CU
+            # up. Accept both the new multi-value ``raw_data_folders`` field
+            # and the legacy single ``raw_data_folder`` field.
+            _raw_paths = request.form.getlist("raw_data_folders")
+            _raw_types = request.form.getlist("raw_data_folder_types")
+            _pairs: list[tuple[str, str]] = []
+            for _i, _p in enumerate(_raw_paths):
+                _pn = _normalize_folder_path(_p)
+                if not _pn:
+                    continue
+                _lbl = (_raw_types[_i] if _i < len(_raw_types) else "").strip()
+                _pairs.append((_pn, _lbl))
+            _single = _normalize_folder_path(
                 request.form.get("raw_data_folder", "") or ""
-            ).strip()
+            )
+            if _single:
+                _pairs.append((_single, ""))
+            # De-dupe by path (case-insensitive), keeping the first label,
+            # preserving order.
+            _seen: set[str] = set()
+            _folders: list[str] = []
+            _ftypes: list[str] = []
+            for _p, _l in _pairs:
+                if _p.lower() in _seen:
+                    continue
+                _seen.add(_p.lower())
+                _folders.append(_p)
+                _ftypes.append(_l)
+            state["raw_data_folders"] = _folders
+            state["raw_data_folder_types"] = _ftypes
+            # Keep the legacy single-folder key populated (first path) so
+            # single-folder self-heal reuse keeps working.
+            state["raw_data_folder"] = _folders[0] if _folders else ""
             _save_state(state)
 
             # --- Auto-scan branch ---------------------------------------
@@ -1135,18 +1134,19 @@ def step1_identity():
             # fields are persisted before the scan runs.
             action = (request.form.get("action") or "").strip().lower()
             if action == "scan_folder":
-                folder = state.get("raw_data_folder") or ""
-                if not folder:
+                folders = state.get("raw_data_folders") or []
+                if not folders:
                     flash(
-                        "Paste a raw-data folder path before clicking "
-                        "Scan & auto-fill.",
+                        "Add at least one raw-data folder path before clicking "
+                        "Scan & auto-configure.",
                         "error",
                     )
                 else:
                     from cecl_ui.services import auto_setup
                     snapshot = state.get("report_period") or None
-                    findings = auto_setup.scan_folder_for_setup(
-                        folder, snapshot_yyyymm=snapshot
+                    findings = auto_setup.scan_folders_for_setup(
+                        folders, snapshot_yyyymm=snapshot,
+                        folder_labels=state.get("raw_data_folder_types") or [],
                     )
                     if not findings.get("ok"):
                         flash(
@@ -1158,29 +1158,77 @@ def step1_identity():
                             state, findings,
                             current_app.config["WORKSPACE_ROOT"],
                         )
+                        # Record every folder scanned for the report panel.
+                        state["_auto_scan_folders"] = list(
+                            findings.get("folders") or folders
+                        )
+                        # When the scan detected a WARM workbook, import its
+                        # establishing-quarter balances as the historical
+                        # baseline (best-effort) so the WARM -> CM comparison
+                        # / balance-adjustment validation has data to compare
+                        # against. Mirrors the manual WARM-upload path.
+                        if state.get("has_warm_files") == "yes":
+                            _warm = state.get("warm") or {}
+                            _wsrc = _warm.get("saved_path") or _warm.get("source_path")
+                            _cu = state.get("credit_union") or _warm.get("cu_name")
+                            _as_of = _warm.get("as_of_date")
+                            if _wsrc and _cu and _as_of:
+                                try:
+                                    _res = pipeline_service.import_warm_as_baseline(
+                                        cu_name=_cu,
+                                        warm_source_path=str(_wsrc),
+                                        as_of_date=_as_of,
+                                        overwrite=False,
+                                    )
+                                    if _res.get("ok"):
+                                        report.setdefault("warm", []).append(
+                                            "Historical WARM baseline imported "
+                                            f"for {_as_of} — WARM comparison ready."
+                                        )
+                                except Exception as _exc:  # noqa: BLE001
+                                    report.setdefault("warm", []).append(
+                                        f"WARM baseline import skipped ({_exc})."
+                                    )
                         # Persist the populated state immediately so a
                         # crash mid-step doesn't lose the scan results.
                         _save_state(state)
                         # Friendly summary flash.
                         n_steps = len(report)
                         n_msgs = sum(len(v) for v in report.values())
+                        warm_note = (
+                            " WARM workbook detected — WARM comparison path active."
+                            if state.get("has_warm_files") == "yes"
+                            else " No WARM workbook found — building reports from raw data."
+                        )
                         flash(
-                            f"Auto-scan complete: filled {n_msgs} item(s) "
-                            f"across {n_steps} step(s). Errors: "
-                            f"{len(findings.get('errors') or [])}.",
+                            f"Auto-scan complete across {len(folders)} folder(s): "
+                            f"filled {n_msgs} item(s) across {n_steps} step(s). "
+                            f"Errors: {len(findings.get('errors') or [])}.{warm_note}",
                             "success" if n_msgs else "info",
                         )
-                        # Route to first HIL step.
+                        # Route to the first REQUIRED step only. Recommended
+                        # review checkpoints (pools, grades, mgmt-adj, ...) are
+                        # surfaced as stepper badges but do NOT halt the flow,
+                        # so a good auto-scan drives all the way through to
+                        # Review. The wizard still stops on a genuinely
+                        # blocking gap that couldn't be auto-derived (e.g. a
+                        # missing monthly-balance source or file pattern).
                         if state.get("model") == "scale":
                             steps = WIZARD_STEPS_SCALE
                         elif state.get("has_warm_files") == "yes":
                             steps = WIZARD_STEPS_WARM
                         else:
                             steps = WIZARD_STEPS_NO_WARM
-                        next_key = auto_setup.first_hil_step_key(state, steps)
-                        if next_key and next_key in STEP_ENDPOINTS:
+                        next_key = auto_setup.first_hil_step_key(
+                            state, steps, severity="required"
+                        )
+                        # "review" is always a required step (final Save); when
+                        # it's the first one left, everything upstream is
+                        # satisfied — route straight to Review.
+                        if next_key and next_key != "review" \
+                                and next_key in STEP_ENDPOINTS:
                             return redirect(url_for(STEP_ENDPOINTS[next_key]))
-                        # Nothing flagged HIL -> jump to review. SCALE
+                        # Nothing blocking upstream -> jump to review. SCALE
                         # drafts finalize via scale_setup.step_review;
                         # only Migration drafts hit step10_review.
                         if state.get("model") == "scale":
@@ -1377,6 +1425,94 @@ def _apply_warm_to_state(state: dict[str, Any], analysis: dict[str, Any]) -> Non
     state["warm"] = analysis
 
 
+def _merge_autoderive_into_state(state: dict[str, Any], cfg: dict[str, Any]) -> list[str]:
+    """Overlay the validated resolver-path (``warm_autoderive``) derivations
+    onto wizard state.
+
+    Fields the wizard already emits (column mappings, member/account key,
+    loan-code map, credit grades, credit-pull SSN join) are written only when
+    still at their factory defaults so a user's edits always win. The WARM
+    reserve pinning + monthly book are stashed under ``state['warm_reserve']``
+    for ``config_service.build_yaml_from_wizard`` to emit. Returns a list of
+    human-readable field names that were populated (for the flash summary).
+    """
+    defaults = _default_state()
+    filled: list[str] = []
+
+    # Column mappings — traced from the WARM Data-tab formulas. This is what
+    # lets WARM CUs skip the manual Column Mappings step.
+    cm = {k: v for k, v in (cfg.get("column_mappings") or {}).items() if v}
+    if cm and state.get("column_mappings") == defaults["column_mappings"]:
+        merged = dict(state["column_mappings"])
+        merged.update(cm)
+        state["column_mappings"] = merged
+        filled.append(f"{len(cm)} column mapping(s)")
+
+    # Member / account key (mode + suffix).
+    ma = cfg.get("member_account") or {}
+    if ma.get("mode") and state.get("member_account") == defaults["member_account"]:
+        state["member_account"] = {
+            k: ma[k] for k in ("mode", "suffix_length", "delimiter") if k in ma
+        }
+        if ma.get("suffix_length") is not None:
+            try:
+                state["account_suffix_length"] = int(ma["suffix_length"])
+            except (TypeError, ValueError):
+                pass
+        filled.append(f"member/account = {ma.get('mode')}")
+
+    # Loan-code -> pool map (keep-first: ignores legacy/duplicate code blocks
+    # like Maple's CUDL rows that the old parser mis-mapped).
+    pm = cfg.get("pool_map") or {}
+    prev = state.get("_warm_seeded_pool_map") or {}
+    if pm and (not state.get("pool_map")
+               or state.get("pool_map") == defaults["pool_map"]
+               or state.get("pool_map") == prev):
+        state["pool_map"] = dict(pm)
+        state["_warm_seeded_pool_map"] = dict(pm)
+        filled.append(f"{len(pm)} loan code(s)")
+
+    # Credit grades.
+    cg = cfg.get("credit_grades") or []
+    if cg and state.get("credit_grades") == defaults["credit_grades"]:
+        state["credit_grades"] = [dict(g) for g in cg]
+
+    # Credit-pull block: WARM fallback (report-time score/ACL/CO/DQ load) +
+    # SSN join key. Overlaid onto state only when the user hasn't already
+    # pointed the fallback at a folder of their own.
+    cp = cfg.get("credit_pull") or {}
+    if cp:
+        scp = dict(state.get("credit_pull") or {})
+        if not scp.get("fallback_report_folder"):
+            for k in ("fallback_report_folder", "fallback_report_pattern",
+                      "fallback_sheet_pattern", "fallback_member_col",
+                      "fallback_score_col", "member_column", "score_column",
+                      "pull_as_of_date", "use_standalone_file"):
+                if cp.get(k) is not None:
+                    scp[k] = cp[k]
+            if cp.get("fallback_report_folder"):
+                filled.append("credit-pull fallback")
+        if cp.get("loan_join_column"):
+            scp["loan_join_column"] = cp["loan_join_column"]
+            if cp.get("member_column"):
+                scp["member_column"] = cp["member_column"]
+            filled.append(f"SSN pull-join &rarr; {cp['loan_join_column']}")
+        state["credit_pull"] = scp
+
+    # Reserve pinning + monthly book — emitted by build_yaml_from_wizard.
+    state["warm_reserve"] = {
+        "base_loss_rate_by_pool_grade": cfg.get("base_loss_rate_by_pool_grade"),
+        "warm_allowance_pools": cfg.get("warm_allowance_pools"),
+        "not_risk_rated": cfg.get("not_risk_rated"),
+        "monthly_balance": cfg.get("monthly_balance"),
+    }
+    if cfg.get("base_loss_rate_by_pool_grade"):
+        filled.append(
+            f"reserve pins for {len(cfg['base_loss_rate_by_pool_grade'])} pool(s)")
+
+    return filled
+
+
 def _refresh_stale_warm_analysis(state: dict[str, Any]) -> bool:
     """Passive re-parse of the cached WARM workbook.
 
@@ -1456,6 +1592,42 @@ def step2_warm():
                         # promote it to the historical baseline (Reports/).
                         analysis["saved_path"] = str(saved)
                         _apply_warm_to_state(state, analysis)
+                        # Validated resolver-path auto-derive on the same WARM:
+                        # column mappings (Data-tab formula trace), reserve col-G
+                        # pins, SSN credit-pull join, keep-first loan-code map,
+                        # WARM pool order. Surfaced as a tiered review + merged
+                        # into state so the generated config ties to the WARM.
+                        ad_filled: list[str] = []
+                        try:
+                            from cecl_ui.services.setup import warm_autoderive
+                            _ad = warm_autoderive.derive(
+                                str(saved),
+                                short_name=state.get("short_name") or "",
+                                snapshot_date=state.get("report_period") or None,
+                            )
+                            state["autoderive"] = {
+                                "ok": bool(_ad.get("ok")),
+                                "overall_tier": _ad.get("overall_tier"),
+                                "decisions": _ad.get("decisions") or [],
+                                "error": _ad.get("error"),
+                            }
+                            if _ad.get("ok"):
+                                ad_filled = _merge_autoderive_into_state(
+                                    state, _ad["config"])
+                                # Steps the WARM auto-derive fully covers ->
+                                # rendered green (review-only) so the user flows
+                                # to the interactive steps (loan extract, monthly
+                                # balance/ACL, historical baseline, credit-pull
+                                # options, balance-adjustment tie, impaired).
+                                state["_warm_autoderived_steps"] = [
+                                    "pools", "balances", "grades", "columns",
+                                    "economic", "mgmt_adj", "files", "dq_hist",
+                                    "co_recov", "orig_score", "credit_pull",
+                                ]
+                        except Exception as _ad_exc:  # noqa: BLE001
+                            state["autoderive"] = {
+                                "ok": False, "overall_tier": "red",
+                                "decisions": [], "error": str(_ad_exc)}
                         _save_state(state)
                         flash(
                             f"Parsed {f.filename!s}: {len(analysis['pools'])} pools, "
@@ -1464,6 +1636,12 @@ def step2_warm():
                             f"({analysis['history_start']} to {analysis['history_end']}).",
                             "success",
                         )
+                        if ad_filled:
+                            flash(
+                                "Auto-derived from WARM: " + ", ".join(ad_filled)
+                                + ". Review below.",
+                                "success",
+                            )
                 except Exception as exc:  # noqa: BLE001
                     flash(f"Upload failed: {exc}", "error")
             # fall through to re-render with the analysis visible
@@ -13442,6 +13620,64 @@ def step8_mgmt_adj():
                     "percentage": pct,
                 })
         state["other_allowance_considerations"] = oac
+
+        # Negative Share Provision (data-derived Other Allowance
+        # Consideration). Reusable across CUs: the engine recomputes a
+        # life-of-loan loss rate each quarter from the negative-share balance
+        # extract and charge-off / recovery history, so we only persist the
+        # file patterns / folder here.
+        ns_on = request.form.get("include_negative_share") == "on"
+        state["include_negative_share"] = ns_on
+        if ns_on:
+            ns = dict(state.get("negative_share") or {})
+            ns["title"] = (
+                (request.form.get("ns_title") or "").strip()
+                or "Negative Share Provision"
+            )
+            try:
+                ns["life_of_loan_months"] = int(
+                    request.form.get("ns_life_months", "12") or "12"
+                )
+            except ValueError:
+                ns["life_of_loan_months"] = 12
+            ns["source_folder"] = (request.form.get("ns_source_folder") or "").strip()
+            ns["balance_column"] = (
+                (request.form.get("ns_balance_column") or "").strip()
+                or "Current Balance"
+            )
+            ns["balance_pattern"] = (
+                (request.form.get("ns_balance_pattern") or "").strip()
+                or r"(?i)Negative Share File"
+            )
+            ns["co_summary_pattern"] = (
+                (request.form.get("ns_co_summary_pattern") or "").strip()
+                or r"(?i)Negative Shares Charge Off and Recovery"
+            )
+            ns["co_quarterly_pattern"] = (
+                (request.form.get("ns_co_quarterly_pattern") or "").strip()
+                or r"(?i)Share COs?\s*-\s*Recoveries"
+            )
+            state["negative_share"] = ns
+
+        # Unfunded Commitments (data-derived Other Allowance Consideration).
+        # The user supplies the loan type codes flagged as NOT unconditionally
+        # cancelable; balances and rates are resolved at report time per pool.
+        uc_on = request.form.get("include_unfunded_commitment") == "on"
+        state["include_unfunded_commitment"] = uc_on
+        if uc_on:
+            uc = dict(state.get("unfunded_commitment") or {})
+            uc["title"] = (
+                (request.form.get("uc_title") or "").strip()
+                or "Unfunded Commitments"
+            )
+            raw_codes = request.form.get("uc_loan_type_codes") or ""
+            codes = [c.strip() for c in re.split(r"[\s,;]+", raw_codes) if c.strip()]
+            # De-dupe preserving order.
+            seen_c: set[str] = set()
+            uc["loan_type_codes"] = [
+                c for c in codes if not (c in seen_c or seen_c.add(c))
+            ]
+            state["unfunded_commitment"] = uc
 
         _save_state(state)
 

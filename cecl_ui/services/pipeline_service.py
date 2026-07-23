@@ -193,8 +193,13 @@ def reimport_period(client_short_name: str, period: str) -> dict[str, Any]:
             rel = os.path.relpath(full, source)
             if pats and not import_data._patterns_match_any(pats, fn, rel):
                 continue
+            # Honor date_source='path': some cores deliver a loan file whose
+            # name carries no date (e.g. Symitar 'AIRESLOANS.xlsx') but the
+            # dated folder does. Resolve the snapshot from the relative path
+            # in that case, mirroring import_data.import_from_folder.
+            date_src = rel if str(config.get("date_source", "filename")).lower() == "path" else fn
             try:
-                snap = import_data.extract_snapshot_date(fn, config)
+                snap = import_data.extract_snapshot_date(date_src, config)
             except Exception:  # noqa: BLE001
                 snap = None
             if snap == target:
@@ -208,8 +213,17 @@ def reimport_period(client_short_name: str, period: str) -> dict[str, Any]:
 
     tmp = tempfile.mkdtemp(prefix=f"cecl_reimport_{client_short_name}_")
     try:
+        # When the snapshot comes from the folder path (date_source='path'),
+        # preserve the dated subfolder so the import step can resolve the date
+        # too; otherwise stage flat (filename carries the date).
+        stage_by_path = str(config.get("date_source", "filename")).lower() == "path"
         for src in matches:
-            shutil.copy2(src, os.path.join(tmp, os.path.basename(src)))
+            if stage_by_path:
+                dst = os.path.join(tmp, os.path.relpath(src, source))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+            else:
+                dst = os.path.join(tmp, os.path.basename(src))
+            shutil.copy2(src, dst)
         files_processed = import_data.process_client(
             client_short_name, scan_folder_override=tmp)
     finally:
@@ -257,6 +271,89 @@ def run_reports(
             reports=reports,
         )
     return [str(p) for p in (out or [])], buf.getvalue()
+
+
+def _hybrid_flag(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``hybrid_router`` config block (empty when unset)."""
+    block = cfg.get("hybrid_router")
+    return block if isinstance(block, dict) else {}
+
+
+def run_reports_hybrid(
+    client_short_name: str,
+    snapshot_date: str | None = None,
+    reports: list[str] | None = None,
+) -> tuple[list[str], str, list[str]]:
+    """Run reports through the hybrid validation router, then the engine.
+
+    Behaves exactly like :func:`run_reports` but first passes each selected
+    report type through the local-first / AI-fallback schema router
+    (``cecl_ui.services.hybrid``). The router is **opt-in per CU** via the
+    client YAML::
+
+        hybrid_router:
+          enabled: true          # default: false (Option A — off)
+          proactive: true        # escalate when a CU has no schema yet
+          model: claude-opus-4.8
+
+    Returns ``(output_paths, captured_stdout, hybrid_notes)``. When the flag is
+    off — or any router dependency is missing — it is a transparent pass-through
+    to :func:`run_reports` and ``hybrid_notes`` is empty, so existing behavior
+    is unchanged.
+    """
+    notes: list[str] = []
+    try:
+        cfg = importlib.import_module("yaml").safe_load(
+            (_client_configs_dir()
+             / f"{client_short_name}.yaml").read_text(encoding="utf-8")
+        ) or {}
+    except Exception as exc:  # noqa: BLE001 - never block on config read
+        cfg = {}
+        notes.append(f"hybrid: config unreadable ({exc}); router skipped")
+
+    flag = _hybrid_flag(cfg)
+    if not flag.get("enabled", False):
+        paths, log = run_reports(client_short_name, snapshot_date, reports)
+        return paths, log, notes
+
+    # Feature is on — run the router (best-effort, never blocks the report).
+    try:
+        from cecl_ui.services import hybrid
+
+        if not hybrid.is_available():
+            notes.append(
+                "hybrid enabled but Pydantic is not installed "
+                "(pip install pydantic); proceeding without validation."
+            )
+        else:
+            cred = importlib.import_module("cecl_credentials")
+            api_key = None
+            try:
+                api_key = cred.get_anthropic_api_key()
+            except Exception:  # noqa: BLE001
+                api_key = None
+            from sqlalchemy import create_engine
+            engine = create_engine(cred.get_database_url())
+            router = hybrid.HybridReportRouter(
+                engine,
+                api_key=api_key,
+                model=flag.get("model"),
+                proactive=bool(flag.get("proactive", True)),
+            )
+            selected = reports or [
+                r for r, on in (cfg.get("reports") or {}).items() if on
+            ]
+            for rt in selected:
+                try:
+                    decision = router.resolve(cfg, rt)
+                    notes.append(decision.summary())
+                except Exception as exc:  # noqa: BLE001 - per-type isolation
+                    notes.append(f"{rt}: hybrid error ({exc}); proceeding")
+    except Exception as exc:  # noqa: BLE001 - router import/setup failure
+        notes.append(f"hybrid router unavailable ({exc}); proceeding")
+
+    paths, log = run_reports(client_short_name, snapshot_date, reports)
+    return paths, log, notes
 
 
 def run_impdet_report(client_short_name: str, snapshot_date: str | None = None) -> str | None:
@@ -640,7 +737,7 @@ def import_warm_as_baseline(
     import shutil
     from pathlib import Path as _Path
 
-    workspace_root = _Path(__file__).resolve().parents[2]
+    workspace_root = _workspace_root()
     reports_dir = workspace_root / "Reports" / "_warm_baselines"
     reports_dir.mkdir(parents=True, exist_ok=True)
 

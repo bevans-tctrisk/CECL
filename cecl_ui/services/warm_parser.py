@@ -650,26 +650,69 @@ def _bs_loan_type_to_pool_map(ws) -> dict[str, str]:
 
 def _loan_code_to_pool_map_from_grades(ws) -> dict[str, str]:
     """From ``Grade Ranges & Loan Codes``, build a mapping of *raw loan
-    code* (col S = index 18) to *pool name* (col T = index 19).
+    code* to *pool name*.
 
-    Scans rows 2..200 (header is row 1). Stops counting after a stretch
-    of blank rows. Codes are normalised to a stripped string; integer-valued
-    codes are emitted without a trailing ``.0``.
+    The code/pool columns move between WARM templates: older layouts put
+    them at cols S/T (index 18/19), newer ones (e.g. Cottonwood) at cols
+    U/V (index 20/21) with an adjacent ``pinetree`` map further right. To
+    survive both, the columns are located by header text — a cell reading
+    ``Loan Pool`` / ``Loan Pools`` / ``Pool`` marks the pool column, and the
+    code column is the labelled ``Collateral Code`` / ``Loan Type`` column
+    (else the column immediately to its left). Falls back to the historical
+    fixed S/T layout when no headers are recognised.
+
+    Codes are normalised to a stripped string; integer-valued codes are
+    emitted without a trailing ``.0``. Header/total rows are skipped.
     """
+    pool_hdrs = {"loan pool", "loan pools", "pool", "pool name"}
+    code_hdrs = {
+        "collateral code", "loan type", "loan types", "loan code",
+        "loan codes", "code", "codes",
+    }
+    pool_col: int | None = None
+    code_col: int | None = None
+    header_row: int | None = None
+
+    for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=8,
+                                             values_only=True), start=1):
+        row_pool = row_code = None
+        for c_idx, val in enumerate(row or ()):
+            if not isinstance(val, str):
+                continue
+            v = val.strip().lower()
+            if row_pool is None and v in pool_hdrs:
+                row_pool = c_idx
+            if row_code is None and v in code_hdrs:
+                row_code = c_idx
+        if row_pool is not None:
+            pool_col = row_pool
+            header_row = r_idx
+            # Prefer a labelled code column to the LEFT of the pool column;
+            # otherwise assume the code sits immediately left of the pool.
+            code_col = row_code if (row_code is not None
+                                    and row_code < row_pool) else row_pool - 1
+            break
+
+    if pool_col is None or code_col is None or code_col < 0:
+        # Legacy fixed layout: col S (18) = code, col T (19) = pool.
+        code_col, pool_col, header_row = 18, 19, 1
+
     mapping: dict[str, str] = {}
     blanks = 0
-    for row in ws.iter_rows(min_row=2, max_row=200, values_only=True):
-        # row may be shorter than 20 cells on early rows
-        if row is None or len(row) < 20:
+    need = max(code_col, pool_col)
+    start_row = (header_row or 1) + 1
+    for row in ws.iter_rows(min_row=start_row, max_row=start_row + 400,
+                            values_only=True):
+        if row is None or len(row) <= need:
             blanks += 1
-            if blanks >= 10:
+            if blanks >= 12:
                 break
             continue
-        code_v = row[18]
-        pool_v = row[19]
+        code_v = row[code_col]
+        pool_v = row[pool_col]
         if code_v in (None, "") and pool_v in (None, ""):
             blanks += 1
-            if blanks >= 10:
+            if blanks >= 12:
                 break
             continue
         blanks = 0
@@ -687,7 +730,9 @@ def _loan_code_to_pool_map_from_grades(ws) -> dict[str, str]:
         # Skip header rows like ("Collateral Code", "Loan Pool").
         if pool_s.lower() in {"loan pool", "pool", "pool name", "loan pools"}:
             continue
-        if code_s.lower().endswith(" code") or code_s.lower() in {"code", "loan code", "collateral code"}:
+        if code_s.lower().endswith(" code") or code_s.lower() in {
+            "code", "loan code", "collateral code",
+        }:
             continue
         # First write wins (preserves order of appearance on the sheet).
         mapping.setdefault(code_s, pool_s)

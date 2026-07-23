@@ -132,6 +132,11 @@ _LOAN_FALSE_POSITIVE_RX = re.compile(
     r"collateral[\s_\-]*dependent|"
     r"improved[\s_\-]*deteriorated|"
     r"impr[\s_\-]*deter|"
+    # Loan-participation registers and "individually identified" impaired
+    # registers both contain the word "loan(s)" but are NOT the monthly
+    # loan-data extract this tool consumes.
+    r"loan[\s_\-]*participation|participation[\s_\-]*information|"
+    r"individually[\s_\-]*identified|"
     r"watchlist|risk[\s_\-]*rating|"
     r"aires[\s_\-]*shares|shares[\s_\-]*aires|"
     r"loan[\s_\-]*code|loan[\s_\-]*pool[\s_\-]*name)",
@@ -232,10 +237,18 @@ def _looks_like_loan_extract(name: str) -> bool:
 # can still respect snapshot for those files.
 _MD_YYYY_RX = re.compile(r"(?<!\d)(\d{1,2})[-_/](\d{1,2})[-_/](20\d{2})(?!\d)")
 _MM_YYYY_RX = re.compile(r"(?<!\d)(\d{1,2})[-_/](20\d{2})(?!\d)")
+# Compact ISO date fingerprint (e.g. ``20230228_Cottonwood CU_Loans.xlsx``).
+# Many core exports lead the filename with a bare YYYYMMDD stamp.
+_YYYYMMDD_RX = re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)")
 
 
 def _fallback_period_from_filename(name: str) -> str | None:
-    """Return ``YYYY-MM`` from MM-DD-YYYY / MM-YYYY shapes."""
+    """Return ``YYYY-MM`` from YYYYMMDD / MM-DD-YYYY / MM-YYYY shapes."""
+    m = _YYYYMMDD_RX.search(name)
+    if m:
+        mo = int(m.group(2))
+        if 1 <= mo <= 12:
+            return f"{m.group(1)}-{mo:02d}"
     m = _MD_YYYY_RX.search(name)
     if m:
         mo = int(m.group(1))
@@ -306,17 +319,21 @@ def classify_folder(folder: str | Path) -> dict[str, Any]:
     # warm_parser._LOAN_DATA_RX matches the bare "aires" token, so it
     # promotes BOTH "Aires Loans <date>.xlsx" (the loan extract this
     # tool consumes) AND "Aires Shares <date>.xlsx" (the member
-    # share/deposit export — NOT loan data). Demote any "Aires Shares"
-    # entry from ``loan_data_files`` to ``other_files`` so Step 13 and
-    # the sample picker only see real loan extracts. The same overlay
-    # also runs in ``_bucket_extra`` via ``_LOAN_FALSE_POSITIVE_RX`` so
-    # files routed through ``other_files`` first never come back.
+    # share/deposit export — NOT loan data). It also matches other
+    # "loan(s)"-bearing report names that are NOT the monthly extract
+    # (loan-participation registers, "individually identified" impaired
+    # registers, improved/deteriorated reports, code maps, ...). Demote
+    # any such entry from ``loan_data_files`` to ``other_files`` so the
+    # sample picker and Step 13 only see real loan extracts. Files routed
+    # through ``other_files`` never come back because ``_bucket_extra`` ->
+    # ``_looks_like_loan_extract`` re-checks ``_LOAN_FALSE_POSITIVE_RX``.
     _ldf = base.get("loan_data_files") or []
     if _ldf:
         _kept: list[dict[str, Any]] = []
         _demoted: list[dict[str, Any]] = []
         for _e in _ldf:
-            if _AIRES_SHARES_RX.search(_e.get("name") or ""):
+            _nm = _e.get("name") or ""
+            if _AIRES_SHARES_RX.search(_nm) or _LOAN_FALSE_POSITIVE_RX.search(_nm):
                 _demoted.append(_e)
             else:
                 _kept.append(_e)
@@ -608,6 +625,7 @@ def _pick_latest_for_period(
 def scan_folder_for_setup(
     folder: str | Path,
     snapshot_yyyymm: str | None = None,
+    _prebuilt_classification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Scan *folder* and produce a ``findings`` dict for state population.
 
@@ -655,7 +673,7 @@ def scan_folder_for_setup(
         "errors": [],
     }
 
-    cls = classify_folder(folder)
+    cls = _prebuilt_classification or classify_folder(folder)
     out["classification"] = cls
     if not cls.get("ok"):
         out["error"] = cls.get("error") or "folder scan failed"
@@ -1106,6 +1124,174 @@ def scan_folder_for_setup(
     )
 
     return out
+
+
+# Bucket keys produced by ``classify_folder`` that hold lists of file entries.
+# Used to merge classifications across multiple scanned folders.
+_CLASSIFICATION_BUCKETS: tuple[str, ...] = (
+    "loan_data_files",
+    "warm_files",
+    "co_files",
+    "recov_files",
+    "impaired_files",
+    "credit_pull_files",
+    "monthly_files",
+    "annual_balance_files",
+    "monthly_detail_balance_files",
+    "single_hist_bal_files",
+    "consolidated_pool_balance_files",
+    "five_thirtythousand_files",
+    "other_files",
+)
+
+# Display names for the optional per-folder type hints the user can set on
+# the Identity step. Purely cosmetic (used in scan narration); the
+# classifier still decides file types by content/name.
+_FOLDER_LABEL_NAMES: dict[str, str] = {
+    "warm": "WARM history",
+    "data": "Client data / loan extracts",
+    "credit_pull": "Credit pull",
+    "co_recov": "Charge-offs / Recoveries",
+    "impaired": "Impaired loans",
+    "balances": "Balance sheets",
+}
+
+
+def _merge_classifications(
+    parts: list[tuple[str, dict[str, Any]]]
+) -> dict[str, Any]:
+    """Union the file buckets from several ``classify_folder`` results.
+
+    ``parts`` is a list of ``(folder, classification)`` tuples. Entries are
+    de-duplicated by absolute path (falling back to name) so a file that
+    appears under two overlapping folders is only classified once. Each
+    surviving entry is tagged with ``_source_folder`` for later narration.
+    Returns a single classification dict with ``ok=True`` when at least one
+    part classified successfully.
+    """
+    merged: dict[str, Any] = {"ok": False, "error": None}
+    for key in _CLASSIFICATION_BUCKETS:
+        merged[key] = []
+    seen: set[str] = set()
+    errors: list[str] = []
+
+    for folder, cls in parts:
+        if not cls.get("ok"):
+            errors.append(f"{folder}: {cls.get('error') or 'scan failed'}")
+            continue
+        merged["ok"] = True
+        for key in _CLASSIFICATION_BUCKETS:
+            for entry in cls.get(key) or []:
+                ident = str(
+                    entry.get("path") or entry.get("name") or id(entry)
+                ).lower()
+                if ident in seen:
+                    continue
+                seen.add(ident)
+                entry.setdefault("_source_folder", folder)
+                merged[key].append(entry)
+
+    if not merged["ok"] and errors:
+        merged["error"] = "; ".join(errors)
+    return merged
+
+
+def scan_folders_for_setup(
+    folders: list[str | Path],
+    snapshot_yyyymm: str | None = None,
+    folder_labels: list[str] | None = None,
+) -> dict[str, Any]:
+    """Scan several folders and produce a single merged ``findings`` dict.
+
+    This is the multi-folder entry point behind the wizard's "add folder
+    paths and let the tool decide" flow. The user can point at, e.g., a
+    WARM-history folder, a client-data-upload folder, and a credit-pull
+    folder; every folder is classified, the buckets are unioned, and the
+    same downstream logic as :func:`scan_folder_for_setup` runs against the
+    combined set — so the wizard auto-derives column mappings, pools, file
+    patterns, balance layout, companion files, and (crucially) whether a
+    WARM workbook is available for the WARM -> CM comparison.
+
+    ``folder_labels`` is an OPTIONAL list, parallel to ``folders``, of
+    user-supplied type hints ("warm", "data", "credit_pull", ...). They are
+    purely informational — the classifier still decides file types by
+    content/name — but they are echoed in the per-folder narration so the
+    scan report reflects the user's intent.
+
+    Returns the same shape as :func:`scan_folder_for_setup` plus a
+    ``"folders"`` list. ``"folder"`` is set to the most representative folder
+    (the one contributing loan extracts, else the first) so single-folder
+    self-heal reuse keeps working.
+    """
+    norm = [str(f).strip() for f in (folders or []) if str(f).strip()]
+    if not norm:
+        return {
+            "ok": False,
+            "error": "no folder paths provided",
+            "folder": "",
+            "folders": [],
+            "classification": None,
+            "messages": [],
+            "errors": [],
+        }
+
+    # Align optional labels to the (blank-filtered) folder list.
+    labels_in = list(folder_labels or [])
+    label_by_folder: dict[str, str] = {}
+    _li = 0
+    for f in (folders or []):
+        fs = str(f).strip()
+        lbl = labels_in[_li] if _li < len(labels_in) else ""
+        _li += 1
+        if fs:
+            label_by_folder[fs] = (lbl or "").strip()
+
+    parts: list[tuple[str, dict[str, Any]]] = []
+    for f in norm:
+        try:
+            parts.append((f, classify_folder(f)))
+        except Exception as exc:  # noqa: BLE001 - one bad folder shouldn't abort
+            parts.append((f, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
+
+    merged_cls = _merge_classifications(parts)
+
+    # Pick the most representative folder for self-heal reuse: prefer the one
+    # that contributed loan extracts, else the first provided folder.
+    primary = norm[0]
+    for entry in merged_cls.get("loan_data_files") or []:
+        sf = entry.get("_source_folder")
+        if sf:
+            primary = sf
+            break
+
+    findings = scan_folder_for_setup(
+        primary, snapshot_yyyymm, _prebuilt_classification=merged_cls
+    )
+    findings["folders"] = norm
+    findings["folder_labels"] = {
+        f: label_by_folder.get(f, "") for f in norm
+    }
+    # Prepend a per-folder narration line so the scan report shows what each
+    # path contributed (with the user's optional type hint, if any).
+    if findings.get("ok"):
+        per_folder = []
+        for f, cls in parts:
+            hint = label_by_folder.get(f, "")
+            tag = f" [{_FOLDER_LABEL_NAMES.get(hint, hint)}]" if hint else ""
+            if cls.get("ok"):
+                per_folder.append(
+                    f"{f}{tag}: {len(cls.get('loan_data_files') or [])} extract(s), "
+                    f"{len(cls.get('warm_files') or [])} WARM, "
+                    f"{len(cls.get('credit_pull_files') or [])} credit-pull, "
+                    f"{len(cls.get('impaired_files') or [])} impaired."
+                )
+            else:
+                per_folder.append(
+                    f"{f}{tag}: {cls.get('error') or 'scan failed'}"
+                )
+        findings.setdefault("messages", [])
+        findings["messages"] = per_folder + findings["messages"]
+    return findings
 
 
 # --------------------------------------------------------------------------
@@ -2837,6 +3023,175 @@ def _auto_run_distributed_backfill(
     return msgs
 
 
+def _is_real_warm_pool_row(s: dict[str, Any]) -> bool:
+    """True when a WARM ``pool_settings`` row is a genuine loan pool.
+
+    Filters out the WARM workbook's ACL / Credit-Grade-Deteriorated /
+    Grand Total / Hide / Exclude sentinel rows so only real pools seed the
+    wizard's Loan Pools step. Mirrors the route-level ``_is_real_pool_row``
+    inside ``setup._apply_warm_to_state``.
+    """
+    nm = (s.get("name") or "").strip().lower()
+    if not nm:
+        return False
+    if nm.startswith("allowance for credit loss") or nm == "allowance":
+        return False
+    if nm.startswith("credit grade deteriorated"):
+        return False
+    if (nm.startswith("grand total") or nm.startswith("total")
+            or nm.startswith("hide") or nm == "exclude"):
+        return False
+    return True
+
+
+def _apply_warm_findings_to_state(
+    state: dict[str, Any], warm: dict[str, Any]
+) -> list[str]:
+    """Populate wizard state from an auto-scanned WARM workbook.
+
+    This is the auto-scan counterpart to ``setup._apply_warm_to_state``
+    (which only runs on the manual single-file WARM upload path). Without
+    it, a folder scan that *detects* a WARM workbook would set
+    ``has_warm_files='yes'`` but leave pools, grades, and identity empty —
+    stranding the user on an empty Loan Pools step. Here the WARM workbook
+    is treated as the authoritative source for pools / grades on a WARM CU.
+
+    Never raises; returns human-readable messages for the scan report.
+    ``warm`` is the ``findings['warm']`` dict
+    ``{entry, saved_path, analysis}``.
+    """
+    msgs: list[str] = []
+    analysis = (warm or {}).get("analysis") or {}
+    if not analysis.get("ok"):
+        return msgs
+
+    # Carry the file locations on the analysis so downstream WARM steps and
+    # the WARM -> CM comparison can find the workbook.
+    if warm.get("saved_path"):
+        analysis.setdefault("saved_path", warm["saved_path"])
+    entry = warm.get("entry") or {}
+    if entry.get("path"):
+        analysis.setdefault("source_path", entry["path"])
+
+    # ----- Identity / economic baseline (fill blanks only) --------------
+    bid = analysis.get("baseline_identity") or {}
+    if bid:
+        if not state.get("credit_union") and bid.get("cu_name"):
+            state["credit_union"] = bid["cu_name"]
+        if not state.get("charter_number") and bid.get("charter_number"):
+            state["charter_number"] = bid["charter_number"]
+        econ = state.setdefault("economic_data", {})
+        for key in ("state", "county", "unemployment_rate",
+                    "foreclosures", "bankruptcies", "population"):
+            if not econ.get(key) and bid.get(key):
+                econ[key] = bid[key]
+        if not state.get("short_name") and state.get("credit_union"):
+            state["short_name"] = config_service.slugify(state["credit_union"])
+        if bid.get("period_end_date"):
+            analysis["as_of_date"] = (
+                analysis.get("as_of_date") or bid["period_end_date"]
+            )
+    if not state.get("credit_union") and analysis.get("cu_name"):
+        state["credit_union"] = analysis["cu_name"]
+        if not state.get("short_name"):
+            state["short_name"] = config_service.slugify(analysis["cu_name"])
+    if state.get("credit_union"):
+        msgs.append(f"Identity seeded from WARM for {state['credit_union']!r}")
+
+    # ----- Loan-code -> pool map ---------------------------------------
+    # Priority: WARM's own code map (cols S/T) > a real code map already
+    # derived from a loan-extract sample > a {pool: pool} placeholder from
+    # the WARM pool names. Never clobber real raw codes with placeholders.
+    code_map = analysis.get("loan_code_pool_map") or {}
+    if code_map:
+        state["pool_map"] = dict(code_map)
+        state["_warm_seeded_pool_map"] = dict(code_map)
+        distinct = len({v for v in code_map.values() if v})
+        msgs.append(
+            f"Loan Code Mapping seeded from WARM 'Grade Ranges & Loan Codes' "
+            f"(cols S/T): {len(code_map)} code(s) -> {distinct} pool(s)"
+        )
+    elif not (state.get("pool_map") or {}) and analysis.get("pools"):
+        state["pool_map"] = {p: p for p in analysis["pools"] if p}
+        msgs.append(
+            f"Loan Code Mapping seeded with {len(state['pool_map'])} WARM "
+            "pool name(s) (no raw code map in WARM — refine on the mapping step)"
+        )
+
+    # ----- Per-pool settings (the Loan Pools step) — WARM authoritative --
+    warm_ps = [
+        s for s in (analysis.get("pool_settings") or [])
+        if _is_real_warm_pool_row(s)
+    ]
+    if warm_ps:
+        state["pool_settings"] = [dict(s) for s in warm_ps]
+        msgs.append(
+            f"{len(warm_ps)} loan pool(s) seeded from WARM "
+            "'BS CO DQ Data Enter'"
+        )
+
+    # ----- ACL balance --------------------------------------------------
+    if not state.get("acl_balance") and analysis.get("acl_balance"):
+        try:
+            state["acl_balance"] = float(analysis["acl_balance"])
+        except (TypeError, ValueError):
+            pass
+
+    # ----- Credit grades — WARM authoritative ---------------------------
+    if analysis.get("grades"):
+        state["credit_grades"] = list(analysis["grades"])
+        msgs.append(
+            f"{len(analysis['grades'])} credit grade(s) seeded from WARM"
+        )
+
+    # ----- Monthly balances from WARM 'BS Data' -------------------------
+    # A WARM CU's per-pool monthly balance history lives inside the WARM
+    # workbook. When the folder scan found no separate monthly-balance file,
+    # use that series as a 'manual' monthly_balance source so the report's
+    # balance-adjustment logic has data and the wizard's Monthly Balance step
+    # is satisfied from WARM alone. Never clobber a real monthly-balance file
+    # the scan already wired up (per_year / per_month / single).
+    mb_existing = (state.get("monthly_bal") or {}).get("source") or ""
+    if mb_existing.strip() not in (
+        "per_year", "per_month", "single", "single_workbook", "manual"
+    ):
+        pmb = analysis.get("pool_monthly_balances") or {}
+        pool_rows = pmb.get("pools") or []
+        entries: dict[str, dict[str, float]] = {}
+        all_dates: set[str] = set()
+        for prow in pool_rows:
+            name = (prow.get("name") or "").strip()
+            if not name or not _is_real_warm_pool_row({"name": name}):
+                continue
+            row_map: dict[str, float] = {}
+            for series in ("history", "current_quarter"):
+                for pt in (prow.get(series) or []):
+                    d = (pt.get("date") or "").strip()
+                    if not d:
+                        continue
+                    try:
+                        row_map[d] = float(pt.get("balance") or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    all_dates.add(d)
+            if row_map:
+                entries[name] = row_map
+        if entries:
+            mbst = state.setdefault("monthly_bal", {})
+            mbst["source"] = "manual"
+            mbst["manual_entries"] = entries
+            mbst["manual_months"] = sorted(all_dates)
+            mbst["parsed_pool_labels"] = list(entries.keys())
+            mbst["_warm_derived"] = True
+            msgs.append(
+                f"Monthly balances seeded from WARM 'BS Data': {len(entries)} "
+                f"pool(s) x {len(all_dates)} month(s) (manual source)"
+            )
+
+    state["warm"] = analysis
+    return msgs
+
+
 def apply_findings_to_state(
     state: dict[str, Any],
     findings: dict[str, Any],
@@ -2949,8 +3304,28 @@ def apply_findings_to_state(
     if findings.get("warm"):
         state["has_warm_files"] = "yes"
         report.setdefault("warm", []).append(
-            f"WARM workbook detected — WARM-path wizard steps will be used."
+            "WARM workbook detected — WARM-path wizard steps will be used."
         )
+        # Apply the WARM workbook's pools, grades, and identity so the
+        # wizard doesn't strand the user on an empty Loan Pools step. WARM
+        # is authoritative for pools/grades on a WARM CU.
+        warm_msgs = _apply_warm_findings_to_state(state, findings["warm"])
+        if warm_msgs:
+            report.setdefault("warm", []).extend(warm_msgs)
+            # Mirror pool/grade seeding onto the steps that render them so
+            # the stepper badges light up on both wizard paths.
+            report.setdefault("loan_pools", []).extend(
+                m for m in warm_msgs if "pool" in m.lower()
+            )
+            report.setdefault("pools", []).extend(
+                m for m in warm_msgs if "Loan Code Mapping" in m
+            )
+            report.setdefault("grades", []).extend(
+                m for m in warm_msgs if "grade" in m.lower()
+            )
+            report.setdefault("monthly_bal", []).extend(
+                m for m in warm_msgs if "Monthly balances" in m
+            )
     else:
         # Don't override an explicit prior answer; only set when unanswered.
         if state.get("has_warm_files") is None:
@@ -3204,10 +3579,24 @@ def compute_hil_needs(state: dict[str, Any]) -> list[dict[str, Any]]:
     return needs
 
 
-def first_hil_step_key(state: dict[str, Any], step_list: list[tuple[str, str]]) -> str | None:
-    """Pick the first HIL step that exists in *step_list* (in display order)."""
+def first_hil_step_key(
+    state: dict[str, Any],
+    step_list: list[tuple[str, str]],
+    severity: str | None = None,
+) -> str | None:
+    """Pick the first HIL step that exists in *step_list* (in display order).
+
+    When ``severity`` is given (e.g. ``"required"``), only HIL entries of that
+    severity are considered. This lets the post-auto-scan router drive the
+    wizard straight through *recommended* review checkpoints (pools, grades,
+    mgmt-adj, ...) and stop only on genuinely blocking gaps that cannot be
+    auto-derived — landing on the Review step when nothing required remains.
+    """
     needs = compute_hil_needs(state)
-    need_keys = {n["step_key"] for n in needs}
+    if severity:
+        need_keys = {n["step_key"] for n in needs if n["severity"] == severity}
+    else:
+        need_keys = {n["step_key"] for n in needs}
     for key, _label in step_list:
         if key in need_keys:
             return key
@@ -3231,6 +3620,14 @@ def compute_step_completion(state: dict[str, Any]) -> set[str]:
     (WARM, NO_WARM, SCALE). The caller filters to its active list.
     """
     done: set[str] = set()
+
+    # ----- WARM auto-derive -----
+    # The setup wizard's WARM upload runs the validated resolver path
+    # (warm_autoderive) which fully derives these steps from the WARM
+    # workbook. Mark them complete so the stepper shows them green
+    # (review-only) and the HIL banner steers the user to the interactive
+    # steps. User edits still win (they can open any step to change it).
+    done |= set(state.get("_warm_autoderived_steps") or [])
 
     # ----- identity -----
     if (state.get("credit_union") or "").strip() and (state.get("report_period") or "").strip():

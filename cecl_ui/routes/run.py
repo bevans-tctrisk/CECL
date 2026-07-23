@@ -396,10 +396,12 @@ def reports(short_name: str):
 
     outputs: list[str] = []
     errors: list[str] = []
+    hybrid_notes: list[str] = []
 
     if selected:
         try:
-            paths, log = pipeline_service.run_reports(short_name, snap, selected)
+            paths, log, hybrid_notes = pipeline_service.run_reports_hybrid(
+                short_name, snap, selected)
             outputs.extend(paths)
             if not paths:
                 # Surface the underlying ERROR line(s) so the user isn't
@@ -453,6 +455,7 @@ def reports(short_name: str):
         short_name=short_name,
         outputs=outputs,
         errors=errors,
+        hybrid_notes=hybrid_notes,
     )
 
 
@@ -788,9 +791,77 @@ def new_quarter(short_name: str):
         folder_skipped = []
         # Fall through; import block is skipped via _skip_stage below.
 
+    if stage == "balance_none":
+        # User acknowledged on the Balance Adjustment decision page that the
+        # review can't be shown (typically no loans imported for the period)
+        # and chose to proceed anyway. Skip staging/import; section 3b is
+        # skipped for this stage so we continue to the impaired check + reports.
+        flash(
+            "Proceeding without the Balance Adjustment review for this "
+            "period.",
+            "warning",
+        )
+        saved = 0
+        copied = 0
+        folder_skipped = []
+
+    if stage == "impaired_none":
+        # User confirmed on the "no impaired file" decision page that the CU
+        # has no impaired loans to report this period. Skip staging/import;
+        # section 3c is skipped for this stage so we go straight to reports.
+        flash(
+            "Confirmed: no impaired loans report for this period. "
+            "Continuing to reports.",
+            "info",
+        )
+        saved = 0
+        copied = 0
+        folder_skipped = []
+
+    if stage == "impaired_uploaded":
+        # User uploaded an Impaired Loans workbook on the "no impaired file"
+        # decision page. Save it under a canonical, matcher-friendly name for
+        # the period (superseding any older same-period impaired file), then
+        # fall through to the impaired intercept (3c) which re-verifies and
+        # shows the review page.
+        up = request.files.get("impaired_file")
+        if not up or not up.filename:
+            flash("Choose an Impaired Loans file to upload, or confirm none.",
+                  "error")
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+        _ext = Path(up.filename).suffix.lower()
+        if _ext not in (".xlsx", ".xlsm"):
+            flash(
+                "Impaired Loans workbook must be an .xlsx or .xlsm file "
+                f"(got {_ext or 'no extension'}).",
+                "error",
+            )
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+        _target_dir = _impaired_data_dir(cfg, ws, short_name)
+        try:
+            _target_dir.mkdir(parents=True, exist_ok=True)
+            _dest_name = _canonical_impaired_name(cfg, snapshot, up.filename)
+            try:
+                _supersede_existing_impaired(_target_dir, snapshot, _dest_name)
+            except Exception:  # noqa: BLE001
+                pass
+            up.save(_target_dir / _dest_name)
+            flash(
+                f"Saved impaired workbook as '{_dest_name}'. "
+                "Review the parsed impaired loans below.",
+                "success",
+            )
+        except OSError as exc:
+            flash(f"Could not save the impaired file: {exc}", "error")
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+        saved = 0
+        copied = 0
+        folder_skipped = []
+
     _skip_stage = stage in (
-        "mapped", "balance_checked", "balance_remapped",
+        "mapped", "balance_checked", "balance_remapped", "balance_none",
         "impaired_checked", "impaired_remapped",
+        "impaired_uploaded", "impaired_none",
     )
     folder_raw = _normalize_folder_path(request.form.get("folder_path") or "") if not _skip_stage else ""
 
@@ -1024,8 +1095,9 @@ def new_quarter(short_name: str):
     # 3) Import (skip on balance_checked / balance_remapped /
     # impaired_checked / impaired_remapped resubmits — import already
     # ran on the prior submit or inside the remap branch).
-    if stage in ("balance_checked", "balance_remapped",
-                 "impaired_checked", "impaired_remapped"):
+    if stage in ("balance_checked", "balance_remapped", "balance_none",
+                 "impaired_checked", "impaired_remapped",
+                 "impaired_uploaded", "impaired_none"):
         n_imported = 0  # already imported on prior submit
     else:
         try:
@@ -1075,22 +1147,22 @@ def new_quarter(short_name: str):
     # Also skip once the user has advanced PAST balance to the impaired
     # intercept — otherwise clicking Continue on the impaired page would
     # bounce them back to the balance page (loop).
-    if stage not in ("balance_checked", "impaired_checked",
-                     "impaired_remapped"):
+    if stage not in ("balance_checked", "balance_none", "impaired_checked",
+                     "impaired_remapped", "impaired_uploaded",
+                     "impaired_none"):
         try:
             comparison = balance_check_service.compare_run(
                 cfg, snapshot, short_name=short_name)
-        except Exception:  # noqa: BLE001
-            comparison = None
-        # Only intercept when we actually have a populated comparison.
-        # If the loan side failed (empty DB) or both sides are empty,
-        # skip the review and let the report block surface its own
-        # error — we don't want to dead-end the user on a useless page.
+        except Exception as _bexc:  # noqa: BLE001
+            comparison = {"ok": False,
+                          "error": f"Balance comparison failed: {_bexc}",
+                          "rows": []}
+        report_selection = {
+            r: (request.form.get(r) == "on")
+            for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
+        }
+        # Case 1: a populated comparison — show the Balance Adjustment review.
         if comparison and comparison.get("ok") and comparison.get("rows"):
-            report_selection = {
-                r: (request.form.get(r) == "on")
-                for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
-            }
             # Build the pool-name dropdown for the inline remap UI.
             try:
                 pool_choices = _all_known_pools(cfg, short_name)
@@ -1106,6 +1178,40 @@ def new_quarter(short_name: str):
                 staged_reports=report_selection,
                 pool_choices=pool_choices,
             )
+        # Case 2: no reviewable comparison. ALWAYS stop and make the user
+        # decide instead of silently skipping to the impaired step — a silent
+        # skip is how a mis-named / unimported loan file used to slip a CU
+        # straight past the Balance Adjustment review (e.g. the loan file
+        # didn't match file_pattern, so nothing imported and the DB snapshot
+        # was empty). Surfacing the reason + the unmatched staged files lets
+        # the user fix the naming and retry rather than unknowingly running
+        # reports with no loan data.
+        _berr = ((comparison or {}).get("error")
+                 or "The per-pool balance comparison could not be produced "
+                    "(no imported loans found for this period).")
+        _unmatched: list[str] = []
+        try:
+            _pat = (cfg or {}).get("file_pattern") or ""
+            _rx = re.compile(_pat) if _pat else None
+            for _entry in upload_dir.iterdir():
+                if not _entry.is_file():
+                    continue
+                if _entry.suffix.lower() not in {".xlsx", ".xlsm", ".xls", ".csv"}:
+                    continue
+                if _rx is None or not _rx.match(_entry.name):
+                    _unmatched.append(_entry.name)
+        except (re.error, OSError):
+            _unmatched = []
+        return render_template(
+            "run/new_quarter.html",
+            short_name=short_name,
+            cfg=cfg,
+            stage="awaiting_balance_decision",
+            balance_error=_berr,
+            balance_unmatched=sorted(_unmatched)[:12],
+            staged_period=period,
+            staged_reports=report_selection,
+        )
 
     # 3c) Impaired Loans Verification intercept — show the parsed
     # impaired workbook (if one is on disk for this period) so the user
@@ -1113,22 +1219,24 @@ def new_quarter(short_name: str):
     # reports are produced. Mirrors wizard Step 16. Skipped when no
     # impaired workbook is found — most CUs don't ship one and there's
     # nothing to review.
-    if stage != "impaired_checked":
+    if stage not in ("impaired_checked", "impaired_none"):
         try:
             impaired_result = impaired_check_service.verify_for_run(
                 cfg, snapshot, short_name=short_name)
         except Exception:  # noqa: BLE001
             impaired_result = None
+        report_selection = {
+            r: (request.form.get(r) == "on")
+            for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
+        }
+        # Case 1: a workbook was found with usable impaired rows / codes —
+        # show the verification page so the user can review it.
         if (impaired_result
                 and impaired_result.get("ok")
                 and impaired_result.get("found")
                 and (impaired_result.get("data_rows")
                      or impaired_result.get("validation", {}).get(
                          "unmapped_codes"))):
-            report_selection = {
-                r: (request.form.get(r) == "on")
-                for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
-            }
             return render_template(
                 "run/new_quarter.html",
                 short_name=short_name,
@@ -1138,17 +1246,27 @@ def new_quarter(short_name: str):
                 staged_period=period,
                 staged_reports=report_selection,
             )
-        # Surface non-fatal parse errors so the user isn't blindsided if
-        # the workbook exists but couldn't be parsed. Report generation
-        # will still proceed — the report engine has its own tolerance
-        # for a missing/malformed impaired file.
-        if impaired_result and impaired_result.get("error"):
-            flash(
-                "Could not verify the impaired-loans workbook for "
-                f"{snapshot}: {impaired_result['error']}. Reports will "
-                "continue with best-effort defaults.",
-                "warning",
-            )
+        # Case 2: no usable impaired data. ALWAYS stop and make the user
+        # decide — confirm the CU has none this period, or upload the
+        # report — instead of silently skipping (which is how a renamed /
+        # unrecognised impaired file used to slip past the run).
+        if (impaired_result and impaired_result.get("found")
+                and impaired_result.get("error")):
+            _reason = "parse_error"
+        elif impaired_result and impaired_result.get("found"):
+            _reason = "found_empty"
+        else:
+            _reason = "not_found"
+        return render_template(
+            "run/new_quarter.html",
+            short_name=short_name,
+            cfg=cfg,
+            stage="awaiting_impaired_decision",
+            impaired_reason=_reason,
+            impaired_error=(impaired_result or {}).get("error"),
+            staged_period=period,
+            staged_reports=report_selection,
+        )
 
     # 4) Run reports — selection comes from form (defaults seeded from cfg)
     selected: list[str] = []
@@ -1159,9 +1277,11 @@ def new_quarter(short_name: str):
 
     outputs: list[str] = []
     errors: list[str] = []
+    hybrid_notes: list[str] = []
     if selected:
         try:
-            paths, log = pipeline_service.run_reports(short_name, snapshot, selected)
+            paths, log, hybrid_notes = pipeline_service.run_reports_hybrid(
+                short_name, snapshot, selected)
             outputs.extend(paths)
             if not paths:
                 lines = [ln for ln in (log or "").splitlines() if ln.strip()]
@@ -1198,6 +1318,7 @@ def new_quarter(short_name: str):
         short_name=short_name,
         outputs=outputs,
         errors=errors,
+        hybrid_notes=hybrid_notes,
     )
 
 
@@ -1339,13 +1460,36 @@ def upload_impaired_form(short_name: str):
         default_snap = rp
     elif snapshots:
         default_snap = snapshots[0]
+
+    # Let the user VIEW the validation for an already-present impaired file
+    # without uploading a new one or re-running the new-quarter pass. The
+    # period comes from the ?snapshot_date= / ?period= query arg (the "View
+    # validation" selector below), falling back to the default period so the
+    # section auto-renders when a file is already in place.
+    sel = (request.args.get("snapshot_date") or "").strip()
+    if not sel:
+        sel = _period_to_snapshot(request.args.get("period") or "") or ""
+    view_snap = sel or default_snap
+    verification = None
+    if view_snap:
+        try:
+            verification = impaired_check_service.verify_for_run(
+                cfg, view_snap, short_name=short_name)
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Could not verify the existing impaired file: {exc}",
+                  "warning")
+            verification = None
+        # Keep the page a plain upload form when no workbook exists yet for
+        # the period (nothing to validate).
+        if verification and not verification.get("found"):
+            verification = None
     return render_template(
         "run/impaired_upload.html",
         short_name=short_name,
         cfg=cfg,
         snapshots=snapshots,
-        default_snap=default_snap,
-        verification=None,
+        default_snap=view_snap or default_snap,
+        verification=verification,
     )
 
 
@@ -2038,4 +2182,154 @@ def balance_compare(short_name: str):
         period=period,
         comparison=comparison,
         pool_choices=pool_choices,
+    )
+
+
+def _oac_norm_code(c) -> str:
+    s = str(c).strip()
+    return s.lstrip("0") or "0"
+
+
+def _unfunded_pools_for_codes(cfg: dict, codes) -> list[str]:
+    """Pools that the given loan type codes map to (via ``pool_map``)."""
+    if isinstance(codes, (str, int)):
+        codes = [codes]
+    pm = cfg.get("pool_map") or {}
+    npm: dict[str, str] = {}
+    for k, v in pm.items():
+        npm.setdefault(_oac_norm_code(k), v)
+    default_pool = cfg.get("default_pool", "Ignore")
+    pools: list[str] = []
+    for c in (codes or []):
+        p = npm.get(_oac_norm_code(c), default_pool)
+        if p and p not in pools and p not in ("Exclude", "Ignore"):
+            pools.append(p)
+    return pools
+
+
+def _oac_unfunded_pools(cfg: dict, entry: dict, calc_rows: dict):
+    """Return ``(base_title, [pool, ...])`` for an unfunded-commitment entry.
+
+    Prefers the pools captured in ``oac_last_calculated`` (real report run);
+    falls back to deriving them from the configured codes so the page still
+    works before the first run.
+    """
+    base_title = (str(entry.get("title") or "Unfunded Commitments").strip()
+                  or "Unfunded Commitments")
+    cached = [v.get("pool") for v in (calc_rows or {}).values()
+              if v.get("kind") == "unfunded_commitment"
+              and v.get("base_title") == base_title and v.get("pool")]
+    if cached:
+        seen: set[str] = set()
+        pools = [p for p in cached if not (p in seen or seen.add(p))]
+        return base_title, sorted(pools)
+    codes = entry.get("loan_type_codes")
+    if codes is None:
+        codes = entry.get("loan_type_code")
+    return base_title, _unfunded_pools_for_codes(cfg, codes or [])
+
+
+@run_bp.route("/<short_name>/oac", methods=["GET", "POST"])
+def oac_overrides(short_name: str):
+    """View and override the calculated loss rate for data-derived Other
+    Allowance Considerations (Negative Share Provision, Unfunded Commitments).
+
+    Overrides are stored on the OAC template entries in the client YAML
+    (``override_percentage`` for negative shares, ``override_percentage_by_pool``
+    for unfunded commitments) and consumed by the report engine on the next
+    run. The most recently calculated values (from ``oac_last_calculated``)
+    are shown so the user can compare against the model's number.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    oac_list = cfg.get("other_allowance_considerations") or []
+    calc_rows = (cfg.get("oac_last_calculated") or {}).get("rows") or {}
+
+    if request.method == "POST":
+        def _parse_pct(raw):
+            raw = (raw or "").strip().replace("%", "")
+            if raw == "":
+                return None
+            try:
+                return round(float(raw), 6)
+            except ValueError:
+                return None
+
+        for i, entry in enumerate(oac_list):
+            src = str((entry or {}).get("source") or "").strip()
+            if src == "negative_share":
+                val = _parse_pct(request.form.get(f"ns_override__{i}"))
+                if val is None:
+                    entry.pop("override_percentage", None)
+                else:
+                    entry["override_percentage"] = val
+            elif src == "unfunded_commitment":
+                _base, pools = _oac_unfunded_pools(cfg, entry, calc_rows)
+                ov_map: dict[str, float] = {}
+                for j, pool in enumerate(pools):
+                    val = _parse_pct(request.form.get(f"uc_override__{i}__{j}"))
+                    if val is not None:
+                        ov_map[pool] = val
+                if ov_map:
+                    entry["override_percentage_by_pool"] = ov_map
+                else:
+                    entry.pop("override_percentage_by_pool", None)
+
+        cfg["other_allowance_considerations"] = oac_list
+        config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+        flash("Other Allowance Consideration overrides saved. "
+              "They take effect on the next report run.", "success")
+        return redirect(url_for("run.oac_overrides", short_name=short_name))
+
+    # ── GET: build display rows ──
+    ns_rows = []
+    unf_rows = []
+    static_rows = []
+    for i, entry in enumerate(oac_list):
+        src = str((entry or {}).get("source") or "").strip()
+        title = str(entry.get("title") or "").strip()
+        if src == "negative_share":
+            c = calc_rows.get(title, {})
+            ns_rows.append({
+                "idx": i,
+                "title": title or "Negative Share Provision",
+                "life_of_loan_months": entry.get("life_of_loan_months", 12),
+                "calc": c,
+                "override": entry.get("override_percentage"),
+            })
+        elif src == "unfunded_commitment":
+            base_title, pools = _oac_unfunded_pools(cfg, entry, calc_rows)
+            ov_map = entry.get("override_percentage_by_pool") or {}
+            prows = []
+            for j, pool in enumerate(pools):
+                c = calc_rows.get(f"{base_title} - {pool}", {})
+                prows.append({
+                    "j": j,
+                    "pool": pool,
+                    "calc": c,
+                    "override": ov_map.get(pool),
+                })
+            unf_rows.append({
+                "idx": i,
+                "base_title": base_title,
+                "codes": entry.get("loan_type_codes") or entry.get("loan_type_code") or [],
+                "pools": prows,
+            })
+        else:
+            static_rows.append({
+                "title": title or "(untitled)",
+                "balance": entry.get("balance"),
+                "percentage": entry.get("percentage"),
+                "amount": entry.get("amount"),
+            })
+
+    return render_template(
+        "run/oac_overrides.html",
+        short_name=short_name,
+        cfg=cfg,
+        ns_rows=ns_rows,
+        unf_rows=unf_rows,
+        static_rows=static_rows,
+        asof=(cfg.get("oac_last_calculated") or {}).get("asof"),
+        has_data_derived=bool(ns_rows or unf_rows),
     )

@@ -84,39 +84,127 @@
       </div>
     </div>
 
-    {# Auto-scan: paste a folder, click Scan, the wizard auto-derives
-       column mappings, pool codes, file patterns, balance-sheet layout,
-       impaired/credit-pull/CO/recov staging, mgmt-adj baselines, and
-       the report set, then jumps to the first step that still needs
-       your input. #}
+    {# Auto-configure: add one or more raw-data folders, click Scan, and the
+       wizard classifies every file across all of them, decides whether a
+       WARM workbook is available, and auto-derives column mappings, pool
+       codes, file patterns, balance-sheet layout, impaired/credit-pull/
+       CO/recov staging, mgmt-adj baselines, and the report set — then drops
+       you on the first step that still needs your input. #}
     <fieldset style="margin-top:14px; padding:12px; border:1px dashed #888;">
-      <legend style="padding:0 6px; font-weight:600;">Auto-fill from raw data folder (optional)</legend>
+      <legend style="padding:0 6px; font-weight:600;">Auto-configure from raw-data folders</legend>
       <p class="muted" style="margin-top:0;">
-        Paste the folder path the credit union sent you (or your local copy of it).
-        The wizard will classify the files, run the parsers, populate as much as
-        it can on every step, and drop you on the first step that still needs your
-        input. You can always revisit any step from the stepper at the top.
+        Add the folder path(s) the credit union sent you — for example a folder
+        of historical <strong>WARM</strong> workbooks, a folder of client
+        <strong>data uploads</strong>, and a folder of <strong>credit-pull</strong>
+        files. You don't need to say which is which: the wizard classifies the
+        files, extracts what it needs to reproduce the prior reports, and — if a
+        WARM workbook is present — sets up the WARM&nbsp;&rarr;&nbsp;CM comparison.
+        Sub-folders are scanned recursively.
       </p>
-      <div class="form-row">
-        <div style="flex:1;">
-          <label>Raw data folder
-            <input type="text" name="raw_data_folder"
-                   value="{{ state.raw_data_folder or '' }}"
-                   placeholder="e.g. Z:\Shared\Clients\Census FCU 5641\Portfolio Management\CECL Migration IDLR">
-            <span class="help">Server-side path. Use a UNC or mapped-drive
-              path the Flask server can read. Sub-folders are scanned
-              recursively.</span>
-          </label>
+      <div id="folder-rows">
+        {% set folders = state.raw_data_folders or ([state.raw_data_folder] if state.raw_data_folder else []) %}
+        {% set ftypes = state.raw_data_folder_types or [] %}
+        {% set type_opts = [
+            ('', 'Auto-detect'),
+            ('warm', 'WARM history'),
+            ('data', 'Client data / loan extracts'),
+            ('credit_pull', 'Credit pull'),
+            ('co_recov', 'Charge-offs / Recoveries'),
+            ('impaired', 'Impaired loans'),
+            ('balances', 'Balance sheets')
+        ] %}
+        {% for f in folders if f %}
+        {% set t = ftypes[loop.index0] if loop.index0 < ftypes|length else '' %}
+        <div class="form-row folder-row" style="margin-bottom:6px;">
+          <div style="flex:1;">
+            <input type="text" name="raw_data_folders" value="{{ f }}"
+                   placeholder="e.g. Z:\Shared\Clients\Census FCU 5641\...\WARM Files">
+          </div>
+          <select name="raw_data_folder_types" style="margin-left:6px; max-width:220px;"
+                  title="Optional: tag what this folder holds. Leave on Auto-detect to let the wizard decide.">
+            {% for val, lbl in type_opts %}
+            <option value="{{ val }}" {{ 'selected' if t == val else '' }}>{{ lbl }}</option>
+            {% endfor %}
+          </select>
+          <button type="button" class="btn btn-secondary btn-remove-folder"
+                  title="Remove this path" style="margin-left:6px;">&times;</button>
+        </div>
+        {% endfor %}
+        {# Always render at least one empty row. #}
+        <div class="form-row folder-row" style="margin-bottom:6px;">
+          <div style="flex:1;">
+            <input type="text" name="raw_data_folders" value=""
+                   placeholder="e.g. Z:\Shared\Clients\Census FCU 5641\...\WARM Files">
+          </div>
+          <select name="raw_data_folder_types" style="margin-left:6px; max-width:220px;"
+                  title="Optional: tag what this folder holds. Leave on Auto-detect to let the wizard decide.">
+            {% for val, lbl in type_opts %}
+            <option value="{{ val }}">{{ lbl }}</option>
+            {% endfor %}
+          </select>
+          <button type="button" class="btn btn-secondary btn-remove-folder"
+                  title="Remove this path" style="margin-left:6px;">&times;</button>
         </div>
       </div>
+      <span class="help">Server-side paths. Use UNC or mapped-drive paths the
+        Flask server can read. The type tag is optional — leave it on
+        <em>Auto-detect</em> and the wizard classifies the files itself.</span>
       <div style="margin-top:10px;">
-        <button class="btn btn-secondary" type="submit"
+        <button type="button" class="btn btn-secondary" id="btn-add-folder">
+          + Add another folder
+        </button>
+        <button class="btn btn-primary" type="submit"
                 name="action" value="scan_folder"
-                title="Save identity, scan the folder, auto-fill state, and jump to the first step that needs your input.">
-          Scan &amp; auto-fill &rarr;
+                title="Save identity, scan every folder, auto-configure the CU, and jump to the first step that needs your input.">
+          Scan &amp; auto-configure &rarr;
         </button>
       </div>
     </fieldset>
+
+    <script>
+    (function () {
+      var wrap = document.getElementById('folder-rows');
+      var addBtn = document.getElementById('btn-add-folder');
+      function makeRow() {
+        var row = document.createElement('div');
+        row.className = 'form-row folder-row';
+        row.style.marginBottom = '6px';
+        var opts =
+          '<option value="">Auto-detect</option>' +
+          '<option value="warm">WARM history</option>' +
+          '<option value="data">Client data / loan extracts</option>' +
+          '<option value="credit_pull">Credit pull</option>' +
+          '<option value="co_recov">Charge-offs / Recoveries</option>' +
+          '<option value="impaired">Impaired loans</option>' +
+          '<option value="balances">Balance sheets</option>';
+        row.innerHTML =
+          '<div style="flex:1;"><input type="text" name="raw_data_folders" ' +
+          'value="" placeholder="e.g. Z:\\Shared\\Clients\\...\\WARM Files"></div>' +
+          '<select name="raw_data_folder_types" style="margin-left:6px; max-width:220px;" ' +
+          'title="Optional: tag what this folder holds. Leave on Auto-detect to let the wizard decide.">' +
+          opts + '</select>' +
+          '<button type="button" class="btn btn-secondary btn-remove-folder" ' +
+          'title="Remove this path" style="margin-left:6px;">&times;</button>';
+        return row;
+      }
+      if (addBtn) {
+        addBtn.addEventListener('click', function () {
+          wrap.appendChild(makeRow());
+        });
+      }
+      wrap.addEventListener('click', function (e) {
+        if (e.target && e.target.classList.contains('btn-remove-folder')) {
+          var rows = wrap.querySelectorAll('.folder-row');
+          if (rows.length > 1) {
+            e.target.closest('.folder-row').remove();
+          } else {
+            var inp = e.target.closest('.folder-row').querySelector('input');
+            if (inp) { inp.value = ''; }
+          }
+        }
+      });
+    })();
+    </script>
 
     {% if state._auto_scan_completed %}
     {# Show the most recent auto-scan report on Step 1 so the user can
@@ -124,7 +212,9 @@
     <div class="card" style="margin-top:14px;">
       <h3>Last auto-scan report</h3>
       <p class="muted">
-        Folder: <code>{{ state._auto_scan_folder }}</code>
+        {% set scanned = state._auto_scan_folders or [state._auto_scan_folder] %}
+        Folder{{ 's' if scanned|length > 1 else '' }}:
+        {% for f in scanned if f %}<code>{{ f }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
       </p>
       {% if state._auto_scan_messages %}
         <ul style="margin-top:6px;">
@@ -163,7 +253,7 @@
     {% endif %}
 
     <div class="btn-row">
-      <a class="btn btn-secondary" href="{{ url_for('setup.start_warm_choice') }}">&larr; Back</a>
+      <a class="btn btn-secondary" href="{{ url_for('home.model_select') }}">&larr; Back</a>
       <button class="btn btn-primary" type="submit"
               name="action" value="save_and_continue">Next &rarr;</button>
     </div>

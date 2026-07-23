@@ -1054,7 +1054,8 @@ def compare_run(cfg: dict[str, Any], snapshot_iso: str,
 
 def _build_state_for_run(cfg: dict[str, Any],
                          short_name: str | None,
-                         snapshot_iso: str | None = None) -> dict[str, Any]:
+                         snapshot_iso: str | None = None,
+                         *, include_source_folder: bool = False) -> dict[str, Any]:
     """Construct a minimal state-like dict suitable for
     :func:`loan_balances_by_pool` from a runtime YAML ``cfg`` plus the
     staged ``Raw_Uploads/<short>/`` folder.
@@ -1088,6 +1089,24 @@ def _build_state_for_run(cfg: dict[str, Any],
         except Exception:  # noqa: BLE001 — best-effort outside Flask
             raw_dir = None
             archive_dir = None
+
+    # Opt-in: also scan the CU's client source folder (``loan_source_folder``).
+    # Some CUs' loan extracts live only there (e.g. Vizo IDLR period folders),
+    # never in Raw_Uploads — so without this the impaired verification has no
+    # AIRES data to match against and every row degrades to "Not Reported".
+    # Off by default so the balance-check per-code path is unchanged; the
+    # snapshot-date filename filter below scopes it to the requested period.
+    source_dir = None
+    if include_source_folder:
+        from pathlib import Path as _SrcPath
+        _src = str(cfg.get("loan_source_folder") or "").strip()
+        if _src:
+            try:
+                _sp = _SrcPath(_src)
+                if _sp.is_dir():
+                    source_dir = _sp
+            except Exception:  # noqa: BLE001
+                source_dir = None
 
     loan_files: list[dict[str, Any]] = []
     # Compile patterns once.
@@ -1191,6 +1210,9 @@ def _build_state_for_run(cfg: dict[str, Any],
     # Raw_Uploads first so any duplicate name in Archive is skipped.
     _collect_from(raw_dir)
     _collect_from(archive_dir)
+    # Client source folder last (only when opted in); Raw_Uploads/Archive
+    # copies win on name collision via ``seen_names``.
+    _collect_from(source_dir)
 
     # ── Column-signature supplement ──────────────────────────────────
     # When a CU renames its loan extracts so the filename patterns no

@@ -46,6 +46,7 @@ from report_tct import (
     _load_admin_default_mgmt_adj,
     _merge_pool_orders,
     _ncc,
+    _other_allowance_considerations,
     _resolve_mgmt_adj_total,
     _sort_pools,
 )
@@ -104,14 +105,11 @@ BLOCK_TOTAL_OFFSET    = 14   # 3 + 11
 BLOCK_HEIGHT          = 15
 BLOCK_GAP             = 1    # blank row between blocks
 
-# Hidden meta column: env_factor stashed in column R of total row, hidden.
-META_COL = 18  # R
-
 # Column letter labels exposed in the block (A-O = 1-15).
 COL_LABELS_AO = list("ABCDEFGHIJKLMNO")
 HEADER_TEXTS = {
     'A': 'Pool / Grade',
-    'B': 'Loan Pool Balance',
+    'B': 'Loan Loss Calculation Balance',
     'C': 'Aggregated Pool Loss Rate',
     'D': 'Distribution Factor',
     'E': 'ACL Base Loss Rate',
@@ -255,7 +253,7 @@ def _compute_dq_var(pools, hist, config, snap_year, snap_month):
 
 # ── Block writers ─────────────────────────────────────────────────
 def _write_block_letter_row(ws, row):
-    """Row 1 of block: 'A','B','C',...,'O' + 'RR Yes/No' in Q."""
+    """Row 1 of block: 'A','B','C',...,'O'."""
     for ci, letter in enumerate(COL_LABELS_AO, start=1):
         c = ws.cell(row=row, column=ci, value=letter)
         c.font = FNT_LBL
@@ -263,11 +261,6 @@ def _write_block_letter_row(ws, row):
         c.fill = FILL_HDR
         c.font = FNT_HDR
         c.border = THIN
-    qc = ws.cell(row=row, column=17, value='RR Yes/No')
-    qc.font = FNT_HDR
-    qc.fill = FILL_HDR
-    qc.alignment = Alignment(horizontal='center')
-    qc.border = THIN
 
 
 def _write_block_formula_row(ws, row):
@@ -280,7 +273,7 @@ def _write_block_formula_row(ws, row):
 
 
 def _write_block_header_row(ws, row, pool_name, rr_flag):
-    """Row 3 of block: pool name in A; column header text in B-O; Q=Yes/No.
+    """Row 3 of block: pool name in A; column header text in B-O.
 
     Retained for backwards-compat / single-block usage; the main composer
     now emits column headers once globally and a single pool-name row per
@@ -300,19 +293,13 @@ def _write_block_header_row(ws, row, pool_name, rr_flag):
         c.fill = FILL_POOL
         c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
         c.border = THIN
-    q = ws.cell(row=row, column=17, value=rr_flag)
-    q.font = FNT_SUB
-    q.alignment = Alignment(horizontal='center')
-    q.fill = FILL_POOL
-    q.border = THIN
 
 
 def _write_global_column_header_row(ws, row):
     """Single global column-header row used at the top of the worksheet.
 
-    Writes the column-header text in B-O (and a 'Pool' label in A) plus
-    a 'RR Yes/No' label in Q. This replaces the per-block repetition of
-    the same text.
+    Writes the column-header text in B-O (and a 'Pool' label in A). This
+    replaces the per-block repetition of the same text.
     """
     a = ws.cell(row=row, column=1, value='Pool')
     a.font = FNT_TITLE
@@ -329,18 +316,10 @@ def _write_global_column_header_row(ws, row):
         c.alignment = Alignment(
             horizontal='center', vertical='center', wrap_text=True)
         c.border = THIN
-    q = ws.cell(row=row, column=17, value='RR Yes/No')
-    q.font = FNT_SUB
-    q.alignment = Alignment(horizontal='center')
-    q.fill = FILL_POOL
-    q.border = THIN
 
 
-def _write_pool_name_row(ws, row, pool_name, rr_flag):
-    """Per-pool name row: A=pool name, Q=Yes/No flag, borders across A-O.
-
-    Carries the RR flag at $Q$<row> that the Total-row formulas reference.
-    """
+def _write_pool_name_row(ws, row, pool_name):
+    """Per-pool name row: A=pool name, borders/fill across A-O."""
     a = ws.cell(row=row, column=1, value=pool_name)
     a.font = FNT_TITLE
     a.fill = FILL_POOL
@@ -350,11 +329,6 @@ def _write_pool_name_row(ws, row, pool_name, rr_flag):
         c = ws.cell(row=row, column=ci)
         c.fill = FILL_POOL
         c.border = THIN
-    q = ws.cell(row=row, column=17, value=rr_flag)
-    q.font = FNT_SUB
-    q.alignment = Alignment(horizontal='center')
-    q.fill = FILL_POOL
-    q.border = THIN
 
 
 def _write_grade_row(ws, row, total_row, grade_label, balance, dist):
@@ -377,7 +351,9 @@ def _write_grade_row(ws, row, total_row, grade_label, balance, dist):
 
     # Formulas (E,F,J,K,L)
     tr = total_row
-    ecell = ws.cell(row=row, column=5, value=f"=D{row}*C{tr}")
+    # ACL Base Loss Rate is floored at 0 to match the Display Hist Bal and
+    # ACL Env by Pool Mgmt Adj tabs (max(0, pool_ll * dist)).
+    ecell = ws.cell(row=row, column=5, value=f"=MAX(0,D{row}*C{tr})")
     ecell.number_format = PCT4
     ecell.fill = FILL_BASE
     ecell.font = FNT_NORM
@@ -413,13 +389,12 @@ def _write_grade_row(ws, row, total_row, grade_label, balance, dist):
         cc.border = THIN
 
 
-def _write_total_row(ws, row, header_row, first_grade_row, last_grade_row,
-                     total_balance, life_loss, env_factor, mgmt_adj, is_rr,
-                     rr_flag):
+def _write_total_row(ws, row, first_grade_row, last_grade_row,
+                     total_balance, life_loss, env_factor, mgmt_adj, is_rr):
     """Per-pool Total row: B=balance(static), C=life_loss(static),
     F=allowance-before formula, G=env*F, H=F+G, I=mgmt_adj(EDITABLE),
-    L=adjusted balance, M=L*env, N=L+M, O=N-H. Hidden R column holds
-    env_factor referenced by G and M formulas."""
+    L=adjusted balance, M=L*env, N=L+M, O=N-H. The environmental factor
+    is inlined as a constant in the G and M formulas."""
     ws.cell(row=row, column=1, value="Total").font = FNT_BOLD
     ws.cell(row=row, column=1).fill = FILL_TOTAL
     ws.cell(row=row, column=1).border = THIN
@@ -436,29 +411,18 @@ def _write_total_row(ws, row, header_row, first_grade_row, last_grade_row,
     c.number_format = PCT4
     c.border = THIN
 
-    # Hidden meta cell with env_factor (column R)
-    r_meta = ws.cell(row=row, column=META_COL, value=env_factor)
-    r_meta.number_format = PCT4
-    r_meta.font = FNT_NOTE
-
-    # F18 formula: depends on is_rr — risk-rated sums grade rows;
-    # NRR uses C*B directly (no grade detail).
-    rr_q_addr = f"$Q${header_row}"
-    sentinel_addr = "$Q$1"  # global "Yes" sentinel
+    # F formula: risk-rated pools sum their grade rows; non-risk-rated
+    # pools use C*B directly (no grade detail). We know is_rr at build
+    # time, so the branch is chosen here rather than via an in-cell IF.
     if is_rr:
-        f_formula = (
-            f"=IF({rr_q_addr}={sentinel_addr},"
-            f"SUM(F{first_grade_row}:F{last_grade_row}),C{row}*B{row})"
-        )
-        l_formula = (
-            f"=IF({rr_q_addr}={sentinel_addr},"
-            f"SUM(L{first_grade_row}:L{last_grade_row}),"
-            f"(I{row}+C{row})*B{row})"
-        )
+        f_formula = f"=SUM(F{first_grade_row}:F{last_grade_row})"
+        l_formula = f"=SUM(L{first_grade_row}:L{last_grade_row})"
     else:
         # NRR: total balance × loss rate (no grade rows contribute).
-        f_formula = f"=C{row}*B{row}"
-        l_formula = f"=(I{row}+C{row})*B{row}"
+        # ACL Base Loss Rate floored at 0 to match the Display Hist Bal and
+        # ACL Env by Pool Mgmt Adj tabs (max(0, pool_ll)).
+        f_formula = f"=MAX(0,C{row})*B{row}"
+        l_formula = f"=(I{row}+MAX(0,C{row}))*B{row}"
 
     fcell = ws.cell(row=row, column=6, value=f_formula)
     fcell.font = FNT_BOLD
@@ -466,8 +430,10 @@ def _write_total_row(ws, row, header_row, first_grade_row, last_grade_row,
     fcell.number_format = ACCT
     fcell.border = THIN
 
-    g_addr = get_column_letter(META_COL) + str(row)
-    gcell = ws.cell(row=row, column=7, value=f"=F{row}*{g_addr}")
+    # Environmental factor inlined as a constant so no hidden helper column
+    # is needed.
+    env = float(env_factor or 0)
+    gcell = ws.cell(row=row, column=7, value=f"=F{row}*{env!r}")
     gcell.font = FNT_BOLD
     gcell.fill = FILL_TOTAL
     gcell.number_format = ACCT
@@ -497,7 +463,7 @@ def _write_total_row(ws, row, header_row, first_grade_row, last_grade_row,
     lcell.number_format = ACCT
     lcell.border = THIN
 
-    mcell = ws.cell(row=row, column=13, value=f"=L{row}*{g_addr}")
+    mcell = ws.cell(row=row, column=13, value=f"=L{row}*{env!r}")
     mcell.font = FNT_BOLD
     mcell.fill = FILL_TOTAL
     mcell.number_format = ACCT
@@ -579,6 +545,9 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
     warm_order = config.get('pool_order') or imp.get('pool_order', [])
     hist_bal_pools = list((imp.get('hist_bal_data') or {}).keys())
     acl_pools_data = imp.get('acl_pools', {}) or {}
+    # Specifically Identified (impaired) balances per pool/grade, used to
+    # derive the Loan Loss Calculation Balance for column B.
+    spec_id_by_pool = imp.get('spec_id_by_pool', {}) or {}
     pools = _merge_pool_orders(
         list(db_pools),
         warm_order,
@@ -614,14 +583,10 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
     # Column widths sized so each header word fits without truncation
     # when wrapped across multiple lines (longest tokens: Distribution=12,
     # Environmental=13, Distributed=11, Aggregated=10, Adjustment=10).
-    widths = [22, 16, 14, 14, 14, 18, 16, 18, 14, 16, 14, 20, 16, 18, 14,
-              0, 12, 12]  # last two: Q (RR flag), R (hidden env_factor)
+    widths = [22, 16, 14, 14, 14, 18, 16, 18, 14, 16, 14, 20, 16, 18, 14]
     for ci, w in enumerate(widths, start=1):
         if w > 0:
             ws.column_dimensions[get_column_letter(ci)].width = w
-
-    # Hide the meta column (R = env_factor).
-    ws.column_dimensions[get_column_letter(META_COL)].hidden = True
 
     # ── Title block (rows 1-3) ──────────────────────────────────
     ws['A1'] = cu
@@ -630,11 +595,6 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
     ws['A2'].font = FNT_TITLE
     ws['A3'] = f"For Period Ending {_snap_display(snapshot_date)}"
     ws['A3'].font = FNT_SUB
-
-    # Sentinel cell Q1 = "Yes" — referenced by every pool's Total row IF.
-    qcell = ws.cell(row=1, column=17, value="Yes")
-    qcell.font = FNT_LBL
-    qcell.alignment = Alignment(horizontal='center')
 
     # User instructions box (rows 1-3 columns J onwards).
     ws['J1'] = "How to use this worksheet"
@@ -671,7 +631,6 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
             risk_rated_flags.get(pool, pool not in nrr)
             if risk_rated_flags else (pool not in nrr)
         )
-        rr_flag = "Yes" if is_rr else "No"
 
         env_factor = _compute_env_factor(
             pool, pdf, grades, config, hist, dq_var_map,
@@ -699,20 +658,16 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
             pool_grade_labels = []
 
         # Block rows — dynamic height with a single pool-name row at the
-        # top (carries the RR Yes/No flag in column Q referenced by the
-        # Total-row formulas), followed by one row per grade (RR pools
-        # only) and a Total row. Letter/formula/column headers are
-        # emitted once globally above the first block, not per pool.
+        # top, followed by one row per grade (RR pools only) and a Total
+        # row. Letter/formula/column headers are emitted once globally
+        # above the first block, not per pool.
         num_grades = len(pool_grade_labels)
         name_row    = block_top
         first_grade = block_top + 1
         total_row   = first_grade + num_grades
         last_grade  = total_row - 1
-        # header_row passed to _write_total_row is the row whose Q cell
-        # holds this pool's RR flag — i.e. the new name_row.
-        header_row  = name_row
 
-        _write_pool_name_row(ws, name_row, pool, rr_flag)
+        _write_pool_name_row(ws, name_row, pool)
 
         # Try WARM-sourced per-grade balance first (matches main report).
         pool_lc = pool.strip().lower()
@@ -724,6 +679,11 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
         bal_detail = imp.get('pool_bal_detail', {}).get(pool, {})
 
         # Render exactly len(pool_grade_labels) grade rows — no padding.
+        # Column B carries the Loan Loss Calculation Balance (Balance with
+        # Specifically Identified / impaired amounts removed) so it matches
+        # the ACL Env by Pool Mgmt Adj tab's "Loan Loss Calc Balance" column.
+        pool_grade_balance_sum = 0.0
+        pool_grade_spec_id_sum = 0.0
         for gi, g in enumerate(pool_grade_labels):
             row_n = first_grade + gi
             wg = warm_grades.get(g, {})
@@ -740,16 +700,28 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
                 balance = float(g_df.get('current_balance', pd.Series(dtype=float)).sum())
             else:
                 balance = 0.0
+            # Specific Identification precedence mirrors the ACL Env by Pool
+            # tab: WARM grade spec_id first, else Impaired Loans detail.
+            specific_id = wg.get('spec_id', 0) if wg else 0
+            if not specific_id and pool in spec_id_by_pool:
+                specific_id = spec_id_by_pool[pool].get(g, 0)
+            calc_bal = (balance or 0) - (specific_id or 0)
+            pool_grade_balance_sum += balance or 0
+            pool_grade_spec_id_sum += specific_id or 0
             dist = (
                 _dist_factor(len(DIST_FACTORS) - 1)
                 if g == no_score else _dist_factor(gi)
             )
-            _write_grade_row(ws, row_n, total_row, g, balance, dist)
+            _write_grade_row(ws, row_n, total_row, g, calc_bal, dist)
 
         # Pool total balance: prefer pool_bal_detail Total; else WARM total;
         # else sum of df.current_balance for the pool.
         ptd = bal_detail.get('Total', {}) if bal_detail else {}
-        if ptd and ptd.get('balance_sheet_total') is not None:
+        if _is_brr_pool(pool, brr_pool_lcs):
+            # BRR pools: derive the Total from the rendered per-grade rows;
+            # pool_bal_detail's Total is keyed to FICO grades only.
+            total_balance = pool_grade_balance_sum
+        elif ptd and ptd.get('balance_sheet_total') is not None:
             total_balance = ptd['balance_sheet_total']
         elif warm_pool and warm_pool.get('total'):
             total_balance = warm_pool['total'].get('balance', 0)
@@ -758,14 +730,27 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
         else:
             total_balance = 0.0
 
+        # Total Specific Identification (impaired) — mirror the ACL Env by
+        # Pool tab so column B holds the Loan Loss Calculation Balance.
+        if _is_brr_pool(pool, brr_pool_lcs):
+            total_spec_id = pool_grade_spec_id_sum
+        else:
+            total_spec_id = (
+                warm_pool['total'].get('spec_id', 0)
+                if warm_pool and warm_pool.get('total') else 0
+            )
+            if not total_spec_id and pool in spec_id_by_pool:
+                total_spec_id = sum(spec_id_by_pool[pool].values())
+        total_calc_bal = (total_balance or 0) - (total_spec_id or 0)
+
         _write_total_row(
-            ws, total_row, header_row, first_grade, last_grade,
-            total_balance, pool_ll, env_factor, mgmt_adj, is_rr, rr_flag,
+            ws, total_row, first_grade, last_grade,
+            total_calc_bal, pool_ll, env_factor, mgmt_adj, is_rr,
         )
         pool_total_rows.append(total_row)
 
         # Modest height bump on the per-pool name row.
-        ws.row_dimensions[header_row].height = 22
+        ws.row_dimensions[name_row].height = 22
 
         block_top = total_row + 1 + BLOCK_GAP
 
@@ -773,14 +758,74 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
     grand_row = block_top + 1
     _write_grand_totals(ws, grand_row, pool_total_rows)
 
+    # ── CECL Adjustment summary (mirrors "ACL Env by Pool Mgmt Adj") ──
+    # These lines sit below the Grand Total in column N (Adjusted Total ACL
+    # Allowance) so the analyst sees how the adjusted pooled allowance rolls
+    # up into the Total Allowance Needed and the resulting overfunded /
+    # underfunded Adjustment. The Specifically Identified Allowance and ACL
+    # Balance are static values pulled from the ACL Env by Pool Mgmt Adj tab
+    # (via hist['impaired']); Total Allowance Needed and Adjustment are live
+    # formulas referencing the Grand Total's column N cell, so they recompute
+    # as the Management Adj cells (column I) are edited.
+    summary_last_row = grand_row
+    if pool_total_rows:
+        # Specifically Identified Allowance — same precedence the ACL Env by
+        # Pool Mgmt Adj tab uses (report_vizo/report_tct._sheet_acl_reserve).
+        _acl_sum = imp.get('acl_summary') or {}
+        _acl_imp = imp.get('acl_impaired') or {}
+        if 'total_spec_allow' in _acl_sum:
+            spec_id_allow = _acl_sum.get('total_spec_allow', 0)
+        elif _acl_imp:
+            spec_id_allow = sum(_acl_imp.values())
+        else:
+            spec_id_allow = imp.get('total_spec_id', 0)
+        oac_total = sum(o['amount'] for o in _other_allowance_considerations(config))
+        acl_bal = imp.get('acl_balance', config.get('acl_balance', 0))
+
+        spec_row   = grand_row + 2
+        needed_row = spec_row + 1
+        balbal_row = needed_row + 1
+        adj_row    = balbal_row + 1
+        summary_last_row = adj_row
+
+        needed_formula = f"=N{grand_row}+N{spec_row}" + (
+            f"+{oac_total}" if oac_total else "")
+
+        summary_lines = [
+            (spec_row, "Total Specifically Identified Allowance",
+             spec_id_allow, FILL_TOTAL),
+            (needed_row, "Total Allowance Needed",
+             needed_formula, FILL_TOTAL),
+            (balbal_row,
+             f"Allowance for Credit Loss Balance as of {_snap_display(snapshot_date)}",
+             acl_bal, FILL_BASE),
+            (adj_row, "Adjustment (Overfunded)",
+             f"=N{needed_row}-N{balbal_row}", FILL_VAR),
+        ]
+        for srow, label, value, fill in summary_lines:
+            lc = ws.cell(row=srow, column=1, value=label)
+            lc.font = FNT_BOLD
+            lc.fill = fill
+            lc.border = THIN
+            for ci in range(2, 14):  # fill/border across A-M for a clean band
+                mc = ws.cell(row=srow, column=ci)
+                mc.fill = fill
+                mc.border = THIN
+            vc = ws.cell(row=srow, column=14, value=value)
+            vc.font = FNT_BOLD
+            vc.fill = fill
+            vc.number_format = ACCT
+            vc.border = THIN
+            ws.cell(row=srow, column=15).border = THIN
+
     # ── Footer note ─────────────────────────────────────────────
-    note_row = grand_row + 3
+    note_row = summary_last_row + 3
     ws.cell(row=note_row, column=1, value=(
         "Note: Yellow cells in column I are the editable management"
         " adjustments. Baseline figures (columns A-H) are static snapshots"
         " from the period-end report and are not linked to any other tab."
-        " The hidden meta column (R) carries each pool's environmental"
-        " factor, used by the G and M formulas."
+        " Each pool's environmental factor is applied directly within the"
+        " G and M formulas."
     )).font = FNT_NOTE
     ws.cell(row=note_row, column=1).alignment = Alignment(wrap_text=True)
     ws.merge_cells(start_row=note_row, start_column=1,

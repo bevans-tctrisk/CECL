@@ -350,6 +350,65 @@
     </p>
   {% endif %}
 
+  {# --- Grade & Pool distribution (resolved from the AIRES extract) --- #}
+  {% set dist = impaired.distribution %}
+  {% if dist and dist.by_pool %}
+    <div style="margin-bottom:18px;">
+      <h4 style="margin:0 0 4px;">Grade &amp; Pool Distribution
+        <span class="muted" style="font-weight:400; font-size:85%;">
+          — grade &amp; pool resolved from the AIRES loan data{% if impaired.source %}
+          ({{ impaired.source }}){% endif %}
+        </span>
+      </h4>
+      <p class="muted" style="margin:4px 0 10px; font-size:88%;">
+        Confirm each impaired loan lands in the expected pool and credit grade.
+        Each loan's grade comes from the FICO score and its pool from the loan
+        code in the matched AIRES record. Pools shaded
+        <span style="background:#fff3d6; padding:0 3px;">yellow</span> route to
+        <code>Ignore</code>/<code>Exclude</code>; a non-zero
+        <strong style="color:#b03a2e;">Not in AIRES</strong> count means those
+        loans were not found in the extract and fell back to their entered
+        loan-type code with grade <em>Not Reported</em>.
+      </p>
+      <table class="data-table" style="font-size:90%;">
+        <thead>
+          <tr>
+            <th>Pool</th>
+            {% for g in dist.grades %}<th style="text-align:right;">{{ g }}</th>{% endfor %}
+            <th style="text-align:right;">#&nbsp;Loans</th>
+            <th style="text-align:right;">Not in AIRES</th>
+            <th style="text-align:right;">Current Balance</th>
+            <th style="text-align:right;">Provision</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in dist.by_pool %}
+          <tr {% if p.is_ignore %}style="background:#fff3d6;"{% endif %}>
+            <td>{% if p.is_ignore %}<em style="color:#b03a2e;">{{ p.pool }}</em>{% else %}{{ p.pool }}{% endif %}</td>
+            {% for g in dist.grades %}
+            <td style="text-align:right;">{{ p.grades.get(g, 0) or '' }}</td>
+            {% endfor %}
+            <td style="text-align:right;">{{ p.count }}</td>
+            <td style="text-align:right;{% if p.unmatched %} color:#b03a2e; font-weight:600;{% endif %}">{{ p.unmatched or '' }}</td>
+            <td style="text-align:right;">${{ "{:,.2f}".format(p.current_balance) }}</td>
+            <td style="text-align:right;">${{ "{:,.2f}".format(p.provision_amount) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr style="font-weight:600; border-top:2px solid #999;">
+            <td>Total</td>
+            {% for g in dist.grades %}<td style="text-align:right;">{{ dist.grade_totals.get(g, 0) or '' }}</td>{% endfor %}
+            <td style="text-align:right;">{{ dist.totals.count }}</td>
+            <td style="text-align:right;{% if dist.totals.unmatched %} color:#b03a2e;{% endif %}">{{ dist.totals.unmatched or '' }}</td>
+            <td style="text-align:right;">${{ "{:,.2f}".format(dist.totals.current_balance) }}</td>
+            <td style="text-align:right;">${{ "{:,.2f}".format(dist.totals.provision_amount) }}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  {% endif %}
+
   {# --- Data rows preview (top 200) -------------------------------- #}
   {% if impaired.data_rows %}
     <details {% if iv.get('unmapped_codes') %}{% else %}open{% endif %} style="margin-bottom:18px;">
@@ -364,6 +423,7 @@
             <th>Type</th>
             <th>Loan Pool</th>
             <th>Credit Grade</th>
+            <th>In AIRES?</th>
             <th style="text-align:right;">Current Balance</th>
             <th style="text-align:right;">Balance (Loan Rpt)</th>
             <th style="text-align:right;">Diff</th>
@@ -381,6 +441,7 @@
             <td><code>{{ row.loan_type or '' }}</code></td>
             <td>{% if _is_ignore %}<em style="color:#b03a2e;">Ignore</em>{% else %}{{ _lp }}{% endif %}</td>
             <td>{{ row.credit_grade or '' }}</td>
+            <td>{% if _unmatched %}<span style="color:#b03a2e;">No</span>{% else %}<span style="color:#2d662d;">Yes</span>{% endif %}</td>
             <td style="text-align:right;">
               {% if row.current_balance is not none %}${{ "{:,.2f}".format(row.current_balance|float) }}{% else %}—{% endif %}
             </td>
@@ -418,6 +479,118 @@
       <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
     </div>
   </form>
+{% elif stage == "awaiting_impaired_decision" %}
+  <div style="background:#fff8e6; border:1px solid #d9a406; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#7a5c00;">&#9888; No recognizable Impaired Loans file</h3>
+    <p style="margin:6px 0;">
+      {% if impaired_reason == "parse_error" %}
+        A file that looks like an impaired-loans workbook was found for
+        <strong>{{ staged_period }}</strong>, but it could not be validated
+        against the expected Impaired Loans format{% if impaired_error %}:
+        <em>{{ impaired_error }}</em>{% endif %}.
+      {% elif impaired_reason == "found_empty" %}
+        An impaired-loans workbook was found for
+        <strong>{{ staged_period }}</strong>, but it contains no impaired
+        loan rows.
+      {% else %}
+        No file matching the Impaired Loans format was found for
+        <strong>{{ staged_period }}</strong> in this credit union's data
+        folder.
+      {% endif %}
+    </p>
+    <p style="margin:6px 0;">
+      Confirm this is correct (the credit union has no impaired loans to
+      report this period), or upload the Impaired Loans report to continue.
+    </p>
+  </div>
+
+  <div style="display:flex; gap:24px; flex-wrap:wrap;">
+    <div style="flex:1; min-width:280px; border:1px solid #cbd7c7; border-radius:6px; padding:14px 16px; background:#f6faf5;">
+      <h4 style="margin-top:0; color:#2d662d;">No impaired loans this month</h4>
+      <p class="muted" style="margin:6px 0 12px;">
+        Confirm the credit union has no impaired loans report for
+        <strong>{{ staged_period }}</strong> and continue to reports.
+      </p>
+      <form method="post" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+        <input type="hidden" name="stage" value="impaired_none">
+        <input type="hidden" name="period" value="{{ staged_period }}">
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+          {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
+        {% endfor %}
+        <button class="btn btn-success" type="submit">Confirm &mdash; no impaired loans &rarr; Run Reports</button>
+      </form>
+    </div>
+
+    <div style="flex:1; min-width:280px; border:1px solid #b9cbe0; border-radius:6px; padding:14px 16px; background:#f3f8ff;">
+      <h4 style="margin-top:0; color:#1a4480;">Upload an Impaired Loans report</h4>
+      <p class="muted" style="margin:6px 0 12px;">
+        Select the Impaired Loans workbook (.xlsx / .xlsm) for
+        <strong>{{ staged_period }}</strong>. It will be saved for this
+        period and re-validated.
+      </p>
+      <form method="post" enctype="multipart/form-data" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+        <input type="hidden" name="stage" value="impaired_uploaded">
+        <input type="hidden" name="period" value="{{ staged_period }}">
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+          {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
+        {% endfor %}
+        <input type="file" name="impaired_file" accept=".xlsx,.xlsm" required style="margin-bottom:10px; display:block;">
+        <button class="btn btn-primary" type="submit">Upload &amp; validate</button>
+      </form>
+    </div>
+  </div>
+
+  <p style="margin-top:16px;">
+    <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
+  </p>
+{% elif stage == "awaiting_balance_decision" %}
+  <div style="background:#fff8e6; border:1px solid #d9a406; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#7a5c00;">&#9888; Balance Adjustment review unavailable</h3>
+    <p style="margin:6px 0;">
+      The per-pool Balance Adjustment review could not be produced for
+      <strong>{{ staged_period }}</strong>{% if balance_error %}:
+      <em>{{ balance_error }}</em>{% endif %}.
+    </p>
+    <p style="margin:6px 0;">
+      This almost always means <strong>no loans were imported</strong> for this
+      period &mdash; most often the loan extract's file name did not match the
+      configured pattern, so the import produced no snapshot to compare against.
+    </p>
+    {% if balance_unmatched %}
+    <p style="margin:6px 0;">Spreadsheets staged but <strong>not matched</strong> by the loan file pattern:</p>
+    <ul style="margin:6px 0 0 18px;">
+      {% for f in balance_unmatched %}<li><code>{{ f }}</code></li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+
+  <div style="display:flex; gap:24px; flex-wrap:wrap;">
+    <div style="flex:1; min-width:280px; border:1px solid #b9cbe0; border-radius:6px; padding:14px 16px; background:#f3f8ff;">
+      <h4 style="margin-top:0; color:#1a4480;">Fix the loan file &amp; retry</h4>
+      <p class="muted" style="margin:6px 0 12px;">
+        Rename the loan extract to match the expected pattern (or relax the
+        pattern in the wizard's Sample step), then start the run again so the
+        loans import and the Balance Adjustment review appears.
+      </p>
+      <a class="btn btn-primary" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Start over</a>
+    </div>
+
+    <div style="flex:1; min-width:280px; border:1px solid #cbd7c7; border-radius:6px; padding:14px 16px; background:#f6faf5;">
+      <h4 style="margin-top:0; color:#2d662d;">Proceed without the review</h4>
+      <p class="muted" style="margin:6px 0 12px;">
+        Continue to the reports anyway. Note: with no imported loans the
+        reports will likely fail or come out empty.
+      </p>
+      <form method="post" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+        <input type="hidden" name="stage" value="balance_none">
+        <input type="hidden" name="period" value="{{ staged_period }}">
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+          {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
+        {% endfor %}
+        <button class="btn" type="submit">Proceed anyway &rarr;</button>
+      </form>
+    </div>
+  </div>
 {% else %}
   <form method="post"
         enctype="multipart/form-data"
