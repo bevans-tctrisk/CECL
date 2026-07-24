@@ -158,6 +158,23 @@ def suggest_for_headers(
 
     store = load()
     counts = store.get("field_to_header_counts", {})
+
+    # Header "ownership": the field that maps each normalized header MOST
+    # often owns it. A header is only suggested for its owner, so cross-field
+    # noise from historical mis-saves (e.g. "account number" appearing a few
+    # times under days_delinquent while dominating member_number) cannot leak
+    # into an unrelated field. Ties keep the header eligible for both.
+    owner: dict[str, str] = {}
+    owner_count: dict[str, int] = {}
+    for fld, bkt in counts.items():
+        if not isinstance(bkt, dict):
+            continue
+        for nrm, cnt in bkt.items():
+            c = int(cnt or 0)
+            if c > owner_count.get(nrm, 0):
+                owner_count[nrm] = c
+                owner[nrm] = fld
+
     out: dict[str, str] = {}
     for field, bucket in counts.items():
         if field in skip or field not in KNOWN_FIELDS:
@@ -165,14 +182,19 @@ def suggest_for_headers(
         if not isinstance(bucket, dict):
             continue
         # Sort candidates by count desc, take the first one that exists in
-        # the current sample headers.
-        for norm, _cnt in sorted(
+        # the current sample headers AND is not more strongly owned by a
+        # different field.
+        for norm, cnt in sorted(
             bucket.items(), key=lambda kv: (-int(kv[1] or 0), kv[0])
         ):
             actual = norm_to_actual.get(norm)
-            if actual:
-                out[field] = actual
-                break
+            if not actual:
+                continue
+            own = owner.get(norm)
+            if own and own != field and owner_count.get(norm, 0) > int(cnt or 0):
+                continue  # another field maps this header more often
+            out[field] = actual
+            break
     return out
 
 

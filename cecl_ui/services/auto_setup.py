@@ -564,12 +564,16 @@ def _copy_into_tmp(src: Path, subfolder: str) -> Path:
 def _safe_period(entry: dict[str, Any]) -> str | None:
     """Return ``YYYY-MM`` period string from a classifier entry, or None."""
     period = entry.get("period")
-    if not period:
-        return None
-    period = str(period)
-    if len(period) >= 7 and period[4] == "-":
-        return period[:7]
-    return None
+    if period:
+        period = str(period)
+        if len(period) >= 7 and period[4] == "-":
+            return period[:7]
+    # Fallback: parse the period straight from the filename. The classifier's
+    # own date extraction misses several common shapes (e.g. the MM-YYYY
+    # prefix in "06-2026 Loans AIRES VIZO.xlsx" or "AIRES 12-31-2025.xlsx"),
+    # which otherwise strands the correct snapshot file and makes the sample
+    # picker fall back to whatever older file DID parse (often a sub-extract).
+    return _fallback_period_from_filename(entry.get("name") or "")
 
 
 def _pick_latest_for_period(
