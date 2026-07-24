@@ -242,6 +242,23 @@ _MM_YYYY_RX = re.compile(r"(?<!\d)(\d{1,2})[-_/](20\d{2})(?!\d)")
 # Many core exports lead the filename with a bare YYYYMMDD stamp.
 _YYYYMMDD_RX = re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)")
 
+# Separator-less MMDDYYYY stamp (e.g. AIRES "... 03312026.xlsx"). Year LAST,
+# so it can't collide with the YYYYMMDD shape above (year first).
+_MMDDYYYY_RX = re.compile(r"(?<!\d)(\d{2})(\d{2})(20\d{2})(?!\d)")
+
+# Month-name + year (2- OR 4-digit), e.g. "Aires March 26.v2.xlsx",
+# "Aires Oct 2025.v2.xlsx", "Mar_2026". The classifier only parses 4-digit
+# years, so 2-digit ones ("March 26" = 2026-03) otherwise strand the file.
+_MONTHNAME_RX = re.compile(
+    r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
+    r"[\s_\-\.]*'?((?:20)?\d{2})(?!\d)",
+    re.IGNORECASE,
+)
+_MONTHNAME_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7,
+    "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
 
 def _fallback_period_from_filename(name: str) -> str | None:
     """Return ``YYYY-MM`` from YYYYMMDD / MM-DD-YYYY / MM-YYYY shapes."""
@@ -250,6 +267,11 @@ def _fallback_period_from_filename(name: str) -> str | None:
         mo = int(m.group(2))
         if 1 <= mo <= 12:
             return f"{m.group(1)}-{mo:02d}"
+    m = _MMDDYYYY_RX.search(name)
+    if m:
+        mo = int(m.group(1))
+        if 1 <= mo <= 12:
+            return f"{m.group(3)}-{mo:02d}"
     m = _MD_YYYY_RX.search(name)
     if m:
         mo = int(m.group(1))
@@ -260,6 +282,14 @@ def _fallback_period_from_filename(name: str) -> str | None:
         mo = int(m.group(1))
         if 1 <= mo <= 12:
             return f"{m.group(2)}-{mo:02d}"
+    m = _MONTHNAME_RX.search(name)
+    if m:
+        mo = _MONTHNAME_MAP.get(m.group(1).lower())
+        yr = int(m.group(2))
+        if yr < 100:
+            yr += 2000
+        if mo and 2000 <= yr <= 2099:
+            return f"{yr}-{mo:02d}"
     return None
 
 
@@ -662,19 +692,31 @@ _CODE_MAP_RX = re.compile(
     re.IGNORECASE,
 )
 
+# A delivered "lookup" / "cross-reference" workbook often IS the code->pool
+# map under a generic name (e.g. Curis "...-All Lookups-...xlsx", whose
+# "Assets" sheet is Loan Type Code / Description / Pool). Content is validated
+# downstream by _parse_code_map_file (returns {} without a pool column).
+_LOOKUP_RX = re.compile(r"(?:lookups?|cross[\s_\-]*reference|xref)", re.IGNORECASE)
+
 
 def _looks_like_code_map(name: str) -> bool:
     n = name or ""
     if not n.lower().endswith((".xlsx", ".xls")):
         return False
     nl = n.lower()
-    # Require a pool/code-map signal so we don't grab transaction files that
-    # merely mention "Loan Type Code" (e.g. "CO & Recs by Loan Type Code
-    # 02282026.xlsx" — a charge-off/recovery file, NOT a code->pool map).
-    if not (re.search(r"pools?\b", nl)
-            or re.search(r"code[\s_\-]*map(?:ping)?", nl)):
-        return False
-    return bool(_CODE_MAP_RX.search(n))
+    # Explicit code-map naming: require a pool/code-map signal so we don't
+    # grab transaction files that merely mention "Loan Type Code" (e.g.
+    # "CO & Recs by Loan Type Code 02282026.xlsx" — a charge-off/recovery
+    # file, NOT a code->pool map).
+    if (re.search(r"pools?\b", nl) or re.search(r"code[\s_\-]*map(?:ping)?", nl)) \
+            and _CODE_MAP_RX.search(n):
+        return True
+    # Generic "lookup" / "cross-reference" workbook — often IS the code->pool
+    # map under a bland name (e.g. Curis "...-All Lookups-...xlsx"). Safe to
+    # flag: _parse_code_map_file returns {} unless it carries a pool column.
+    if _LOOKUP_RX.search(nl):
+        return True
+    return False
 
 
 def _norm_hdr(h: Any) -> str:
@@ -783,7 +825,12 @@ def _parse_code_map_file(
             pool_distinct = len({v for v in cmap.values()})
             if desc_idx is not None and len(cmap) >= 6 and pool_distinct <= 3:
                 desc_map = _build(desc_idx)
-                if len({v for v in desc_map.values()}) > pool_distinct:
+                desc_distinct = len({v for v in desc_map.values()})
+                # Use the finer Description column only when it yields a sane
+                # pool count. A near-one-per-code Description (e.g. Curis's
+                # dealer/product names "Groove Car New Auto") is product-level,
+                # not CECL pooling — keep the coarse Pool column in that case.
+                if pool_distinct < desc_distinct <= 20:
                     cmap = desc_map
                     quality = 1
             if _score(cmap) > _score(best):

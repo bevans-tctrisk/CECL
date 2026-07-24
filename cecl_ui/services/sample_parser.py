@@ -548,19 +548,40 @@ def _match_columns(headers: list[str]) -> dict[str, str]:
     norm_headers = [(h, _normalise(h)) for h in headers]
     for field, keywords in COLUMN_HEURISTICS:
         exclude = _FIELD_EXCLUDE.get(field, ())
+        kws = [_normalise(kw) for kw in keywords]
+
+        def _ok(original: str, norm: str) -> bool:
+            if original in used:
+                return False
+            if exclude and any(x in norm for x in exclude):
+                return False
+            return True
+
         match: str | None = None
-        for kw in keywords:
-            kw_n = _normalise(kw)
+        # Pass 1 (preferred): a keyword is a SUBSTRING OF the header — a
+        # specific, high-confidence match. Keyword order carries priority.
+        for kw_n in kws:
+            if not kw_n:
+                continue
             for original, norm in norm_headers:
-                if original in used:
-                    continue
-                if exclude and any(x in norm for x in exclude):
-                    continue
-                if kw_n in norm or norm in kw_n:
+                if _ok(original, norm) and kw_n in norm:
                     match = original
                     break
             if match:
                 break
+        # Pass 2 (fallback): the header is a substring of a keyword — an
+        # abbreviation like "bal" -> "balance". Only runs when no specific
+        # match exists, so a bare "Loan" header can't reverse-match the
+        # longer "loan_code"/"loan_pool" keywords and steal loan_pool_code
+        # from the real "Loan Code" column.
+        if not match:
+            for kw_n in kws:
+                for original, norm in norm_headers:
+                    if _ok(original, norm) and norm and norm in kw_n:
+                        match = original
+                        break
+                if match:
+                    break
         if match:
             out[field] = match
             used.add(match)
