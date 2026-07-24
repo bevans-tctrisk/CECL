@@ -654,21 +654,23 @@ def _norm_hdr(h: Any) -> str:
 
 def _parse_code_map_file(
     path: str, known_codes: "list[str] | set[str] | None" = None
-) -> dict[str, str]:
-    """Parse a delivered code->pool workbook -> ``{code(str): pool(str)}``.
+) -> "tuple[dict[str, str], int]":
+    """Parse a delivered code->pool workbook -> ``({code: pool}, quality)``.
 
-    Robust to header naming: the POOL column is the one whose header contains
-    ``pool`` (preferring an exact ``pool`` over a coarser ``group``); the CODE
-    column is chosen by best overlap of its values with *known_codes* (the
-    codes already seeded on the loan sample), falling back to a ``code``-named
-    header. Across sheets/columns the parse that maps the most known codes
-    (tiebreak: most distinct pools = the finer, reviewed granularity) wins.
-    Best-effort: returns ``{}`` on any failure.
+    The POOL column is the one whose header contains ``pool``; the CODE column
+    is chosen by best overlap of its values with *known_codes* (falling back to
+    a ``code``-named header). When the ``pool`` column is DEGENERATE — a coarse
+    super-category (<=3 distinct values over >=6 mapped codes, e.g. just
+    "Consumer"/"Real Estate") — and a finer ``Description`` column exists, the
+    Description column is used instead. ``quality`` is 2 when a genuine pool
+    column was used, 1 for the description fallback, so file-selection can
+    prefer a file that ships real CECL pools (protects multi-file CUs whose
+    curated pool column is the intended granularity). ``{}, 0`` on failure.
     """
     try:
         import openpyxl
     except Exception:  # noqa: BLE001
-        return {}
+        return {}, 0
     known = {str(k).strip() for k in (known_codes or []) if str(k).strip()}
 
     def _score(m: dict[str, str]) -> tuple[int, int]:
@@ -678,8 +680,9 @@ def _parse_code_map_file(
     try:
         wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     except Exception:  # noqa: BLE001
-        return {}
+        return {}, 0
     best: dict[str, str] = {}
+    best_q = 0
     try:
         for sh in wb.sheetnames:
             rows = [
@@ -724,21 +727,42 @@ def _parse_code_map_file(
                         break
             if code_idx is None:
                 continue
-            cmap: dict[str, str] = {}
-            for r in rows[1:]:
-                if code_idx >= len(r) or pool_idx >= len(r):
+            desc_idx = None
+            for i, h in enumerate(hdr):
+                if i in (pool_idx, code_idx):
                     continue
-                c, p = r[code_idx], r[pool_idx]
-                if c is None or p is None:
-                    continue
-                c, p = str(c).strip(), str(p).strip()
-                if c and p and c.lower() != "nan" and p.lower() != "nan":
-                    cmap.setdefault(c, p)
+                hn = _norm_hdr(h)
+                if "desc" in hn or hn in ("product", "category"):
+                    desc_idx = i
+                    break
+
+            def _build(val_idx: int) -> dict[str, str]:
+                m: dict[str, str] = {}
+                for r in rows[1:]:
+                    if code_idx >= len(r) or val_idx >= len(r):
+                        continue
+                    c, p = r[code_idx], r[val_idx]
+                    if c is None or p is None:
+                        continue
+                    c, p = str(c).strip(), str(p).strip()
+                    if c and p and c.lower() != "nan" and p.lower() != "nan":
+                        m.setdefault(c, p)
+                return m
+
+            cmap = _build(pool_idx)
+            quality = 2
+            pool_distinct = len({v for v in cmap.values()})
+            if desc_idx is not None and len(cmap) >= 6 and pool_distinct <= 3:
+                desc_map = _build(desc_idx)
+                if len({v for v in desc_map.values()}) > pool_distinct:
+                    cmap = desc_map
+                    quality = 1
             if _score(cmap) > _score(best):
                 best = cmap
+                best_q = quality
     finally:
         wb.close()
-    return best
+    return best, best_q
 
 
 def _apply_code_map_to_pool_map(
@@ -757,16 +781,22 @@ def _apply_code_map_to_pool_map(
     known = list(pm.keys())
     best_map: dict[str, str] = {}
     best_src = ""
-
-    def _score(m: dict[str, str]) -> tuple[int, int]:
-        return (len(set(m) & set(known)), len({v for v in m.values()}))
+    best_key: tuple[int, int, int] = (-1, -1, -1)
 
     for entry in code_map_files:
         path = entry.get("path") or entry.get("saved_path")
         if not path:
             continue
-        m = _parse_code_map_file(path, known)
-        if _score(m) > _score(best_map):
+        m, quality = _parse_code_map_file(path, known)
+        # Prefer: most known codes mapped, then a genuine pool column over a
+        # description fallback, then most distinct pools.
+        key = (
+            len(set(m) & set(known)),
+            quality,
+            len({v for v in m.values()}),
+        )
+        if key > best_key and m:
+            best_key = key
             best_map = m
             best_src = entry.get("name") or str(path)
     if not best_map:
