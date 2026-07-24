@@ -638,6 +638,13 @@ def _looks_like_code_map(name: str) -> bool:
     n = name or ""
     if not n.lower().endswith((".xlsx", ".xls")):
         return False
+    nl = n.lower()
+    # Require a pool/code-map signal so we don't grab transaction files that
+    # merely mention "Loan Type Code" (e.g. "CO & Recs by Loan Type Code
+    # 02282026.xlsx" — a charge-off/recovery file, NOT a code->pool map).
+    if not (re.search(r"pools?\b", nl)
+            or re.search(r"code[\s_\-]*map(?:ping)?", nl)):
+        return False
     return bool(_CODE_MAP_RX.search(n))
 
 
