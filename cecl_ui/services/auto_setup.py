@@ -619,6 +619,192 @@ def _pick_latest_for_period(
 
 
 # --------------------------------------------------------------------------
+# Delivered code -> pool map workbook (Loan Type / Collateral Code -> Pool)
+# --------------------------------------------------------------------------
+
+# Filename hints for a delivered "loan code -> pool" reference workbook
+# (e.g. "<CU> Loan Type Codes and Collateral Codes with Pools.xlsx"). These
+# are NOT loan extracts; they carry the analyst's intended code->pool mapping.
+_CODE_MAP_RX = re.compile(
+    r"(?:loan[\s_\-]*type[\s_\-]*codes?"
+    r"|collateral[\s_\-]*codes?"
+    r"|codes?[\s_\-]*(?:and|&|with|to)[\s_\-]*(?:collateral|pools?)"
+    r"|code[\s_\-]*map(?:ping)?)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_code_map(name: str) -> bool:
+    n = name or ""
+    if not n.lower().endswith((".xlsx", ".xls")):
+        return False
+    return bool(_CODE_MAP_RX.search(n))
+
+
+def _norm_hdr(h: Any) -> str:
+    return re.sub(r"\s+", " ", str(h).strip()).lower() if h is not None else ""
+
+
+def _parse_code_map_file(
+    path: str, known_codes: "list[str] | set[str] | None" = None
+) -> dict[str, str]:
+    """Parse a delivered code->pool workbook -> ``{code(str): pool(str)}``.
+
+    Robust to header naming: the POOL column is the one whose header contains
+    ``pool`` (preferring an exact ``pool`` over a coarser ``group``); the CODE
+    column is chosen by best overlap of its values with *known_codes* (the
+    codes already seeded on the loan sample), falling back to a ``code``-named
+    header. Across sheets/columns the parse that maps the most known codes
+    (tiebreak: most distinct pools = the finer, reviewed granularity) wins.
+    Best-effort: returns ``{}`` on any failure.
+    """
+    try:
+        import openpyxl
+    except Exception:  # noqa: BLE001
+        return {}
+    known = {str(k).strip() for k in (known_codes or []) if str(k).strip()}
+
+    def _score(m: dict[str, str]) -> tuple[int, int]:
+        mk = len(set(m) & known) if known else len(m)
+        return (mk, len({v for v in m.values()}))
+
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    except Exception:  # noqa: BLE001
+        return {}
+    best: dict[str, str] = {}
+    try:
+        for sh in wb.sheetnames:
+            rows = [
+                r for r in wb[sh].iter_rows(values_only=True)
+                if any(c is not None for c in r)
+            ]
+            if len(rows) < 2:
+                continue
+            hdr = rows[0]
+            pool_idx = None
+            for i, h in enumerate(hdr):
+                if _norm_hdr(h) in ("pool", "pool name", "cecl pool"):
+                    pool_idx = i
+                    break
+            if pool_idx is None:
+                for i, h in enumerate(hdr):
+                    if "pool" in _norm_hdr(h):
+                        pool_idx = i
+                        break
+            if pool_idx is None:
+                continue
+            code_idx = None
+            if known:
+                best_ov = 0
+                for i in range(len(hdr)):
+                    if i == pool_idx:
+                        continue
+                    vals = {
+                        str(r[i]).strip()
+                        for r in rows[1:] if i < len(r) and r[i] is not None
+                    }
+                    ov = len(vals & known)
+                    if ov > best_ov:
+                        best_ov = ov
+                        code_idx = i
+            if code_idx is None:
+                for i, h in enumerate(hdr):
+                    hn = _norm_hdr(h)
+                    if ("code" in hn and "lookup" not in hn
+                            and "key" not in hn and i != pool_idx):
+                        code_idx = i
+                        break
+            if code_idx is None:
+                continue
+            cmap: dict[str, str] = {}
+            for r in rows[1:]:
+                if code_idx >= len(r) or pool_idx >= len(r):
+                    continue
+                c, p = r[code_idx], r[pool_idx]
+                if c is None or p is None:
+                    continue
+                c, p = str(c).strip(), str(p).strip()
+                if c and p and c.lower() != "nan" and p.lower() != "nan":
+                    cmap.setdefault(c, p)
+            if _score(cmap) > _score(best):
+                best = cmap
+    finally:
+        wb.close()
+    return best
+
+
+def _apply_code_map_to_pool_map(
+    state: dict[str, Any], code_map_files: list[dict[str, Any]]
+) -> list[str]:
+    """Fill ``pool_map`` VALUES from a delivered code->pool workbook.
+
+    Only proposes: fills codes currently blank / ``Ignore`` and registers the
+    proposed pool names into ``pool_settings``. The delivered map is a strong
+    PROPOSAL (not ground truth — it can carry errors), so the caller keeps the
+    pools step flagged for human review.
+    """
+    pm = state.get("pool_map") or {}
+    if not pm or not code_map_files:
+        return []
+    known = list(pm.keys())
+    best_map: dict[str, str] = {}
+    best_src = ""
+
+    def _score(m: dict[str, str]) -> tuple[int, int]:
+        return (len(set(m) & set(known)), len({v for v in m.values()}))
+
+    for entry in code_map_files:
+        path = entry.get("path") or entry.get("saved_path")
+        if not path:
+            continue
+        m = _parse_code_map_file(path, known)
+        if _score(m) > _score(best_map):
+            best_map = m
+            best_src = entry.get("name") or str(path)
+    if not best_map:
+        return []
+
+    filled = 0
+    proposed_pools: set[str] = set()
+    for code in list(pm.keys()):
+        cur = pm.get(code)
+        if (not cur or str(cur).strip().lower() == "ignore") and code in best_map:
+            pool = best_map[code]
+            pm[code] = pool
+            proposed_pools.add(pool)
+            filled += 1
+    if not filled:
+        return []
+
+    existing = {
+        (p.get("name") or "").strip().lower()
+        for p in (state.get("pool_settings") or [])
+    }
+    ps = state.setdefault("pool_settings", [])
+    added = 0
+    for pool in sorted(proposed_pools):
+        key = pool.strip().lower()
+        if key and key != "ignore" and key not in existing:
+            ps.append({
+                "name": pool,
+                "risk_rated": False,
+                "brr": False,
+                "acl_months": _default_acl_months_for_pool(pool),
+                "use_default_mgmt_adj": False,
+                "excluded": False,
+            })
+            existing.add(key)
+            added += 1
+    state["_code_map_proposed_count"] = filled
+    return [
+        f"pool_map: pre-filled {filled} code(s) from delivered code map "
+        f"'{best_src}' ({len(proposed_pools)} distinct pool(s); {added} new "
+        "pool(s) added to Loan Pools) — REVIEW these proposals before saving"
+    ]
+
+
+# --------------------------------------------------------------------------
 # Findings runner
 # --------------------------------------------------------------------------
 
@@ -670,6 +856,7 @@ def scan_folder_for_setup(
         "co_file": None,
         "recov_file": None,
         "pool_seed": None,
+        "code_map_files": [],
         "messages": [],
         "errors": [],
     }
@@ -1123,6 +1310,20 @@ def scan_folder_for_setup(
     out["recov_file"] = _pick_latest_for_period(
         cls.get("recov_files") or [], snapshot_yyyymm
     )
+
+    # ----- Delivered code -> pool map workbook(s) ------------------------
+    # Reference workbooks (not loan extracts) carrying the analyst's intended
+    # loan-code -> pool mapping; land in ``other_files`` from classification.
+    code_map_files = [
+        e for e in (cls.get("other_files") or [])
+        if _looks_like_code_map(e.get("name") or "")
+    ]
+    out["code_map_files"] = code_map_files
+    if code_map_files:
+        out["messages"].append(
+            f"Detected {len(code_map_files)} loan-code map workbook(s) "
+            "(code -> pool proposals for the Loan Code Mapping step)"
+        )
 
     return out
 
@@ -3361,6 +3562,16 @@ def apply_findings_to_state(
                 "pool_map seeded with detected codes (all 'Ignore' — rename to your real pool names)"
             )
 
+    # ----- Delivered code -> pool map: pre-fill pool_map VALUES ----------
+    # Runs AFTER the sample seeded pool_map with the raw codes, so the code
+    # column can be matched by overlap. Proposals only (kept under review).
+    code_map_msgs = _apply_code_map_to_pool_map(
+        state, findings.get("code_map_files") or []
+    )
+    if code_map_msgs:
+        report.setdefault("pools", []).extend(code_map_msgs)
+        report.setdefault("loan_pools", []).extend(code_map_msgs)
+
     # ----- monthly_bal step (annual or per-month) ----------------------
     if findings.get("annual_bal"):
         msgs = _apply_annual_bal_to_state(state, findings["annual_bal"])
@@ -3618,6 +3829,11 @@ def compute_hil_needs(state: dict[str, Any]) -> list[dict[str, Any]]:
         elif ignore_count:
             add("pools", "recommended",
                 f"{ignore_count} of {len(pm)} loan codes still set to 'Ignore'")
+        elif state.get("_code_map_proposed_count") and "pools" not in user_done:
+            add("pools", "recommended",
+                f"{int(state['_code_map_proposed_count'])} loan code(s) were "
+                "pre-mapped to pools from the delivered code-map workbook — "
+                "verify the assignments (a delivered map can contain errors)")
     else:
         add("pools", "recommended", "No loan codes detected — upload a sample on the Loan Data Extracts step")
 
