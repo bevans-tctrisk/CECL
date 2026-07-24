@@ -60,8 +60,9 @@ COLUMN_HEURISTICS: list[tuple[str, list[str]]] = [
                               "apr"]),
     ("open_date",            ["lndopen", "open_date", "orig_date",
                               "origination_date", "open"]),
-    ("original_loan_amount", ["lndorg", "original_loan_amount", "orig_amt",
-                              "original_amount", "loan_amount", "orig"]),
+    ("original_loan_amount", ["lndorg", "original_loan_amount", "loan_original",
+                              "orig_amt", "orig_amount", "original_amount",
+                              "original_amnt", "loan_amount", "orig"]),
     ("total_available_credit", ["lndcrlim", "total_available_credit",
                                  "available_credit", "credit_limit",
                                  "line_of_credit", "loc_limit", "loc",
@@ -82,6 +83,14 @@ COLUMN_HEURISTICS: list[tuple[str, list[str]]] = [
 # suffix-length discovery.
 _FIELD_EXCLUDE: dict[str, tuple[str, ...]] = {
     "member_number": ("name",),
+    # The bare ``"orig"`` keyword otherwise grabs non-amount "orig*" columns
+    # that precede the real amount header, e.g. "ORIG NBR PYMTS" (original
+    # number of payments) or "LOAN ORIGINAL DATE". Skip anything that reads as
+    # a date / payment-count / term / rate / score rather than a dollar amount.
+    "original_loan_amount": (
+        "date", "pymt", "payment", "nbr", "number", "count",
+        "term", "rate", "score", "delinq", "due",
+    ),
 }
 
 
