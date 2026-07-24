@@ -166,12 +166,15 @@ def _decisions(warm: dict, cfg: dict) -> list[dict[str, Any]]:
 
 def derive(warm_path: str, *, short_name: str = "",
            snapshot_date: str | None = None,
-           reports: dict | None = None) -> dict[str, Any]:
+           reports: dict | None = None,
+           headerless: bool = False) -> dict[str, Any]:
     """Parse a WARM workbook and assemble the config draft + review decisions.
 
     Returns ``{"ok", "warm", "config", "decisions", "overall_tier", "error"}``.
     Delivery-specific fields (loan-file pattern / folders) are left blank for
-    the loan-extract step to fill.
+    the loan-extract step to fill. Pass ``headerless=True`` when the delivered
+    loan extract has no header row so column_mappings are emitted as 0-based
+    integer positions (from the WARM Data-tab column trace) instead of names.
     """
     try:
         warm = wp.parse_warm(warm_path)
@@ -191,6 +194,7 @@ def derive(warm_path: str, *, short_name: str = "",
         snapshot_date=snap,
         warm_folder=warm_folder,
         reports=reports,
+        headerless=headerless,
     )
 
     # ``build_config_from_warm`` only emits a credit_pull block when a standalone

@@ -267,6 +267,32 @@ def _trace(hdr: dict, datarow: dict, col_idx: int, depth: int = 0, seen=None):
     return raws, cross
 
 
+def _trace_to_index(hdr: dict, datarow: dict, col_idx: int,
+                    depth: int = 0, seen=None):
+    """Follow a cell's formula chain to the RAW source column and return that
+    column's 1-based index (openpyxl column number). The WARM Data tab pastes
+    the raw core extract starting at column A, so this index maps directly to
+    the delivered extract's position (0-based = index-1) — needed to emit
+    positional column_mappings for HEADERLESS loan files. Mirrors ``_trace``
+    but returns the leaf column index instead of its header name."""
+    seen = set() if seen is None else seen
+    if depth > 6 or col_idx in seen:
+        return None
+    seen.add(col_idx)
+    v = datarow.get(col_idx)
+    if not (isinstance(v, str) and v.startswith("=")):
+        return col_idx  # raw pasted value -> this IS the source column
+    for cl, _rr in _col_refs(v):
+        try:
+            ci2 = _ci(cl)
+        except ValueError:
+            continue
+        r = _trace_to_index(hdr, datarow, ci2, depth + 1, seen)
+        if r:
+            return r
+    return None
+
+
 def _detect_member_account(hdr: dict, datarow: dict, mem_c, suf_c) -> dict:
     """Infer member_account mode from the Member/Suffix helper formulas.
 
@@ -307,6 +333,7 @@ class WarmDataTab:
     tab: str = ""
     data_row: int | None = None
     column_mappings: dict = field(default_factory=dict)  # config field -> raw header
+    column_indices: dict = field(default_factory=dict)   # config field -> 0-based raw col (headerless)
     member_account: dict = field(default_factory=dict)
     original_score_source: str = ""
     current_score_source: str = ""   # 'credit_pull' or a raw header
@@ -350,6 +377,14 @@ def parse_data_tab(ws) -> WarmDataTab:
         raws, cross = _trace(hdr, datarow, c)
         return (raws[0] if raws else None), cross
 
+    def raw_idx0(header_key):
+        """0-based raw column index for a header key (headerless mapping)."""
+        c = name2idx.get(header_key)
+        if not c:
+            return None
+        ti = _trace_to_index(hdr, datarow, c)
+        return (ti - 1) if ti else None
+
     for field_name, hkey in (
             ("current_balance", "current balance"),
             ("loan_pool_code", "loan type"),
@@ -358,6 +393,9 @@ def parse_data_tab(ws) -> WarmDataTab:
         src, _ = first_raw(hkey)
         if src:
             out.column_mappings[field_name] = src
+            _i0 = raw_idx0(hkey)
+            if _i0 is not None:
+                out.column_indices[field_name] = _i0
 
     org_src, _ = first_raw("org score")
     if not org_src:
@@ -365,6 +403,11 @@ def parse_data_tab(ws) -> WarmDataTab:
     if org_src:
         out.original_score_source = org_src
         out.column_mappings["original_fico_score"] = org_src
+        _i0 = raw_idx0("org score")
+        if _i0 is None:
+            _i0 = raw_idx0("original credit score")
+        if _i0 is not None:
+            out.column_indices["original_fico_score"] = _i0
 
     cur_c = name2idx.get("curr score from pull") or name2idx.get("current credit score")
     if cur_c:
@@ -374,11 +417,19 @@ def parse_data_tab(ws) -> WarmDataTab:
         elif raws:
             out.current_score_source = raws[0]
             out.column_mappings["current_fico_score"] = raws[0]
+            _ti = _trace_to_index(hdr, datarow, cur_c)
+            if _ti:
+                out.column_indices["current_fico_score"] = _ti - 1
 
     out.member_account = _detect_member_account(
         hdr, datarow, name2idx.get("member"), name2idx.get("suffix"))
     if out.member_account.get("member_source"):
         out.column_mappings["member_number"] = out.member_account["member_source"]
+        _mc = name2idx.get("member")
+        if _mc:
+            _ti = _trace_to_index(hdr, datarow, _mc)
+            if _ti:
+                out.column_indices["member_number"] = _ti - 1
 
     # open_date (loan origination date): the WARM's 'Open Date' final column is
     # a snapshot placeholder (=EOMONTH(snapshot)), so formula-tracing won't find
@@ -388,6 +439,10 @@ def parse_data_tab(ws) -> WarmDataTab:
         _u = _txt(_nm).upper()
         if _u == "LNDOPEN" or (("OPEN" in _u) and ("DATE" in _u)) or _u.endswith("OPEN"):
             out.column_mappings["open_date"] = _txt(_nm)
+            # NOTE: no column_indices["open_date"] — this header scan can match
+            # the WARM's own computed 'Open Date' placeholder rather than the raw
+            # origination column, so its position is unreliable for a headerless
+            # extract. The interactive loan-extract step supplies it if needed.
             break
 
     # SSN column carried from the raw extract (credit-pull join key for CUs
@@ -631,6 +686,7 @@ def parse_warm(path: str) -> dict:
             dt = parse_data_tab(wbf[latest])
             result["data_tab_used"] = latest
             result["column_mappings"] = dt.column_mappings
+            result["column_indices"] = dt.column_indices
             result["member_account"] = dt.member_account
             result["score_sources"] = {"original": dt.original_score_source,
                                         "current": dt.current_score_source}

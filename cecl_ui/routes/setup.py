@@ -1448,6 +1448,13 @@ def _merge_autoderive_into_state(state: dict[str, Any], cfg: dict[str, Any]) -> 
         state["column_mappings"] = merged
         filled.append(f"{len(cm)} column mapping(s)")
 
+    # Headerless positional extract: when the assembled cfg marks the loan
+    # file as header-less (integer column_mappings from the WARM Data-tab
+    # column trace), propagate that so build_yaml emits has_header: false.
+    if cfg.get("has_header") is False:
+        state["has_header"] = False
+        filled.append("headerless extract (positional columns)")
+
     # Member / account key (mode + suffix).
     ma = cfg.get("member_account") or {}
     if ma.get("mode") and state.get("member_account") == defaults["member_account"]:
@@ -1614,6 +1621,14 @@ def step2_warm():
                             if _ad.get("ok"):
                                 ad_filled = _merge_autoderive_into_state(
                                     state, _ad["config"])
+                                # Stash the WARM Data-tab column POSITIONS so the
+                                # loan-extract step can swap the named mappings
+                                # for 0-based integers if the delivered extract
+                                # turns out to be headerless (Franklin/Bridgeton
+                                # positional AIRES files).
+                                state["_warm_column_indices"] = (
+                                    (_ad.get("warm") or {}).get("column_indices")
+                                    or {})
                                 # Steps the WARM auto-derive fully covers ->
                                 # rendered green (review-only) so the user flows
                                 # to the interactive steps (loan extract, monthly
@@ -3848,6 +3863,25 @@ def _seed_loan_data_entry_mapping(
             entry["member_account"] = {
                 "mode": "fixed_suffix", "suffix_length": 3, "delimiter": "-",
             }
+
+    # WARM headerless overlay: for a positional (header-less) core extract the
+    # WARM Data-tab column trace gives authoritative 0-based positions
+    # (Franklin/Bridgeton AIRES files). Prefer them over the parser's
+    # col_<LETTER> suggestions so the file imports correctly, and mark the
+    # extract header-less so build_yaml emits integer column_mappings.
+    if not bool(analysis.get("has_header")):
+        widx = {k: int(v)
+                for k, v in (state.get("_warm_column_indices") or {}).items()
+                if isinstance(v, int)}
+        if widx:
+            ecm = dict(entry.get("column_mappings") or {})
+            ecm.update(widx)
+            entry["column_mappings"] = ecm
+            entry["has_header"] = False
+            state["has_header"] = False
+            tcm = dict(state.get("column_mappings") or {})
+            tcm.update(widx)
+            state["column_mappings"] = tcm
     return None
 
 

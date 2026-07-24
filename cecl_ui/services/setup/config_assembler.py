@@ -36,6 +36,7 @@ def build_config_from_warm(
     credit_pull_folder: str | None = None,
     warm_folder: str | None = None,
     reports: dict | None = None,
+    headerless: bool = False,
 ) -> dict:
     """Build a client-config dict from a ``parse_warm`` result.
 
@@ -45,6 +46,15 @@ def build_config_from_warm(
     meta = warm.get("cu_meta") or {}
     econ = meta.get("economic_stress") or {}
     cmap = dict(warm.get("column_mappings") or {})
+    cidx = dict(warm.get("column_indices") or {})
+    # HEADERLESS loan extracts (e.g. Franklin, Bridgeton AIRES positional files)
+    # have no header row, so column_mappings must be 0-based integer positions
+    # (import_data uses df.iloc[:, pos]). The WARM Data tab pastes the raw
+    # extract at column A, so column_indices maps each field to its delivered
+    # position. Fall back to named mappings when the file has a header row.
+    _headerless = bool(headerless) and bool(cidx)
+    _cols = cidx if _headerless else cmap
+    _has_header = not _headerless
     ma = dict(warm.get("member_account") or {})
     ma_clean = {k: ma[k] for k in ("mode", "suffix_length") if k in ma}
 
@@ -61,9 +71,9 @@ def build_config_from_warm(
         "data_directory": delivery_folder,
         "loan_file_folder": delivery_folder,
         "loan_file_recursive": True,
-        "has_header": True,
+        "has_header": _has_header,
         "member_account": ma_clean or {"mode": "fixed_suffix", "suffix_length": 0},
-        "column_mappings": cmap,
+        "column_mappings": _cols,
         "pool_map": dict(warm.get("pool_map") or {}),
         "default_pool": "Ignore",
         "credit_grades": list(warm.get("credit_grades") or []),
@@ -131,9 +141,9 @@ def build_config_from_warm(
     cfg["loan_data_extracts"] = [{
         "label": core_extract_label,
         "file_pattern": loan_file_pattern,
-        "column_mappings": cmap,
+        "column_mappings": _cols,
         "member_account": ma_clean or {"mode": "fixed_suffix", "suffix_length": 0},
-        "has_header": True,
+        "has_header": _has_header,
     }]
 
     # pools (balance-only participation pools included; carried by monthly book)

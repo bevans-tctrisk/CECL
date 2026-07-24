@@ -247,6 +247,15 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         "economic_data": state["economic_data"],
         "mgmt_adj": state.get("mgmt_adj") or {"ltv_baseline": 0.9, "probability_factor": 0.35},
     })
+    # Headerless positional extracts address columns by 0-based integer
+    # position; drop any leftover named/placeholder mappings (default-state
+    # strings like 'DQ_DAYS'/'OPEN_DATE') that can't resolve to a position so
+    # the importer doesn't warn or mis-read. Keep ints and ``*_static`` keys.
+    if not cfg["has_header"]:
+        cfg["column_mappings"] = {
+            k: v for k, v in (cfg.get("column_mappings") or {}).items()
+            if isinstance(v, int) or str(k).endswith("_static")
+        }
     # Per-pool management-adjustment overlay — only emitted when non-empty so
     # the YAML stays clean for CUs that don't use it.
     overlay = state.get("mgmt_adj_by_pool") or {}
@@ -269,6 +278,12 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         ma_lf = lf.get("member_account") or {}
         if not cm:
             continue
+        # Headerless extract: keep only integer positions / *_static keys.
+        if not bool(lf.get("has_header")):
+            cm = {k: v for k, v in cm.items()
+                  if isinstance(v, int) or str(k).endswith("_static")}
+            if not cm:
+                continue
         entry: dict[str, Any] = {
             "label": lf.get("name") or "",
             "file_pattern": lf.get("file_pattern") or "",
