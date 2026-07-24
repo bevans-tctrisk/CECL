@@ -576,6 +576,36 @@ def _safe_period(entry: dict[str, Any]) -> str | None:
     return _fallback_period_from_filename(entry.get("name") or "")
 
 
+def _norm_ym(s: Any) -> str | None:
+    """Normalize ``YYYYMM`` / ``YYYY-MM`` / ``YYYY_MM`` (or a full date) to
+    ``YYYY-MM``; ``None`` when it can't. Callers pass snapshots in either the
+    dashed (``report_period`` = "2026-03") or bare (``snapshot_yyyymm`` =
+    "202603") form, while ``_safe_period`` yields dashed — so the exact-period
+    match must normalise both sides or it silently falls back to the latest
+    file (picking a later sub-extract instead of the requested snapshot).
+    """
+    if not s:
+        return None
+    digits = re.sub(r"[^0-9]", "", str(s))
+    if len(digits) >= 6 and digits[:6].isdigit():
+        mo = int(digits[4:6])
+        if 1 <= mo <= 12:
+            return f"{digits[:4]}-{digits[4:6]}"
+    return None
+
+
+# Filename keywords that denote a PARTIAL / subsystem loan extract (mortgage /
+# CUMA / HELOC / LOC sub-lists) rather than the CU's primary loan file. Used to
+# keep a sub-extract from driving the top-level column mapping when it shares
+# the snapshot period with the main extract. NOTE: deliberately excludes
+# "credit card" — AIRES primaries are often named "... without Credit Cards".
+_SUBSYSTEM_RX = re.compile(
+    r"(cuma|mortgage|premier|redicash|heloc|"
+    r"line[\s_\-]*of[\s_\-]*credit|\bloc\b|share[\s_\-]*secured)",
+    re.IGNORECASE,
+)
+
+
 def _pick_latest_for_period(
     entries: list[dict[str, Any]], snapshot_yyyymm: str | None
 ) -> dict[str, Any] | None:
@@ -591,16 +621,11 @@ def _pick_latest_for_period(
     if not entries:
         return None
 
+    snapshot_yyyymm = _norm_ym(snapshot_yyyymm) or snapshot_yyyymm
+
     def _is_subsystem(name: str) -> bool:
         # These keywords typically denote a partial / subsystem extract.
-        return bool(
-            re.search(
-                r"(cuma|mortgage|premier|redicash|line[\s_\-]*of[\s_\-]*credit|"
-                r"share[\s_\-]*secured)",
-                name or "",
-                re.IGNORECASE,
-            )
-        )
+        return bool(_SUBSYSTEM_RX.search(name or ""))
 
     if snapshot_yyyymm:
         matches = [e for e in entries if _safe_period(e) == snapshot_yyyymm]
@@ -921,6 +946,7 @@ def scan_folder_for_setup(
     )
 
     # ----- Loan extract sample (drives column_mappings + pool_codes) -----
+    snapshot_yyyymm = _norm_ym(snapshot_yyyymm) or snapshot_yyyymm
     loan_files = cls.get("loan_data_files") or []
     sample_entry = _pick_latest_for_period(loan_files, snapshot_yyyymm)
     sample_candidates: list[dict[str, Any]] = []
@@ -966,7 +992,7 @@ def scan_folder_for_setup(
 
     best_analysis: dict[str, Any] | None = None
     best_entry: dict[str, Any] | None = None
-    best_score = -1
+    best_score: tuple[int, int] = (-1, -1)
     extracts: list[dict[str, Any]] = []
     for cand in sample_candidates:
         src = Path(cand["path"])
@@ -1029,11 +1055,17 @@ def scan_folder_for_setup(
         if no_split:
             ex_entry["pool_code_split"] = ""
         extracts.append(ex_entry)
-        # Score = #column mappings + #pool codes. Higher = better
-        # foothold for the wizard.
+        # Score = (primary-extract?, #column mappings + #pool codes). A
+        # non-subsystem (main) extract ALWAYS outranks a sub-extract
+        # (CUMA / mortgage / credit-card) for the TOP-LEVEL column mapping,
+        # even when the sub-extract's friendlier headers let the keyword
+        # parser match more columns (the main extract's cryptic headers are
+        # filled from the learned store later). Sub-extracts are still
+        # STAGED in ``extracts`` for the multi-file Column Mappings step.
         score = (
+            0 if _SUBSYSTEM_RX.search(cand.get("name", "")) else 1,
             len(analysis.get("column_suggestions") or {})
-            + len(analysis.get("pool_code_suggestions") or [])
+            + len(analysis.get("pool_code_suggestions") or []),
         )
         if score > best_score:
             best_score = score
