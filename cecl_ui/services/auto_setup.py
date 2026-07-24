@@ -41,6 +41,7 @@ from typing import Any
 
 from cecl_ui.services import (
     config_service,
+    column_mapping_suggestions,
     monthly_bal_parser,
     sample_parser,
     warm_parser,
@@ -1377,6 +1378,43 @@ def _apply_sample_to_state(
     if filled:
         msgs.append(f"column_mappings filled: {', '.join(sorted(filled))}")
 
+    # Cross-CU learned suggestions — fill any field the sample parser
+    # couldn't auto-detect, using the header most other credit unions have
+    # mapped to that field (restricted to headers present in THIS sample).
+    # This is the SAME learned store the interactive Columns step consults
+    # (routes.setup._apply_sample_to_state); applying it during the
+    # auto-scan means cryptic core headers keyword-matching can't infer
+    # (e.g. 'col_cd' -> loan_pool_code, 'User_Defined_Field_7' ->
+    # original_fico_score) are filled up front, shrinking the manual step.
+    # Never overrides a real (non-placeholder) mapping.
+    _placeholder_cols = {
+        "MEMBER_ID", "BALANCE", "FICO_SCORE", "LOAN_TYPE",
+        "DQ_DAYS", "INT_RATE", "OPEN_DATE", "ORIG_AMT",
+    }
+    headers_now = sample.get("headers") or []
+    if headers_now:
+        already_real = {
+            f for f, v in cm.items()
+            if v and v not in _placeholder_cols
+        }
+        try:
+            learned = column_mapping_suggestions.suggest_for_headers(
+                headers_now, skip_fields=already_real
+            )
+        except Exception:  # noqa: BLE001
+            learned = {}
+        learned_filled = []
+        for field, header in learned.items():
+            cur = cm.get(field, "")
+            if not cur or cur in _placeholder_cols:
+                cm[field] = header
+                learned_filled.append(field)
+        if learned_filled:
+            msgs.append(
+                "column_mappings filled from cross-CU history: "
+                + ", ".join(sorted(learned_filled))
+            )
+
     # File pattern + date pattern (drives importer file discovery).
     if sample.get("file_pattern"):
         state["file_pattern"] = sample["file_pattern"]
@@ -1418,6 +1456,59 @@ def _apply_sample_to_state(
             f"pool_map seeded with {seeded} code(s) (all set to 'Ignore' — "
             "rename on the Loan Code Mapping step)"
         )
+
+    # Fallback pool-code seeding: when the sample parser detected NO pool
+    # column (pool_code_suggestions empty -> pm still empty) but the learned
+    # store just mapped loan_pool_code to a REAL header, read the distinct
+    # codes straight from that column so the user only renames pools instead
+    # of typing every code. Bounded + fully guarded; a distinct-count cap
+    # avoids mis-seeding if the mapped column is not actually a code column.
+    lpc_header = cm.get("loan_pool_code")
+    if (not pm) and lpc_header and lpc_header not in _placeholder_cols \
+            and sample.get("saved_path"):
+        try:
+            import pandas as pd
+            # sample_parser reports header_row 1-based; pandas wants 0-based.
+            # Try the most-likely offset first, then fall back, selecting
+            # whichever read makes the mapped header appear as a column.
+            _hr = sample.get("header_row")
+            _cands = ([_hr - 1, _hr, 0] if isinstance(_hr, int) else [0])
+            _df = None
+            for _h in _cands:
+                if _h is None or _h < 0:
+                    continue
+                try:
+                    _tmp = pd.read_excel(sample["saved_path"], header=_h, dtype=str)
+                except Exception:  # noqa: BLE001
+                    continue
+                if lpc_header in _tmp.columns:
+                    _df = _tmp
+                    break
+            if _df is not None:
+                _split = state.get("pool_code_split") or "/"
+                _seen: list[str] = []
+                _seenset: set[str] = set()
+                for _v in _df[lpc_header].dropna().tolist():
+                    _c = str(_v).strip()
+                    if _split and _split in _c:
+                        _c = _c.split(_split)[0].strip()
+                    if _c and _c.lower() != "nan" and _c not in _seenset:
+                        _seenset.add(_c)
+                        _seen.append(_c)
+                # Only seed when the distinct-code count is pool-code-plausible
+                # (a real loan-type/collateral-code column has few distinct
+                # values; hundreds means we mapped the wrong column).
+                if _seen and len(_seen) <= 100:
+                    for _code in _seen:
+                        if _code not in pm:
+                            pm[_code] = hist.get(_code) or "Ignore"
+                    msgs.append(
+                        f"pool_map seeded with {len(_seen)} code(s) read from "
+                        f"the '{lpc_header}' column (all 'Ignore' — rename on "
+                        "the Loan Code Mapping step)"
+                    )
+        except Exception:  # noqa: BLE001
+            pass
 
     # Sensible split-char default (learned from Census FCU greenfield).
     if not state.get("pool_code_split"):
@@ -3192,6 +3283,28 @@ def _apply_warm_findings_to_state(
     return msgs
 
 
+# Process-level guard so the learned-store warm-start runs at most once per
+# worker (idempotent anyway, but this avoids re-globbing client_configs on
+# every scan).
+_LEARNED_STORE_WARMED = False
+
+
+def _ensure_learned_store_warm(workspace_root: str | Path) -> None:
+    """Backfill the cross-CU learned column store from validated client
+    configs, once per process. Fully best-effort — never raises.
+    """
+    global _LEARNED_STORE_WARMED
+    if _LEARNED_STORE_WARMED:
+        return
+    _LEARNED_STORE_WARMED = True
+    try:
+        cfg_dir = Path(workspace_root) / "client_configs"
+        if cfg_dir.is_dir():
+            column_mapping_suggestions.backfill_from_config_dir(str(cfg_dir))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def apply_findings_to_state(
     state: dict[str, Any],
     findings: dict[str, Any],
@@ -3205,6 +3318,11 @@ def apply_findings_to_state(
     can render per-step status badges off the same dict.
     """
     report: dict[str, list[str]] = {}
+
+    # Warm-start the cross-CU learned column store from the already-validated
+    # client configs (idempotent, once per process) so a fresh CU's cryptic
+    # core headers are recognised from prior onboardings. Best-effort.
+    _ensure_learned_store_warm(workspace_root)
 
     if not findings.get("ok"):
         report.setdefault("identity", []).append(
@@ -3558,14 +3676,60 @@ def compute_hil_needs(state: dict[str, Any]) -> list[dict[str, Any]]:
         add("impaired", "recommended",
             "Impaired-loans file staged — review parsed rows before final save")
 
+    # sample / loan extract — required when the auto-scan completed but
+    # found NO loan-data extract. Without a loan file the column_mappings,
+    # file_pattern, and pool_map remain PLACEHOLDER DEFAULTS that pass the
+    # "blank" checks below (member_number='MEMBER_ID', file_pattern=
+    # 'LOANDATA.*') yet won't match the CU's real data — so those steps
+    # would otherwise show no HIL and mislead the user into thinking the
+    # values were derived. Scoped to the non-WARM path (WARM CUs derive
+    # column mappings from the WARM Data tab, not a loan sample).
+    if state.get("_auto_scan_completed") and state.get("has_warm_files") != "yes":
+        sample_staged = bool(
+            (state.get("sample_uploads") or {}).get("loan_data_files")
+        )
+        if not sample_staged:
+            add("sample", "required",
+                "No loan-data extract was found in the scanned folder — "
+                "upload the monthly loan file so column mappings, file "
+                "pattern, and loan-code pools can be derived (they are "
+                "currently placeholder defaults, not values from your data)")
+
     # files — recommended when we auto-filled from sample
     if not state.get("file_pattern"):
         add("files", "required", "File pattern is blank")
 
-    # columns — required when member_number unmapped
+    # columns — required when member_number unmapped, plus detection of
+    # factory PLACEHOLDER sentinels that survived an auto-scan (the sample's
+    # column-suggester could not match them to a real header). Placeholders
+    # are non-blank so they pass a naive "unmapped" test, yet they are NOT
+    # real columns. loan_pool_code is the most damaging: a placeholder there
+    # yields an EMPTY pool_map (no loan codes extracted from the sample).
     cm = state.get("column_mappings") or {}
-    if not cm.get("member_number"):
+    _placeholder_cols = {
+        "MEMBER_ID", "BALANCE", "FICO_SCORE", "LOAN_TYPE",
+        "DQ_DAYS", "INT_RATE", "OPEN_DATE", "ORIG_AMT",
+    }
+    _scanned = bool(state.get("_auto_scan_completed"))
+    _mnum = cm.get("member_number")
+    if not _mnum or (_scanned and _mnum in _placeholder_cols):
         add("columns", "required", "member_number column is unmapped")
+    if _scanned:
+        _lpc = cm.get("loan_pool_code")
+        if isinstance(_lpc, str) and _lpc in _placeholder_cols:
+            add("columns", "required",
+                "loan_pool_code is still the placeholder 'LOAN_TYPE' — the "
+                "loan file's pool/collateral-code column was not auto-detected; "
+                "map it on the Column Mappings step (until then pool_map is empty)")
+        _other = sorted(
+            k for k, v in cm.items()
+            if k not in ("member_number", "loan_pool_code")
+            and isinstance(v, str) and v in _placeholder_cols
+        )
+        if _other:
+            add("columns", "recommended",
+                "Columns still at placeholder defaults (not matched to a real "
+                "header): " + ", ".join(_other))
 
     # mgmt_adj — recommended review (we applied baseline defaults)
     if state.get("_auto_scan_completed"):
