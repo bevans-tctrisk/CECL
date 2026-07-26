@@ -999,15 +999,18 @@ def scan_folder_for_setup(
     sample_candidates: list[dict[str, Any]] = []
     if sample_entry:
         sample_candidates.append(sample_entry)
-        # If multiple files share the snapshot period, queue them so
-        # multi-extract CUs (e.g. AIRES + CUMA) stage all their
-        # snapshot extracts on Step 13 and the best-scoring one
-        # still drives the top-level state.
-        if snapshot_yyyymm:
+        # Group SIBLING extracts that share the sample's ACTUAL period (which
+        # may differ from the requested snapshot when we fell back to the
+        # latest available data), so multi-bucket CUs (Symitar ceclce/cecloe/
+        # ceclcc, AIRES + CUMA) stage ALL their same-period extracts — both
+        # for the multi-file Column Mappings step and for pool-code
+        # aggregation. The best-scoring non-subsystem one still drives state.
+        effective_period = _safe_period(sample_entry)
+        if effective_period:
             for e in loan_files:
                 if e is sample_entry:
                     continue
-                if _safe_period(e) == snapshot_yyyymm:
+                if _safe_period(e) == effective_period:
                     sample_candidates.append(e)
         else:
             # No snapshot pinned -- group remaining files by file_pattern
@@ -1654,6 +1657,89 @@ def _apply_mgmt_adj_defaults(state: dict[str, Any]) -> None:
     state["mgmt_adj"] = cur
 
 
+def _read_distinct_codes(
+    path: str | None, header: str | None, header_row: Any, split: str = "/"
+) -> list[str]:
+    """Read the distinct pool codes from *header* column of a loan extract.
+
+    Robust to the sample_parser 1-based ``header_row`` (tries offsets); splits
+    each value on *split* and keeps the leading segment. Returns ``[]`` on any
+    failure or when the column has >100 distinct values (not a code column).
+    """
+    if not path or not header:
+        return []
+    try:
+        import pandas as pd
+    except Exception:  # noqa: BLE001
+        return []
+    cands = ([header_row - 1, header_row, 0]
+             if isinstance(header_row, int) else [0])
+    df = None
+    for h in cands:
+        if h is None or h < 0:
+            continue
+        try:
+            tmp = pd.read_excel(path, header=h, dtype=str)
+        except Exception:  # noqa: BLE001
+            continue
+        if header in tmp.columns:
+            df = tmp
+            break
+    if df is None:
+        return []
+    seen: list[str] = []
+    seenset: set[str] = set()
+    for v in df[header].dropna().tolist():
+        c = str(v).strip()
+        if split and split in c:
+            c = c.split(split)[0].strip()
+        if c and c.lower() != "nan" and c not in seenset:
+            seenset.add(c)
+            seen.append(c)
+    return seen if len(seen) <= 100 else []
+
+
+def _aggregate_pool_codes_from_extracts(
+    state: dict[str, Any], extracts: list[dict[str, Any]]
+) -> int:
+    """Union pool codes from EVERY staged loan extract into ``pool_map``.
+
+    Multi-bucket CUs split their loan codes across several files (Symitar
+    ceclce/cecloe/ceclcc, AIRES + CUMA), each with its OWN pool-code column.
+    The primary extract only seeds its own codes; this fills the rest so the
+    delivered code-map can name the full set. New codes are added as
+    ``Ignore``; existing entries (incl. code-map names) are never clobbered.
+    Returns the number of codes added.
+    """
+    pm = state.setdefault("pool_map", {})
+    hist = state.get("_pool_map_history") or {}
+    split = state.get("pool_code_split") or "/"
+    before = len(pm)
+    for ex in (extracts or []):
+        a = ex.get("analysis") or {}
+        codes = list(a.get("pool_code_suggestions") or [])
+        if not codes:
+            lpc = (a.get("column_suggestions") or {}).get("loan_pool_code")
+            if not lpc or lpc in _placeholder_cols:
+                try:
+                    learned = column_mapping_suggestions.suggest_for_headers(
+                        a.get("headers") or []
+                    )
+                    lpc = learned.get("loan_pool_code")
+                except Exception:  # noqa: BLE001
+                    lpc = None
+            codes = _read_distinct_codes(
+                ex.get("saved_path"), lpc, a.get("header_row"), split
+            )
+        for c in codes:
+            c = str(c).strip()
+            if split and split in c:
+                c = c.split(split)[0].strip()
+            if c and c.lower() != "nan" and c not in pm:
+                pm[c] = hist.get(c) or "Ignore"
+    return len(pm) - before
+
+
 def _apply_sample_to_state(
     state: dict[str, Any],
     sample: dict[str, Any],
@@ -1787,49 +1873,19 @@ def _apply_sample_to_state(
     lpc_header = cm.get("loan_pool_code")
     if (not pm) and lpc_header and lpc_header not in _placeholder_cols \
             and sample.get("saved_path"):
-        try:
-            import pandas as pd
-            # sample_parser reports header_row 1-based; pandas wants 0-based.
-            # Try the most-likely offset first, then fall back, selecting
-            # whichever read makes the mapped header appear as a column.
-            _hr = sample.get("header_row")
-            _cands = ([_hr - 1, _hr, 0] if isinstance(_hr, int) else [0])
-            _df = None
-            for _h in _cands:
-                if _h is None or _h < 0:
-                    continue
-                try:
-                    _tmp = pd.read_excel(sample["saved_path"], header=_h, dtype=str)
-                except Exception:  # noqa: BLE001
-                    continue
-                if lpc_header in _tmp.columns:
-                    _df = _tmp
-                    break
-            if _df is not None:
-                _split = state.get("pool_code_split") or "/"
-                _seen: list[str] = []
-                _seenset: set[str] = set()
-                for _v in _df[lpc_header].dropna().tolist():
-                    _c = str(_v).strip()
-                    if _split and _split in _c:
-                        _c = _c.split(_split)[0].strip()
-                    if _c and _c.lower() != "nan" and _c not in _seenset:
-                        _seenset.add(_c)
-                        _seen.append(_c)
-                # Only seed when the distinct-code count is pool-code-plausible
-                # (a real loan-type/collateral-code column has few distinct
-                # values; hundreds means we mapped the wrong column).
-                if _seen and len(_seen) <= 100:
-                    for _code in _seen:
-                        if _code not in pm:
-                            pm[_code] = hist.get(_code) or "Ignore"
-                    msgs.append(
-                        f"pool_map seeded with {len(_seen)} code(s) read from "
-                        f"the '{lpc_header}' column (all 'Ignore' — rename on "
-                        "the Loan Code Mapping step)"
-                    )
-        except Exception:  # noqa: BLE001
-            pass
+        _codes = _read_distinct_codes(
+            sample["saved_path"], lpc_header, sample.get("header_row"),
+            state.get("pool_code_split") or "/",
+        )
+        if _codes:
+            for _code in _codes:
+                if _code not in pm:
+                    pm[_code] = hist.get(_code) or "Ignore"
+            msgs.append(
+                f"pool_map seeded with {len(_codes)} code(s) read from the "
+                f"'{lpc_header}' column (all 'Ignore' — rename on the Loan "
+                "Code Mapping step)"
+            )
 
     # Sensible split-char default (learned from Census FCU greenfield).
     if not state.get("pool_code_split"):
@@ -3681,6 +3737,18 @@ def apply_findings_to_state(
             report.setdefault("pools", []).append(
                 "pool_map seeded with detected codes (all 'Ignore' — rename to your real pool names)"
             )
+
+    # ----- Aggregate pool codes across ALL staged extracts --------------
+    # Multi-bucket CUs split codes over several same-period files; union them
+    # so the code-map can name the full set (runs BEFORE the code-map fill).
+    agg_added = _aggregate_pool_codes_from_extracts(
+        state, findings.get("sample_extracts") or []
+    )
+    if agg_added:
+        report.setdefault("pools", []).append(
+            f"pool_map: +{agg_added} additional code(s) aggregated from other "
+            "loan extract(s)"
+        )
 
     # ----- Delivered code -> pool map: pre-fill pool_map VALUES ----------
     # Runs AFTER the sample seeded pool_map with the raw codes, so the code
