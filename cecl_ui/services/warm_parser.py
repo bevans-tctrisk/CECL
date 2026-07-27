@@ -1030,6 +1030,15 @@ _WARM_FILE_RX = re.compile(
 _CO_FILE_RX = re.compile(
     r"(charge[\s_\-]*off|charge_off_track|co[\s_\-]*hist)", re.IGNORECASE
 )
+# A loan extract delivered "without charge-offs" (AIRES exports named
+# "... WO Charge-offs" / "W/O Charge-offs" / "Without Charge-offs" /
+# "Excluding Charge-offs") carries the charge-off token but is NOT a
+# charge-off tracking file — the charge-off signal is negated. Detect the
+# negation so such files fall through to the loan-data branch below.
+_CO_NEGATED_RX = re.compile(
+    r"(\bw[\s._/\-]*o\b|without|excluding|excl\.?)[\s._/\-]*charge[\s_\-]*off",
+    re.IGNORECASE,
+)
 _RECOV_FILE_RX = re.compile(
     r"(recov(?:er(?:y|ies))?|historical[\s_\-]*recov)", re.IGNORECASE
 )
@@ -1153,7 +1162,7 @@ def scan_historical_folder(folder: str | Path) -> dict[str, Any]:
             continue
 
         lname = name.lower()
-        if _CO_FILE_RX.search(lname):
+        if _CO_FILE_RX.search(lname) and not _CO_NEGATED_RX.search(lname):
             entry["period"] = _period_from_filename(name)
             result["co_files"].append(entry)
         elif _IMPAIRED_FILE_RX.search(lname):

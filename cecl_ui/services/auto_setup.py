@@ -631,6 +631,7 @@ def _norm_ym(s: Any) -> str | None:
 # "credit card" — AIRES primaries are often named "... without Credit Cards".
 _SUBSYSTEM_RX = re.compile(
     r"(cuma|mortgage|premier|redicash|heloc|"
+    r"\bcardholder\b|"
     r"line[\s_\-]*of[\s_\-]*credit|\bloc\b|share[\s_\-]*secured)",
     re.IGNORECASE,
 )
@@ -826,6 +827,15 @@ def _parse_code_map_file(
                         break
             if pool_idx is None:
                 continue
+            # Some delivered code maps carry MORE than one pool column (e.g.
+            # "Pools" plus "Pool after Dec 2018"): the primary column has
+            # gaps that a secondary pool column fills. Collect the other
+            # ``pool``-named columns (in header order) so blank primary
+            # cells coalesce onto them, matching how the analyst merges them.
+            pool_fallback_idxs = [
+                i for i, h in enumerate(hdr)
+                if i != pool_idx and "pool" in _norm_hdr(h)
+            ]
             code_idx = None
             if known:
                 best_ov = 0
@@ -851,19 +861,29 @@ def _parse_code_map_file(
                 continue
             desc_idx = None
             for i, h in enumerate(hdr):
-                if i in (pool_idx, code_idx):
+                if i in (pool_idx, code_idx) or i in pool_fallback_idxs:
                     continue
                 hn = _norm_hdr(h)
                 if "desc" in hn or hn in ("product", "category"):
                     desc_idx = i
                     break
 
-            def _build(val_idx: int) -> dict[str, str]:
+            def _build(val_idx: int, fallbacks: "list[int] | None" = None) -> dict[str, str]:
+                fbs = fallbacks or []
                 m: dict[str, str] = {}
                 for r in rows[1:]:
-                    if code_idx >= len(r) or val_idx >= len(r):
+                    if code_idx >= len(r):
                         continue
-                    c, p = r[code_idx], r[val_idx]
+                    c = r[code_idx]
+                    # Coalesce the pool value across the primary column and any
+                    # fallback pool columns (first non-blank wins).
+                    p = None
+                    for vi in (val_idx, *fbs):
+                        if vi < len(r) and r[vi] is not None \
+                                and str(r[vi]).strip() \
+                                and str(r[vi]).strip().lower() != "nan":
+                            p = r[vi]
+                            break
                     if c is None or p is None:
                         continue
                     c, p = str(c).strip(), str(p).strip()
@@ -871,7 +891,7 @@ def _parse_code_map_file(
                         m.setdefault(c, p)
                 return m
 
-            cmap = _build(pool_idx)
+            cmap = _build(pool_idx, pool_fallback_idxs)
             pool_vals = list(cmap.values())
             _distinct_pools = set(pool_vals)
             pool_distinct = len(_distinct_pools)
