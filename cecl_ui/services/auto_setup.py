@@ -723,6 +723,56 @@ def _norm_hdr(h: Any) -> str:
     return re.sub(r"\s+", " ", str(h).strip()).lower() if h is not None else ""
 
 
+# A code-map "Pool" column whose values are dominated by these GENERIC
+# super-categories (rather than real loan-category names) is a coarse
+# risk-grouping, not the CU's CECL pooling — so we look to the Description
+# column (and, when it is product-level, the NCUA-5300 mapper) instead.
+_GENERIC_POOL_TERMS: frozenset[str] = frozenset({
+    "secured", "unsecured", "consumer", "consumer loans", "real estate",
+    "real estate loans", "negative shares", "other", "all other",
+    "secured loans", "unsecured loans", "consumer secured loans",
+})
+
+# Description-keyword -> canonical NCUA 5300 loan category. Ordered: the first
+# rule whose pattern matches a loan-type Description wins (specific first). Used
+# to collapse product-level Descriptions (e.g. Symitar loan-type tables with
+# 100+ products) into the call-report categories analysts actually pool by.
+_NCUA_CATEGORY_RULES: list[tuple[str, "re.Pattern[str]"]] = [
+    ("Unsecured Credit Card Loans",
+     re.compile(r"credit\s*card|master\s*card|\bvisa\b|cardholder|\bcc\b", re.I)),
+    ("New Vehicle Loans",
+     re.compile(r"new\s+(auto|car|truck|vehicle|van|suv|motor)", re.I)),
+    ("Used Vehicle Loans",
+     re.compile(r"used\s+(auto|car|truck|vehicle|van|suv|motor)|pre[-\s]*owned", re.I)),
+    ("Total Loans/Lines of Credit Secured by Junior Lien 1-4 Family Residential Properties",
+     re.compile(r"heloc|home\s*equity|2nd\s*(mtg|mort|lien|trust)|"
+                r"second\s*(mtg|mort|lien|trust)|junior\s*lien|\bhe\b", re.I)),
+    ("Total Loans/Lines of Credit Secured by 1st Lien 1-4 Family Residential Properties",
+     re.compile(r"1st\s*(mtg|mort|lien|trust)|first\s*(mtg|mort|lien|trust)|"
+                r"mortgage|\barm\b|\d+\s*yr\s*fixed|fixed\s*rate\s*(mtg|mort)|"
+                r"residential", re.I)),
+    ("Commercial/Member Business Loans",
+     re.compile(r"commercial|member\s*business|\bmbl\b|\bbusiness\b", re.I)),
+    ("All Other Secured Non-RE Loans/Lines of Credit",
+     re.compile(r"share\s*secured|cd\s*secured|certificate\s*secured|"
+                r"savings\s*secured|collateral|\bboat\b|\brv\b|recreation|"
+                r"motorcycle|camper|\batv\b|trailer|jet\s*ski|snowmobile", re.I)),
+    ("All Other Unsecured Loans/LOC",
+     re.compile(r"signature|personal|unsecured|bill\s*consol|debt\s*consol|"
+                r"overdraft|courtesy\s*pay|line\s*of\s*credit|\bloc\b|holiday|"
+                r"vacation|attorney|repair|consolidat", re.I)),
+]
+
+
+def _description_to_ncua(desc: str) -> str | None:
+    """Map a loan-type description to a canonical NCUA 5300 category, or None."""
+    d = str(desc or "")
+    for name, rx in _NCUA_CATEGORY_RULES:
+        if rx.search(d):
+            return name
+    return None
+
+
 def _parse_code_map_file(
     path: str, known_codes: "list[str] | set[str] | None" = None
 ) -> "tuple[dict[str, str], int]":
@@ -821,19 +871,37 @@ def _parse_code_map_file(
                 return m
 
             cmap = _build(pool_idx)
-            quality = 2
-            pool_distinct = len({v for v in cmap.values()})
-            if desc_idx is not None and len(cmap) >= 6 and pool_distinct <= 3:
+            pool_vals = list(cmap.values())
+            pool_distinct = len(set(pool_vals))
+            # Is the Pool column a coarse super-category grouping (Secured/
+            # Unsecured/Consumer/Real Estate) rather than real CECL pools?
+            _generic = sum(
+                1 for v in pool_vals if _norm_hdr(v) in _GENERIC_POOL_TERMS
+            )
+            _mostly_generic = bool(pool_vals) and _generic / len(pool_vals) >= 0.5
+            # Quality tiers (higher wins across candidate files):
+            #   3 native Pool column with specific names (Signature Loans, ...)
+            #   2 NCUA-5300 categories mapped from a product-level Description
+            #   1 Description used as-is (its labels ARE the pools)
+            #   0 native Pool column that is only a coarse super-category
+            quality = 0 if _mostly_generic else 3
+            if desc_idx is not None and len(cmap) >= 6 \
+                    and (pool_distinct <= 3 or _mostly_generic):
                 desc_map = _build(desc_idx)
                 desc_distinct = len({v for v in desc_map.values()})
-                # Use the finer Description column only when it yields a sane
-                # pool count. A near-one-per-code Description (e.g. Curis's
-                # dealer/product names "Groove Car New Auto") is product-level,
-                # not CECL pooling — keep the coarse Pool column in that case.
                 if pool_distinct < desc_distinct <= 20:
                     cmap = desc_map
                     quality = 1
-            if _score(cmap) > _score(best):
+                elif desc_distinct > 20:
+                    ncua = {}
+                    for _c, _d in desc_map.items():
+                        _cat = _description_to_ncua(_d)
+                        if _cat:
+                            ncua[_c] = _cat
+                    if len(ncua) >= 0.5 * len(desc_map):
+                        cmap = ncua
+                        quality = 2
+            if (quality, _score(cmap)) > (best_q, _score(best)):
                 best = cmap
                 best_q = quality
     finally:
@@ -864,11 +932,12 @@ def _apply_code_map_to_pool_map(
         if not path:
             continue
         m, quality = _parse_code_map_file(path, known)
-        # Prefer: most known codes mapped, then a genuine pool column over a
-        # description fallback, then most distinct pools.
+        # Prefer: highest pool-quality tier (specific pool / NCUA categories
+        # over a coarse Secured/Unsecured grouping), then most known codes
+        # mapped, then most distinct pools.
         key = (
-            len(set(m) & set(known)),
             quality,
+            len(set(m) & set(known)),
             len({v for v in m.values()}),
         )
         if key > best_key and m:
