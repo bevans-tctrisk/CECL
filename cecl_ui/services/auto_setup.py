@@ -983,7 +983,27 @@ def _apply_code_map_to_pool_map(
             pm[code] = pool
             proposed_pools.add(pool)
             filled += 1
-    if not filled:
+
+    # ---- Seed the FULL delivered code table (system-match guarded) ------
+    # When the code-map's code system MATCHES the extract's — i.e. a majority
+    # of the extract's active codes appear in the map — the delivered map IS
+    # the CU's authoritative code table, so seed EVERY code from it (not just
+    # the ones active in this month's snapshot). This pre-maps historical /
+    # inactive codes too, matching how the analyst loads the whole table.
+    # SKIPPED when the systems differ (e.g. an alpha-mnemonic loan file vs a
+    # numeric code map, as at Curis / Jackson River) — seeding those would
+    # add codes that never match a loan. Never clobbers existing entries.
+    seeded_full = 0
+    if known:
+        coverage = len(set(best_map) & set(known)) / len(known)
+        if coverage >= 0.5:
+            for code, pool in best_map.items():
+                if code not in pm:
+                    pm[code] = pool
+                    proposed_pools.add(pool)
+                    seeded_full += 1
+
+    if not filled and not seeded_full:
         return []
 
     existing = {
@@ -1005,11 +1025,17 @@ def _apply_code_map_to_pool_map(
             })
             existing.add(key)
             added += 1
-    state["_code_map_proposed_count"] = filled
+    state["_code_map_proposed_count"] = filled + seeded_full
+    seeded_note = (
+        f"; +{seeded_full} inactive code(s) seeded from the full delivered "
+        "code table"
+        if seeded_full else ""
+    )
     return [
-        f"pool_map: pre-filled {filled} code(s) from delivered code map "
+        f"pool_map: pre-filled {filled} active code(s) from delivered code map "
         f"'{best_src}' ({len(proposed_pools)} distinct pool(s); {added} new "
-        "pool(s) added to Loan Pools) — REVIEW these proposals before saving"
+        f"pool(s) added to Loan Pools){seeded_note} — REVIEW these proposals "
+        "before saving"
     ]
 
 
