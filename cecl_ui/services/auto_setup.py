@@ -730,7 +730,8 @@ def _norm_hdr(h: Any) -> str:
 _GENERIC_POOL_TERMS: frozenset[str] = frozenset({
     "secured", "unsecured", "consumer", "consumer loans", "real estate",
     "real estate loans", "negative shares", "other", "all other",
-    "secured loans", "unsecured loans", "consumer secured loans",
+    "all other secured", "all other unsecured", "secured loans",
+    "unsecured loans", "consumer secured loans",
 })
 
 # Description-keyword -> canonical NCUA 5300 loan category. Ordered: the first
@@ -872,13 +873,19 @@ def _parse_code_map_file(
 
             cmap = _build(pool_idx)
             pool_vals = list(cmap.values())
-            pool_distinct = len(set(pool_vals))
+            _distinct_pools = set(pool_vals)
+            pool_distinct = len(_distinct_pools)
             # Is the Pool column a coarse super-category grouping (Secured/
             # Unsecured/Consumer/Real Estate) rather than real CECL pools?
+            # Measured over DISTINCT values: a column like {Unsecured Loans,
+            # New Vehicle Loan, Credit Card, ...} is a real scheme even though
+            # some labels ("Unsecured Loans") are generic-sounding, whereas
+            # {Secured, Unsecured, Negative Shares} is a true super-category.
             _generic = sum(
-                1 for v in pool_vals if _norm_hdr(v) in _GENERIC_POOL_TERMS
+                1 for v in _distinct_pools if _norm_hdr(v) in _GENERIC_POOL_TERMS
             )
-            _mostly_generic = bool(pool_vals) and _generic / len(pool_vals) >= 0.5
+            _mostly_generic = bool(_distinct_pools) \
+                and _generic / len(_distinct_pools) >= 0.5
             # Quality tiers (higher wins across candidate files):
             #   3 native Pool column with specific names (Signature Loans, ...)
             #   2 NCUA-5300 categories mapped from a product-level Description
