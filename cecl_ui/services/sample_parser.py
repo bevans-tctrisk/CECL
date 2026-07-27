@@ -88,7 +88,7 @@ _FIELD_EXCLUDE: dict[str, tuple[str, ...]] = {
     # number of payments) or "LOAN ORIGINAL DATE". Skip anything that reads as
     # a date / payment-count / term / rate / score rather than a dollar amount.
     "original_loan_amount": (
-        "date", "pymt", "payment", "nbr", "number", "count",
+        "date", "dt", "pymt", "payment", "nbr", "number", "count",
         "term", "rate", "score", "delinq", "due",
     ),
 }
@@ -573,11 +573,13 @@ def _match_columns(headers: list[str]) -> dict[str, str]:
         # abbreviation like "bal" -> "balance". Only runs when no specific
         # match exists, so a bare "Loan" header can't reverse-match the
         # longer "loan_code"/"loan_pool" keywords and steal loan_pool_code
-        # from the real "Loan Code" column.
+        # from the real "Loan Code" column. Require >=3 chars so 1-2 char
+        # marker/flag columns ("L", "F", "SS") can't reverse-match a long
+        # keyword (e.g. "ss" inside "bu-ss-iness_risk_rating").
         if not match:
             for kw_n in kws:
                 for original, norm in norm_headers:
-                    if _ok(original, norm) and norm and norm in kw_n:
+                    if _ok(original, norm) and len(norm) >= 3 and norm in kw_n:
                         match = original
                         break
                 if match:
