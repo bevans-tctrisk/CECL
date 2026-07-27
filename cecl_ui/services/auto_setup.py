@@ -1898,6 +1898,28 @@ def _apply_sample_to_state(
                 + ", ".join(sorted(learned_filled))
             )
 
+    # Drop an ID/suffix mapping that landed on a single-character CONSTANT
+    # column — a record-type marker / flag (e.g. AIRES col-0 "Type" = "L" on
+    # every row). member_number and loan_suffix must vary per loan, so a
+    # column that is a single 1-char value across the sample is never the real
+    # field. The 1-char constraint avoids blanking a real multi-char field
+    # (e.g. "ACTTYP") that is merely constant within a single-product sample.
+    _rows = [r for r in (sample.get("sample_rows") or []) if isinstance(r, dict)]
+    if len(_rows) >= 5:
+        for _fld in ("member_number", "loan_suffix"):
+            _col = cm.get(_fld)
+            if _col and isinstance(_col, str) and _col not in _placeholder_cols:
+                _vals = {str(r.get(_col)).strip() for r in _rows}
+                _vals.discard("")
+                _vals.discard("None")
+                _vals.discard("nan")
+                if len(_vals) == 1 and len(next(iter(_vals))) <= 1:
+                    cm[_fld] = ""
+                    msgs.append(
+                        f"{_fld} left unmapped: '{_col}' is a constant 1-char "
+                        "marker column (single value across the sample)"
+                    )
+
     # File pattern + date pattern (drives importer file discovery).
     if sample.get("file_pattern"):
         state["file_pattern"] = sample["file_pattern"]
