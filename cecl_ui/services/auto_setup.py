@@ -717,6 +717,16 @@ def _looks_like_code_map(name: str) -> bool:
     # flag: _parse_code_map_file returns {} unless it carries a pool column.
     if _LOOKUP_RX.search(nl):
         return True
+    # A bare "Loan Code(s)" table under a short name (e.g. "Loan Codes-<CU> -
+    # TCT Edits.xlsx") is the code->pool table. "loan type code" is also how
+    # transaction files are named ("CO & Recs by Loan Type Code ...xlsx"), so
+    # require the bare "loan code(s)" phrase (which excludes "loan TYPE code")
+    # and skip charge-off / recovery / transaction files. Content is still
+    # validated by _parse_code_map_file (returns {} without a pool column).
+    if re.search(r"\bloan[\s_\-]*codes?\b", nl) and not re.search(
+        r"charge|\bco\b|recover|\brecs?\b|transaction|\btxn\b", nl
+    ):
+        return True
     return False
 
 
