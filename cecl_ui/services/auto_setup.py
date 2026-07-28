@@ -936,6 +936,17 @@ def _parse_code_map_file(
     return best, best_q
 
 
+# A TCT-"cleaned"/"final"/"corrected" rebuild of a CU-delivered code map is
+# the authoritative version: it dedups near-duplicate pools, splits
+# negative-share codes onto their own sheet, fixes collisions, etc. When
+# several code-map workbooks ship together (raw CU original + a cleaned
+# rebuild), prefer the cleaned one.
+_CLEAN_CODEMAP_RX = re.compile(
+    r"\b(clean\w*|final\w*|corrected|authoritative|canonical)\b",
+    re.IGNORECASE,
+)
+
+
 def _apply_code_map_to_pool_map(
     state: dict[str, Any], code_map_files: list[dict[str, Any]]
 ) -> list[str]:
@@ -952,19 +963,36 @@ def _apply_code_map_to_pool_map(
     known = list(pm.keys())
     best_map: dict[str, str] = {}
     best_src = ""
-    best_key: tuple[int, int, int] = (-1, -1, -1)
+    best_key: tuple[int, int, int, int] = (-1, -1, -1, -1)
 
     for entry in code_map_files:
         path = entry.get("path") or entry.get("saved_path")
         if not path:
             continue
         m, quality = _parse_code_map_file(path, known)
+        km = len(set(m) & set(known))
+        # Prefer a "cleaned"/"final" rebuild over the raw CU original — but
+        # only when it still covers the codes (>=80% of the extract codes),
+        # so a sparse draft named "*final*" can't hijack a fuller map. The raw
+        # original often wins ``known_mapped`` by an artifact of its own mess
+        # (e.g. a negative-share code colliding with a real loan code), so
+        # authority must outrank ``known_mapped``.
+        name_l = (entry.get("name") or str(path)).lower()
+        authority = (
+            1
+            if _CLEAN_CODEMAP_RX.search(name_l)
+            and known
+            and km >= 0.8 * len(known)
+            else 0
+        )
         # Prefer: highest pool-quality tier (specific pool / NCUA categories
-        # over a coarse Secured/Unsecured grouping), then most known codes
-        # mapped, then most distinct pools.
+        # over a coarse Secured/Unsecured grouping), then the cleaned /
+        # authoritative rebuild, then most known codes mapped, then most
+        # distinct pools.
         key = (
             quality,
-            len(set(m) & set(known)),
+            authority,
+            km,
             len({v for v in m.values()}),
         )
         if key > best_key and m:
