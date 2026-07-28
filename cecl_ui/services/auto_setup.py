@@ -3854,6 +3854,138 @@ def _ensure_learned_store_warm(workspace_root: str | Path) -> None:
         pass
 
 
+def _norm_header_set(headers: list[Any] | None) -> set[str]:
+    """Case/space-normalised set of non-empty header strings."""
+    out: set[str] = set()
+    for h in headers or []:
+        s = str(h).strip().lower()
+        if s and s not in ("none", "nan"):
+            out.add(s)
+    return out
+
+
+def _looks_like_headers(hdrset: set[str]) -> bool:
+    """True when a token set looks like real column headers (mostly words),
+    not a data row (numbers / dates) mis-read from a headerless file."""
+    if len(hdrset) < 5:
+        return False
+    alpha = sum(1 for h in hdrset if any(c.isalpha() for c in h))
+    return alpha >= 0.6 * len(hdrset)
+
+
+def _read_header_row(path: str | Path, max_scan: int = 8) -> list[str]:
+    """Cheaply read the widest of the first few rows as the header row.
+
+    Returns the stringified non-empty cells of that row, or ``[]`` on any
+    failure. Best-effort — used only for the advisory header-divergence
+    check, so it must never raise.
+    """
+    try:
+        import openpyxl  # local — heavy
+    except Exception:  # noqa: BLE001
+        return []
+    wb = None
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        best: list[str] = []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if i >= max_scan:
+                break
+            cells = [str(c).strip() for c in row if c not in (None, "")]
+            if len(cells) > len(best):
+                best = cells
+        return best
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _detect_header_format_divergence(
+    state: dict[str, Any], findings: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Flag when the chosen sample loan file's column headers diverge sharply
+    from the CU's OTHER-period loan extracts.
+
+    A CU that normally ships a converted/short-header layout but delivers a
+    raw, unconverted export for one month (e.g. a raw ALL-CAPS AIRES file vs
+    its usual short headers) yields column mappings that are correct for the
+    file yet won't match the CU's config/history. Reading the actual file is
+    right, but the analyst should review — so this returns an advisory flag.
+
+    Best-effort; returns ``None`` on any uncertainty. Reads at most 6 other
+    header rows and early-exits as soon as one clearly shares the format.
+
+    Only compares like-with-like: subsystem exports (credit-card / cardholder)
+    and headerless files (whose first rows are data, not column names) are
+    skipped so the flag reflects a genuine primary-extract format change and
+    cites a real, comparable loan file.
+    """
+    sample = state.get("sample") or {}
+    sample_set = _norm_header_set(sample.get("headers"))
+    if not _looks_like_headers(sample_set):
+        return None
+    cls = findings.get("classification") or {}
+    loan_files = cls.get("loan_data_files") or []
+    if len(loan_files) < 2:
+        return None
+    # Exclude the staged report-period cohort (the sampled file + its
+    # same-period siblings) so we never compare the sample against itself.
+    staged_names = {
+        (e.get("name") or "") for e in (findings.get("sample_extracts") or [])
+    }
+    others = [
+        e for e in loan_files if (e.get("name") or "") not in staged_names
+    ]
+    if not others:
+        return None
+    others.sort(key=lambda e: _safe_period(e) or "0000-00", reverse=True)
+    best_jac = 0.0
+    best_comp: dict[str, Any] | None = None
+    for comp in others[:6]:
+        cname = comp.get("name") or ""
+        # Skip a different subsystem export (credit card, etc.) — it always
+        # diverges from the loan extract and would be a misleading comparison.
+        if _SUBSYSTEM_RX.search(cname):
+            continue
+        comp_set = _norm_header_set(_read_header_row(comp.get("path") or ""))
+        if not _looks_like_headers(comp_set):
+            continue  # headerless / data-row file — not a valid comparison
+        jac = len(sample_set & comp_set) / (len(sample_set | comp_set) or 1)
+        if jac >= 0.6:
+            return None  # clearly the same layout — no divergence
+        if jac > best_jac:
+            best_jac, best_comp = jac, comp
+    if best_comp is None or best_jac >= 0.4:
+        return None
+    pct = int(round(best_jac * 100))
+    comp_name = best_comp.get("name") or ""
+    # Resolve the ACTUAL sampled file name (state['sample']['filename'] holds
+    # the representative name, which can differ) by matching header sets.
+    sampled_name = sample.get("filename") or ""
+    for e in (findings.get("sample_extracts") or []):
+        if _norm_header_set((e.get("analysis") or {}).get("headers")) == sample_set:
+            sampled_name = e.get("name") or sampled_name
+            break
+    return {
+        "sample_name": sampled_name,
+        "comparison_name": comp_name,
+        "shared_pct": pct,
+        "message": (
+            f"header format divergence: the report-period loan file "
+            f"'{sampled_name}' shares only {pct}% of its "
+            f"column headers with the CU's other extract '{comp_name}'. It "
+            f"may be a raw / unconverted export (e.g. raw ALL-CAPS AIRES) — "
+            f"REVIEW the auto-derived column mappings before saving."
+        ),
+    }
+
+
 def apply_findings_to_state(
     state: dict[str, Any],
     findings: dict[str, Any],
@@ -3921,6 +4053,18 @@ def apply_findings_to_state(
             f"pool_map: +{agg_added} additional code(s) aggregated from other "
             "loan extract(s)"
         )
+
+    # ----- Header-format divergence (raw/unconverted report-period file) --
+    # Advisory only: if the chosen sample's headers diverge sharply from the
+    # CU's other-period extracts, the report-period file may be a raw export
+    # whose (correct) mappings won't match the config/history. Never fatal.
+    try:
+        _div = _detect_header_format_divergence(state, findings)
+        if _div:
+            state["_header_format_divergence"] = _div
+            report.setdefault("columns", []).append(_div["message"])
+    except Exception:  # noqa: BLE001
+        pass
 
     # ----- Delivered code -> pool map: pre-fill pool_map VALUES ----------
     # Runs AFTER the sample seeded pool_map with the raw codes, so the code
@@ -4306,6 +4450,17 @@ def compute_hil_needs(state: dict[str, Any]) -> list[dict[str, Any]]:
             add("columns", "recommended",
                 "Columns still at placeholder defaults (not matched to a real "
                 "header): " + ", ".join(_other))
+
+    # columns — header-format divergence: the report-period loan file's
+    # headers differ sharply from the CU's other extracts, so it may be a
+    # raw/unconverted export. Advisory review of the derived mappings.
+    _div = state.get("_header_format_divergence")
+    if _div:
+        add("columns", "recommended",
+            "The report-period loan file's column headers differ sharply from "
+            f"the CU's other extracts (only {int(_div.get('shared_pct', 0))}% "
+            f"shared with '{_div.get('comparison_name', '')}') — it may be a "
+            "raw/unconverted export; verify the auto-derived column mappings")
 
     # mgmt_adj — recommended review (we applied baseline defaults)
     if state.get("_auto_scan_completed"):
