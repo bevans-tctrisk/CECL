@@ -246,6 +246,12 @@ _YYYYMMDD_RX = re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)")
 # so it can't collide with the YYYYMMDD shape above (year first).
 _MMDDYYYY_RX = re.compile(r"(?<!\d)(\d{2})(\d{2})(20\d{2})(?!\d)")
 
+# Separated M-D-YY with a 2-DIGIT year (e.g. AIRES "CECL Aires 6-30-26V2.xlsx"
+# = 2026-06, or "...2-28-26V2.xlsx"). Tried AFTER the 4-digit shapes so a full
+# year is never truncated; day is validated (1-31) so it can't match a plain
+# version triple. The trailing (?!\d) still allows a following letter ("26V2").
+_MD_YY_RX = re.compile(r"(?<!\d)(\d{1,2})[-_/](\d{1,2})[-_/](\d{2})(?!\d)")
+
 # Month-name + year (2- OR 4-digit), e.g. "Aires March 26.v2.xlsx",
 # "Aires Oct 2025.v2.xlsx", "Mar_2026". The classifier only parses 4-digit
 # years, so 2-digit ones ("March 26" = 2026-03) otherwise strand the file.
@@ -277,6 +283,12 @@ def _fallback_period_from_filename(name: str) -> str | None:
         mo = int(m.group(1))
         if 1 <= mo <= 12:
             return f"{m.group(3)}-{mo:02d}"
+    m = _MD_YY_RX.search(name)
+    if m:
+        mo = int(m.group(1))
+        day = int(m.group(2))
+        if 1 <= mo <= 12 and 1 <= day <= 31:
+            return f"20{m.group(3)}-{mo:02d}"
     m = _MM_YYYY_RX.search(name)
     if m:
         mo = int(m.group(1))
