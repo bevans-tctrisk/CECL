@@ -252,6 +252,14 @@ _MMDDYYYY_RX = re.compile(r"(?<!\d)(\d{2})(\d{2})(20\d{2})(?!\d)")
 # version triple. The trailing (?!\d) still allows a following letter ("26V2").
 _MD_YY_RX = re.compile(r"(?<!\d)(\d{1,2})[-_/](\d{1,2})[-_/](\d{2})(?!\d)")
 
+# Leading YY-MM stamp (2-DIGIT year FIRST, then month), e.g. AIRES
+# "26-06 AIRES LOANS v2.xlsx" = 2026-06. Anchored to the start of the filename
+# and requiring a trailing space/underscore so it only fires on files that LEAD
+# with "YY-MM " -- this keeps it from colliding with MM-YYYY ("06-2026"),
+# YYYY-MM ("2026-06"), or 3-component dates ("6-30-26"), all of which are
+# handled by the earlier shapes. Month is validated (1-12).
+_YY_MM_RX = re.compile(r"^\s*(\d{2})[-_](\d{2})(?=[\s_])")
+
 # Month-name + year (2- OR 4-digit), e.g. "Aires March 26.v2.xlsx",
 # "Aires Oct 2025.v2.xlsx", "Mar_2026". The classifier only parses 4-digit
 # years, so 2-digit ones ("March 26" = 2026-03) otherwise strand the file.
@@ -294,6 +302,11 @@ def _fallback_period_from_filename(name: str) -> str | None:
         mo = int(m.group(1))
         if 1 <= mo <= 12:
             return f"{m.group(2)}-{mo:02d}"
+    m = _YY_MM_RX.match(name)
+    if m:
+        mo = int(m.group(2))
+        if 1 <= mo <= 12:
+            return f"20{m.group(1)}-{mo:02d}"
     m = _MONTHNAME_RX.search(name)
     if m:
         mo = _MONTHNAME_MAP.get(m.group(1).lower())
