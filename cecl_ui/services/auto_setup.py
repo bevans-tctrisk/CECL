@@ -851,10 +851,26 @@ def _parse_code_map_file(
                 continue
             hdr = rows[0]
             pool_idx = None
+            # Tier 1: an analyst-curated "final pool" column (e.g.
+            # "Pool for Report" on a TCT-edited code map) is authoritative and
+            # must win over a bare/generic "Pool" column when both are present
+            # -- the plain "Pool" often carries only a coarse super-category
+            # (Secured/Unsecured/Real Estate) while the report column holds the
+            # CU's real CECL pool names.
             for i, h in enumerate(hdr):
-                if _norm_hdr(h) in ("pool", "pool name", "cecl pool"):
+                if _norm_hdr(h) in (
+                    "pool for report", "pool for reporting", "report pool",
+                    "reporting pool", "final pool",
+                ):
                     pool_idx = i
                     break
+            # Tier 2: the original exact-header set (unchanged behaviour --
+            # first match in column order wins).
+            if pool_idx is None:
+                for i, h in enumerate(hdr):
+                    if _norm_hdr(h) in ("pool", "pool name", "cecl pool"):
+                        pool_idx = i
+                        break
             if pool_idx is None:
                 for i, h in enumerate(hdr):
                     if "pool" in _norm_hdr(h):
