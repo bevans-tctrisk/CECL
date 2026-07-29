@@ -952,8 +952,19 @@ def _parse_code_map_file(
             # New Vehicle Loan, Credit Card, ...} is a real scheme even though
             # some labels ("Unsecured Loans") are generic-sounding, whereas
             # {Secured, Unsecured, Negative Shares} is a true super-category.
+            # "Real Estate" is a legitimate named CECL pool, not a coarse
+            # super-category like bare "Secured"/"Unsecured"/"Consumer". A Pool
+            # column that qualifies its buckets (e.g. WNC's {Consumer Secured,
+            # Consumer Unsecured, Real Estate, Negative Shares}) is the CU's
+            # real final scheme and must be used directly. Excluding Real Estate
+            # from the super-category signal keeps such a column off the
+            # Description fallback, while columns dominated by true super-
+            # categories (Destinations' {Secured, Unsecured, Negative Shares,
+            # 1st/2nd Mortgage}) still defer to the finer Description column.
+            _supercat_terms = _GENERIC_POOL_TERMS - {"real estate",
+                                                     "real estate loans"}
             _generic = sum(
-                1 for v in _distinct_pools if _norm_hdr(v) in _GENERIC_POOL_TERMS
+                1 for v in _distinct_pools if _norm_hdr(v) in _supercat_terms
             )
             _mostly_generic = bool(_distinct_pools) \
                 and _generic / len(_distinct_pools) >= 0.5
