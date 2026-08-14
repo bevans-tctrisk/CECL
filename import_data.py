@@ -846,14 +846,35 @@ def _normalize_col_map_for_no_header(col_map):
     return out
 
 
+def _detect_text_encoding(file_path):
+    """Detect a delimited-text file's encoding from its byte-order mark.
+
+    Returns an encoding string for ``open`` / ``pd.read_csv`` (``utf-16``,
+    ``utf-8-sig``) or ``None`` to use the default. DEXA / core-system report
+    exports are frequently UTF-16 (LE) with a BOM, which a plain UTF-8 read
+    rejects with ``0xff at position 0``.
+    """
+    try:
+        with open(file_path, 'rb') as fh:
+            head = fh.read(3)
+    except OSError:
+        return None
+    if head[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        return 'utf-16'
+    if head[:3] == b'\xef\xbb\xbf':
+        return 'utf-8-sig'
+    return None
+
+
 def _sniff_delimiter(file_path):
     """Guess the field delimiter of a delimited-text data file from its
     first non-empty line. Prefers pipe/tab/semicolon over comma so
     TCT-style ``|``-delimited ``.txt`` exports (e.g. ``TCT.EXPORT_YYYYMM``)
-    parse into columns correctly. Returns ``','`` when no stronger
-    candidate is present."""
+    and UTF-16 tab-delimited DEXA ``.csv`` exports parse into columns
+    correctly. Returns ``','`` when no stronger candidate is present."""
+    enc = _detect_text_encoding(file_path) or 'latin-1'
     try:
-        with open(file_path, 'r', encoding='latin-1') as fh:
+        with open(file_path, 'r', encoding=enc, errors='replace') as fh:
             for line in fh:
                 if line.strip():
                     counts = {d: line.count(d) for d in ('|', '\t', ';', ',')}
@@ -875,13 +896,15 @@ def _read_tabular(file_path, ext, header, config=None, **read_kw):
     if config:
         delim = config.get('field_delimiter') or config.get('delimiter')
     if delim or ext in ('.csv', '.txt', '.tsv'):
+        enc = _detect_text_encoding(file_path)
         if not delim:
-            if ext == '.csv':
-                delim = ','
-            elif ext == '.tsv':
+            if ext == '.tsv':
                 delim = '\t'
-            else:  # .txt or unknown text
+            else:  # .csv / .txt / unknown: sniff so UTF-16 tab-delimited
+                # DEXA exports parse (a normal comma CSV still sniffs to ',').
                 delim = _sniff_delimiter(file_path)
+        if enc and 'encoding' not in read_kw:
+            read_kw = {**read_kw, 'encoding': enc}
         return pd.read_csv(file_path, header=header, sep=delim,
                            engine='python', **read_kw)
     return pd.read_excel(file_path, header=header, **read_kw)
@@ -1797,6 +1820,7 @@ def process_client(client_name, specific_file=None, scan_folder_override=None):
             raise FileNotFoundError(
                 f"Scan folder override not found: {scan_folder}")
         recursive_scan = True
+        scanning_external_source = False
     else:
         # Optional custom loan source folder (absolute or relative), useful for external client folders.
         configured_loan_folder = config.get('loan_file_folder')
@@ -1804,6 +1828,7 @@ def process_client(client_name, specific_file=None, scan_folder_override=None):
             scan_folder = resolve_path(configured_loan_folder)
             if not os.path.isdir(scan_folder):
                 raise FileNotFoundError(f"Loan file folder not found: {scan_folder}")
+            scanning_external_source = True
         else:
             # Look in per-client subfolder first, then fallback to main Raw_Uploads
             client_upload = os.path.join(UPLOAD_FOLDER, client_name)
@@ -1811,11 +1836,20 @@ def process_client(client_name, specific_file=None, scan_folder_override=None):
                 scan_folder = client_upload
             else:
                 scan_folder = UPLOAD_FOLDER
+            scanning_external_source = False
 
         recursive_scan = bool(config.get('loan_file_recursive', False))
-    archive_imported = bool(config.get('archive_imported_files', True))
+    _archive_flag = config.get('archive_imported_files')
+    archive_imported = True if _archive_flag is None else bool(_archive_flag)
     if scan_folder_override:
         # Never sweep an ad-hoc override scan into the Archive.
+        archive_imported = False
+    if scanning_external_source and _archive_flag is None:
+        # Files read in-place from a client-owned source folder
+        # (``loan_file_folder``) must NOT be moved out of it — archiving is
+        # only meant for the staged Raw_Uploads area. Moving a client's own
+        # files is destructive and breaks on-demand per-period re-imports.
+        # A CU can still opt in explicitly via ``archive_imported_files: true``.
         archive_imported = False
 
     client_archive = None

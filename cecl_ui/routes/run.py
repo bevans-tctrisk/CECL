@@ -121,6 +121,199 @@ def _refresh_staged_monthly_balance(
     )
 
 
+def _col_to_idx(letter: str) -> int:
+    """Spreadsheet column letter (``A``, ``B``, ``AA`` …) → 0-based index."""
+    s = str(letter or "A").strip().upper()
+    idx = 0
+    for ch in s:
+        if "A" <= ch <= "Z":
+            idx = idx * 26 + (ord(ch) - 64)
+    return max(0, idx - 1)
+
+
+def _autofill_monthly_balance_from_extract(
+    cfg: dict, upload_dir: Path, snapshot: str,
+) -> str | None:
+    """Populate the snapshot month's column of the wizard monthly-balance
+    matrix from the freshly-staged loan extract(s) + the delivered GL
+    balance sheet.
+
+    Opt-in via ``monthly_balance.autofill_from_extract: true``. Removes the
+    recurring manual step of hand-appending each new month's per-pool loan
+    balances to ``monthly_balance.saved_path``: the matrix's per-loan-type
+    rows are filled from the staged loan files grouped by their
+    ``loan_pool_code`` column (these reconcile to the GL loan principal),
+    and any pool-named rows that don't originate in the loan system (e.g.
+    Credit Cards from a card processor, Negative Share Draft) are filled
+    from the delivered GL balance sheet via
+    ``monthly_balance.autofill_gl_lines`` (matched by account code or a
+    label substring).
+
+    Idempotent: skips when the snapshot column already holds values, so a
+    re-run never clobbers manually-entered figures. Best-effort — never
+    raises.
+    """
+    mb = (cfg or {}).get("monthly_balance") or {}
+    if not mb.get("autofill_from_extract"):
+        return None
+    saved_path = str(mb.get("saved_path") or "").strip()
+    if not saved_path or not Path(saved_path).is_file():
+        return None
+    try:
+        y, m = int(snapshot[:4]), int(snapshot[5:7])
+    except (ValueError, TypeError):
+        return None
+
+    import openpyxl
+    import pandas as pd
+    from datetime import datetime as _dt
+
+    def _num(x) -> float:
+        s = str(x).replace("$", "").replace(",", "").strip()
+        if s in ("", "nan", "None", "NaN"):
+            return 0.0
+        neg = s.startswith("(") and s.endswith(")")
+        if neg:
+            s = s[1:-1]
+        try:
+            v = float(s)
+        except ValueError:
+            return 0.0
+        return -v if neg else v
+
+    allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+
+    # --- per-code balances from staged loan extract file(s) ---------------
+    code_bal: dict[str, float] = {}
+    for ext in (cfg.get("loan_data_extracts") or []):
+        pat = str(ext.get("file_pattern") or "").strip()
+        cm = ext.get("column_mappings") or {}
+        code_col = cm.get("loan_pool_code")
+        bal_col = cm.get("current_balance")
+        if not pat or not code_col or not bal_col:
+            continue
+        try:
+            rx = re.compile(pat, re.IGNORECASE)
+        except re.error:
+            continue
+        hdr = 0 if ext.get("has_header", True) else None
+        for entry in sorted(upload_dir.iterdir()):
+            if (not entry.is_file()
+                    or entry.suffix.lower() not in allowed
+                    or entry.name.startswith("~$")
+                    or not rx.match(entry.name)):
+                continue
+            try:
+                df = pd.read_excel(entry, header=hdr)
+            except Exception:  # noqa: BLE001
+                continue
+            df.columns = [str(c).strip() for c in df.columns]
+            if code_col not in df.columns or bal_col not in df.columns:
+                continue
+            grouped = df.groupby(df[code_col].astype(str).str.strip())
+            for code, grp in grouped:
+                if not code or code.lower() == "nan":
+                    continue
+                code_bal[code] = code_bal.get(code, 0.0) + float(
+                    grp[bal_col].map(_num).sum())
+
+    # --- pool-named rows from the delivered GL balance sheet --------------
+    gl_lines = mb.get("autofill_gl_lines") or {}
+    gl_vals: dict[str, float] = {}
+    if gl_lines:
+        gcfg = mb.get("autofill_gl_balance_sheet") or {}
+        gpat = str(gcfg.get("file_pattern") or "").strip()
+        acc_i = _col_to_idx(gcfg.get("account_col") or "A")
+        lab_i = _col_to_idx(gcfg.get("label_col") or "B")
+        amt_i = _col_to_idx(gcfg.get("amount_col") or "D")
+        grx = None
+        if gpat:
+            try:
+                grx = re.compile(gpat, re.IGNORECASE)
+            except re.error:
+                grx = None
+        gl_file = None
+        for entry in sorted(upload_dir.iterdir()):
+            if (entry.is_file() and entry.suffix.lower() in allowed
+                    and not entry.name.startswith("~$")
+                    and (grx is None or grx.match(entry.name))):
+                gl_file = entry
+                break
+        if gl_file is not None:
+            try:
+                gdf = pd.read_excel(gl_file, header=None)
+            except Exception:  # noqa: BLE001
+                gdf = None
+            if gdf is not None:
+                for pool, spec in gl_lines.items():
+                    want_acc = str((spec or {}).get("account") or "").strip()
+                    want_lab = str((spec or {}).get("label_contains")
+                                   or "").strip().lower()
+                    for i in range(gdf.shape[0]):
+                        acc = (str(gdf.iat[i, acc_i]).strip()
+                               if acc_i < gdf.shape[1] else "")
+                        lab = (str(gdf.iat[i, lab_i]).strip().lower()
+                               if lab_i < gdf.shape[1] else "")
+                        hit = ((want_acc and acc == want_acc)
+                               or (want_lab and want_lab in lab))
+                        if hit and amt_i < gdf.shape[1]:
+                            gl_vals[pool] = _num(gdf.iat[i, amt_i])
+                            break
+
+    if not code_bal and not gl_vals:
+        return None
+
+    # --- write into the snapshot month column -----------------------------
+    try:
+        wb = openpyxl.load_workbook(saved_path)
+    except Exception:  # noqa: BLE001
+        return None
+    ws = wb.active
+    target = None
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=1, column=c).value
+        if isinstance(v, _dt) and v.year == y and v.month == m:
+            target = c
+            break
+    if target is None:
+        return None
+    # Idempotent: bail out if any data row already holds a value for this
+    # month so a re-run never clobbers manual or prior figures.
+    for r in range(2, ws.max_row + 1):
+        if (ws.cell(row=r, column=1).value is None
+                and ws.cell(row=r, column=2).value is None):
+            continue
+        if ws.cell(row=r, column=target).value not in (None, ""):
+            return None
+    filled = 0
+    for r in range(2, ws.max_row + 1):
+        code = ws.cell(row=r, column=1).value
+        pool = ws.cell(row=r, column=2).value
+        if code is None and pool is None:
+            continue
+        key = str(code).strip()
+        val = None
+        if key in code_bal:
+            val = code_bal[key]
+        elif str(pool).strip() in gl_vals:
+            val = gl_vals[str(pool).strip()]
+        elif key in gl_vals:
+            val = gl_vals[key]
+        if val is None:
+            continue
+        ws.cell(row=r, column=target).value = round(float(val), 2)
+        filled += 1
+    if not filled:
+        return None
+    try:
+        wb.save(saved_path)
+    except Exception:  # noqa: BLE001
+        return None
+    return (f"Auto-filled {filled} monthly-balance row(s) for "
+            f"{snapshot[:7]} from the loan extract"
+            + (" + GL balance sheet" if gl_vals else "") + ".")
+
+
 def _ingest_monthly_co_recov(cfg: dict, upload_dir: Path) -> str | None:
     """Fold any staged *monthly-summary* Charge-Off / Recovery files into
     the historical CO/recovery DB.
@@ -718,17 +911,30 @@ def new_quarter(short_name: str):
             except (OSError, ValueError) as exc:
                 flash(f"Could not save pool mappings: {exc}", "error")
                 return redirect(url_for("run.new_quarter", short_name=short_name))
-            # Re-import so the DB snapshot reflects the new pool_map.
+            # Re-stamp ONLY this snapshot so the DB loan_pool reflects the
+            # new pool_map. Use reimport_period (idempotent per-snapshot
+            # replace) rather than run_import: run_import does an incremental
+            # folder scan and skips files already swept into Archive, so it
+            # would NOT re-stamp the current period's stored rows.
             try:
-                pipeline_service.run_import(short_name)
+                res = pipeline_service.reimport_period(short_name, period)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            if res.get("ok"):
                 flash(
-                    f"Reassigned {changed} loan code(s) and re-imported. "
-                    "Review the updated balances below.",
+                    f"Reassigned {changed} loan code(s) and re-imported "
+                    f"{res.get('period', period)}: {res.get('rows', 0)} "
+                    "loan row(s). Review the updated balances below.",
                     "success",
                 )
-            except Exception as exc:  # noqa: BLE001
-                flash(f"Re-import after remap failed: {exc}", "error")
-                return redirect(url_for("run.new_quarter", short_name=short_name))
+            else:
+                flash(
+                    f"Saved {changed} mapping change(s), but could not "
+                    f"re-import {period}: {res.get('error')}. The mapping is "
+                    "saved; the Loan Extract totals below may be stale until "
+                    "the period is re-imported.",
+                    "warning",
+                )
         else:
             flash("No mapping changes detected.", "info")
         saved = 0
@@ -774,16 +980,28 @@ def new_quarter(short_name: str):
             except (OSError, ValueError) as exc:
                 flash(f"Could not save pool mappings: {exc}", "error")
                 return redirect(url_for("run.new_quarter", short_name=short_name))
+            # Re-stamp ONLY this snapshot (idempotent per-snapshot replace).
+            # run_import would skip already-archived files and leave the
+            # stored rows stale, so use reimport_period instead.
             try:
-                pipeline_service.run_import(short_name)
+                res = pipeline_service.reimport_period(short_name, period)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            if res.get("ok"):
                 flash(
-                    f"Reassigned {changed} loan code(s) and re-imported. "
-                    "Review the updated impaired loans below.",
+                    f"Reassigned {changed} loan code(s) and re-imported "
+                    f"{res.get('period', period)}: {res.get('rows', 0)} "
+                    "loan row(s). Review the updated impaired loans below.",
                     "success",
                 )
-            except Exception as exc:  # noqa: BLE001
-                flash(f"Re-import after remap failed: {exc}", "error")
-                return redirect(url_for("run.new_quarter", short_name=short_name))
+            else:
+                flash(
+                    f"Saved {changed} mapping change(s), but could not "
+                    f"re-import {period}: {res.get('error')}. The mapping is "
+                    "saved; the rows below may be stale until the period is "
+                    "re-imported.",
+                    "warning",
+                )
         else:
             flash("No mapping changes detected.", "info")
         saved = 0
@@ -935,6 +1153,26 @@ def new_quarter(short_name: str):
                 "warning",
             )
 
+    # 2a-1) Monthly-balance auto-fill from the loan extract. For CUs whose
+    # per-pool monthly balances are derived from the loan system (matrix
+    # rows reconcile to the loan extract) rather than an independent
+    # per-pool balance file, populate this snapshot's column of the matrix
+    # from the freshly-staged loan file(s) + the delivered GL balance
+    # sheet. Opt-in via ``monthly_balance.autofill_from_extract``. Runs
+    # BEFORE import (loan files still in Raw_Uploads, not yet archived).
+    # Idempotent; best-effort — never blocks the run.
+    if not _skip_stage:
+        try:
+            _af_msg = _autofill_monthly_balance_from_extract(
+                cfg, upload_dir, snapshot)
+            if _af_msg:
+                flash(_af_msg, "success")
+        except Exception as _af_exc:  # noqa: BLE001
+            flash(
+                f"Monthly-balance auto-fill skipped: {_af_exc}",
+                "warning",
+            )
+
     # 2a-2) Monthly Charge-Off / Recovery ingestion. When a CU ships a
     # by-loan-type monthly summary workbook (date encoded in the filename,
     # no account numbers), fold any freshly-staged month(s) into the
@@ -963,6 +1201,34 @@ def new_quarter(short_name: str):
             config_service.save_client_config(ws, short_name, cfg, overwrite=True)
         except (OSError, ValueError) as exc:
             flash(f"Could not persist report_period={period}: {exc}", "warning")
+
+    # 2b-1) External-source retarget. CUs configured to read loan files in
+    # place from a client-owned quarter folder (``loan_file_folder``) rather
+    # than the staged Raw_Uploads area must have that path advanced to the
+    # new quarter's folder each run — otherwise the import keeps scanning the
+    # prior quarter and no snapshot lands for this period (the classic
+    # "Balance Adjustment review unavailable / no imported loans" symptom).
+    # When the user supplies a folder path and the CU uses external-source
+    # mode, repoint ``loan_file_folder`` (and ``data_directory`` when it
+    # mirrored the loan folder) at the supplied folder.
+    if folder_raw and (cfg.get("loan_file_folder") or "").strip():
+        try:
+            src_dir = Path(folder_raw)
+            old_lff = str(Path(cfg.get("loan_file_folder")))
+            if src_dir.is_dir() and str(src_dir) != old_lff:
+                cfg["loan_file_folder"] = str(src_dir)
+                if str(Path(cfg.get("data_directory") or "")) == old_lff:
+                    cfg["data_directory"] = str(src_dir)
+                config_service.save_client_config(
+                    ws, short_name, cfg, overwrite=True)
+                flash(
+                    f"Repointed loan source folder to {src_dir} for this "
+                    "quarter.",
+                    "info",
+                )
+        except (OSError, ValueError) as exc:
+            flash(
+                f"Could not repoint loan source folder: {exc}", "warning")
 
     # 2b-2) ACL Balance override — Phase 9.36. The user can override the
     # default ACL source for this run from the new-quarter form:
