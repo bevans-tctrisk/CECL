@@ -25,12 +25,13 @@ import xml.etree.ElementTree as _ET
 import zipfile
 
 import openpyxl
+from openpyxl.worksheet.properties import PageSetupProperties
 
 from . import (
     acl_history_db, env_factor_writer, excel_recalc, impaired_loader,
     lol_writer, mapping_loader, mgmt_adj_writer, qfactor_loader,
     runs_service, solr_fetcher, template_loader,
-    vizo_explanation_formatter,
+    tct_change_analysis, vizo_explanation_formatter,
 )
 
 
@@ -217,6 +218,75 @@ _VIZO_ONLY_SHEETS = {
     "New Report Calc-Vizo",
 }
 
+_ONE_PAGE_RANGE_SHEETS = {
+    "Environmental Factor Ranges",
+    "Envir Factor Ranges-Vizo",
+}
+
+
+def _force_one_page_ranges(wb) -> None:
+    """Ensure Env Factor ranges tabs print on a single page.
+
+    Some generated files can spill this tab across a second page from
+    printer defaults. Force fit-to-page at save time.
+    """
+    for name in wb.sheetnames:
+        if name not in _ONE_PAGE_RANGE_SHEETS:
+            continue
+        ws = wb[name]
+        if ws.sheet_properties.pageSetUpPr is None:
+            ws.sheet_properties.pageSetUpPr = PageSetupProperties()
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 1
+        ws.page_setup.scale = None
+
+
+def _normalize_open_view(wb, keep_variant: str) -> None:
+    """Force a single workbook window and select the intended Cover tab.
+
+    Some seed workbooks carry multiple saved workbook views, which causes
+    Excel to open the file in two windows on different tabs. Keep exactly
+    one view and select the variant's cover tab.
+    """
+    visible = [s for s in wb.sheetnames if wb[s].sheet_state == "visible"]
+    if not visible:
+        return
+
+    preferred = "Cover" if keep_variant == "tct" else "Cover-Vizo"
+    if preferred not in visible:
+        preferred = visible[0]
+    preferred_idx = wb.sheetnames.index(preferred)
+
+    wb.active = preferred_idx
+    for name in wb.sheetnames:
+        ws = wb[name]
+        # Some carried templates contain a second sheetView
+        # (workbookViewId=1). If we keep only one workbook view, those
+        # orphan sheetViews make Excel show a repair prompt. Collapse
+        # each sheet to a single view bound to workbookViewId=0.
+        try:
+            views = getattr(ws, "views", None)
+            sv_list = getattr(views, "sheetView", None)
+            if isinstance(sv_list, list) and sv_list:
+                primary_sv = sv_list[0]
+                views.sheetView = [primary_sv]
+                primary_sv.workbookViewId = 0
+                primary_sv.tabSelected = False
+            else:
+                ws.sheet_view.workbookViewId = 0
+                ws.sheet_view.tabSelected = False
+        except Exception:  # noqa: BLE001
+            ws.sheet_view.workbookViewId = 0
+            ws.sheet_view.tabSelected = False
+
+    wb[preferred].sheet_view.tabSelected = True
+
+    if wb.views:
+        primary = wb.views[0]
+        primary.activeTab = preferred_idx
+        wb.views = [primary]
+
 
 def _hide_other_variant(
     workbook_path: str | Path, keep_variant: str,
@@ -246,11 +316,58 @@ def _hide_other_variant(
         else:
             ws.sheet_state = "visible"
             kept.append(name)
-    visible = [s for s in wb.sheetnames if wb[s].sheet_state == "visible"]
-    if visible:
-        wb.active = wb.sheetnames.index(visible[0])
+    _force_one_page_ranges(wb)
+    _normalize_open_view(wb, keep_variant)
     wb.save(workbook_path)
     return hidden, kept
+
+
+def _hide_total_chargeoff_vizo_rows(workbook_path: str | Path) -> list[int]:
+    """Hide the "Total Charge Offs" summary row(s) on the
+    ``New Report Calc-Vizo`` tab (a misleading subtotal).
+
+    The tab mirrors the ``Calc tab`` via per-cell formulas
+    (``='Calc tab'!A54``), so the row label isn't a literal here — it's
+    read one hop back from ``Calc tab``. The row position shifts with
+    template/pool layout, so match by label rather than a fixed row.
+    """
+    hidden: list[int] = []
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception:  # noqa: BLE001
+        return hidden
+    sheet = next((s for s in wb.sheetnames
+                  if s.strip().lower() == "new report calc-vizo"), None)
+    if not sheet:
+        return hidden
+    ws = wb[sheet]
+    calc = next((s for s in wb.sheetnames
+                 if s.strip().lower() == "calc tab"), None)
+    calc_ws = wb[calc] if calc else None
+    ref_re = re.compile(r"'?Calc tab'?!\$?A\$?(\d+)", re.IGNORECASE)
+
+    def _is_total_co(label: Any) -> bool:
+        return (isinstance(label, str)
+                and label.strip().lower().startswith("total charge off"))
+
+    for r in range(1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        label = None
+        if isinstance(raw, str) and raw.startswith("="):
+            m = ref_re.search(raw)
+            if m and calc_ws is not None:
+                label = calc_ws.cell(row=int(m.group(1)), column=1).value
+        else:
+            label = raw
+        if _is_total_co(label):
+            ws.row_dimensions[r].hidden = True
+            hidden.append(r)
+    if hidden:
+        try:
+            wb.save(workbook_path)
+        except Exception:  # noqa: BLE001
+            return []
+    return hidden
 
 
 def apply_report_variant(
@@ -279,6 +396,9 @@ def apply_report_variant(
     if v not in ("tct", "vizo", "both"):
         v = "both"
     master = Path(workbook_path)
+    # Hide the misleading "Total Charge Offs" row on New Report Calc-Vizo
+    # before copies are made so it propagates to the Vizo output.
+    _hide_total_chargeoff_vizo_rows(master)
     targets: list[str] = []
     if v in ("tct", "both"):
         targets.append("tct")
@@ -296,6 +416,10 @@ def apply_report_variant(
         out_path = master.with_name(master.stem + suffix + master.suffix)
         shutil.copy2(master, out_path)
         hidden, kept = _hide_other_variant(out_path, which)
+        if which == "tct":
+            # Add quarter-over-quarter narrative tab immediately after
+            # Calc tab (SCALE analogue of Migration change analysis).
+            tct_change_analysis.append_tct_change_analysis(out_path)
         theme_bytes = tct_theme if which == "tct" else vizo_theme
         theme_label = "Office default" if which == "tct" else "Vizo"
         if theme_bytes is not None:
@@ -333,11 +457,32 @@ def _report_variant_from_state(state: dict) -> str:
     return (scale.get("report_variant") or "both").strip().lower()
 
 
+def _resolve_cu_name(doc, solr_url, solr_core, charter, scale) -> str:
+    """Credit union name from the MOST RECENT 5300 filing, falling back to
+    the modeled-period ``doc``'s cuname. Best-effort — never raises."""
+    try:
+        name = solr_fetcher.most_recent_cuname(
+            solr_url, solr_core, charter,
+            username=scale.get("solr_user") or None,
+            password=scale.get("solr_pass") or None,
+        )
+    except Exception:  # noqa: BLE001
+        name = ""
+    if not name:
+        name = solr_fetcher.coerce_cu_name(
+            (doc or {}).get("cuname")
+            or (doc or {}).get("CU_NAME")
+            or (doc or {}).get("cu_name")
+        )
+    return name
+
+
 def fill_template(
     template_path: str | Path,
     out_path: str | Path,
     mapping_rows: list[dict],
     fields: dict[str, Any],
+    cu_name: str | None = None,
 ) -> dict:
     wb = openpyxl.load_workbook(template_path)
     applied = 0
@@ -359,6 +504,21 @@ def fill_template(
             applied += 1
         except Exception as exc:  # noqa: BLE001
             issues.append(f"Failed to write {code} to {sheet}!{cell}: {exc}")
+    # Always refresh the credit union name so the Cover (Cover!A13 and
+    # Cover-Vizo!A15 both chain to 'Historical Data'!B2) shows the current
+    # name. Prefer the caller-supplied name (resolved from the MOST RECENT
+    # 5300 filing); fall back to this modeled period's doc. Only the
+    # 2018_03 / 2025_06 mappings carry the ``cuname``->B2 row, so without
+    # this every other period left B2 stale from a prior quarter / seed.
+    resolved_name = solr_fetcher.coerce_cu_name(cu_name)
+    if not resolved_name:
+        resolved_name = solr_fetcher.coerce_cu_name(
+            fields.get("cuname")
+            or fields.get("CU_NAME")
+            or fields.get("cu_name")
+        )
+    if resolved_name and "Historical Data" in wb.sheetnames:
+        wb["Historical Data"]["B2"].value = resolved_name
     wb.save(out_path)
     return {
         "applied": applied,
@@ -710,6 +870,7 @@ def apply_env_factors_to_historical_data(
     state_name: str,
     county_name: str = "",
     sheet: str = "Historical Data",
+    econ_overrides: dict | None = None,
 ) -> dict:
     """Write fresh environmental-factor values into the new quarter
     column on ``Historical Data`` rows 139-142.
@@ -718,10 +879,12 @@ def apply_env_factors_to_historical_data(
     the Migration Model) and writes results to ``{target_col}139``
     (unemployment), ``{target_col}141`` (bankruptcies), and
     ``{target_col}142`` (population). Foreclosures (``{target_col}140``)
-    has no federal API and always falls back to the prior column.
-    When a fetch fails for any other key, that row also falls back to
-    the prior column. Target cells are always overwritten (the
-    carry-clone may leave stale source-label strings there).
+    has no federal API. For any row the fetch doesn't supply, the value
+    comes from ``econ_overrides`` (the CU's analyst-entered
+    ``economic_data``, keyed ``unemployment_rate``/``foreclosures``/
+    ``bankruptcies``/``population``) when present, else the prior
+    column. Target cells are always overwritten (the carry-clone may
+    leave stale source-label strings there).
     """
     result: dict[str, Any] = {
         "ok": False,
@@ -730,6 +893,7 @@ def apply_env_factors_to_historical_data(
         "state_name": state_name,
         "county_name": county_name,
         "fetched": {},
+        "override_rows": [],
         "fallback_rows": [],
         "cells_written": [],
         "error": "",
@@ -740,6 +904,7 @@ def apply_env_factors_to_historical_data(
     if not prior_col or not _COL_LETTERS_RE.match(prior_col):
         result["error"] = f"invalid prior_col {prior_col!r}"
         return result
+    overrides = econ_overrides or {}
     fetched: dict[str, Any] = {}
     if state_name:
         try:
@@ -770,9 +935,19 @@ def apply_env_factors_to_historical_data(
             except (TypeError, ValueError):
                 value = None
         if value is None or value == 0:
-            prior_val = ws[f"{prior_col}{row}"].value
-            value = prior_val
-            result["fallback_rows"].append(row)
+            # Prefer an analyst-entered economic_data override, then the
+            # prior column's value.
+            ov = overrides.get(key)
+            try:
+                ov_num = float(ov) if ov not in (None, "") else None
+            except (TypeError, ValueError):
+                ov_num = None
+            if ov_num is not None and ov_num != 0:
+                value = ov_num
+                result["override_rows"].append(row)
+            else:
+                value = ws[f"{prior_col}{row}"].value
+                result["fallback_rows"].append(row)
         else:
             result["fetched"][key] = value
         coord = f"{target_col}{row}"
@@ -781,6 +956,125 @@ def apply_env_factors_to_historical_data(
     wb.save(workbook_path)
     result["cells_written"] = cells_written
     result["ok"] = True
+    return result
+
+
+def apply_scale_geography(
+    workbook_path: str | Path,
+    state_name: str,
+    county_name: str = "",
+) -> dict:
+    """Write the CU's state/county into the SCALE workbook.
+
+    SCALE templates ship with placeholder geography: ``Historical
+    Data!B4/B5`` hold the literal text ``State``/``County`` (the
+    non-Vizo Env Factor by Pool tab shows them via
+    ``='Historical Data'!B4/B5``) and the ``Env Factor by Pool-Vizo``
+    tab hardcodes a sample ``Minnesota`` / ``Saint Louis``. Nothing in
+    the fill overrides them, so every report showed the wrong location.
+    This writes the real state/county into all four cells. County name
+    has a trailing ``County``/``Parish``/``Borough`` stripped for
+    display to match the template's convention.
+    """
+    result: dict[str, Any] = {"ok": False, "cells_written": [], "error": ""}
+    state_name = (state_name or "").strip()
+    county_disp = re.sub(
+        r"\s+(County|Parish|Borough|Census Area)$", "",
+        (county_name or "").strip(), flags=re.IGNORECASE,
+    )
+    if not state_name and not county_disp:
+        result["error"] = "state and county both empty"
+        return result
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"open failed: {exc}"
+        return result
+    written: list[str] = []
+    targets = [
+        ("Historical Data", "B4", "B5"),
+        ("Env Factor by Pool-Vizo", "B7", "B9"),
+    ]
+    for sheet, state_cell, county_cell in targets:
+        if sheet not in wb.sheetnames:
+            continue
+        ws = wb[sheet]
+        if state_name:
+            ws[state_cell] = state_name
+            written.append(f"{sheet}!{state_cell}")
+        if county_disp:
+            ws[county_cell] = county_disp
+            written.append(f"{sheet}!{county_cell}")
+    if written:
+        wb.save(workbook_path)
+    result["ok"] = True
+    result["cells_written"] = written
+    return result
+
+
+def advance_fallback_template_column(
+    out_path: str | Path,
+    rows: list[dict],
+    period: str,
+    state: dict,
+) -> dict:
+    """Advance a fallback template's current-quarter column to the
+    mapping's target column.
+
+    When no per-quarter SCALE template exists for ``period`` the runner
+    falls back to the newest older template, whose downstream formulas
+    are pinned to that older quarter's Historical Data column (e.g. a
+    2026-03 template computes off column ``AZ``). The period's mapping
+    CSV, however, writes the fetched 5300 data into a NEWER column
+    (2026-06 -> ``BA``). Without this step the report silently computes
+    off the old column and shows the prior quarter's numbers.
+
+    Mirrors ``run_quarter_carry_history``'s column-advance: retarget the
+    formula refs, seed the new column's header/snapshot/date cells,
+    drag-fill the non-mapped formula rows, and refresh the
+    environmental factors. No-op (``ok`` stays False) when the target
+    column can't be derived or the template's current column can't be
+    detected; a no-op success (``ok`` True) when they already match.
+    """
+    result: dict[str, Any] = {
+        "ok": False, "applied": False, "target_col": "", "prior_col": "",
+        "shift": {}, "seed": {}, "propagate": {}, "env": {}, "error": "",
+    }
+    target_col = _target_column_from_mapping_rows(rows)
+    if not target_col:
+        result["error"] = "no Historical Data target column in mapping"
+        return result
+    prior_col = _detect_prior_column(out_path, _PRIOR_COLUMN_ANCHORS)
+    result["target_col"] = target_col
+    result["prior_col"] = prior_col
+    if not prior_col:
+        result["error"] = "could not detect the template's current column"
+        return result
+    if prior_col == target_col:
+        # Template's current column already matches the mapping target
+        # (exact-period template, or a fallback that happens to align).
+        result["ok"] = True
+        return result
+
+    result["shift"] = shift_historical_data_column_refs(
+        out_path, prior_col, target_col,
+    )
+    result["seed"] = seed_new_historical_data_column(
+        out_path, target_col, period,
+    )
+    result["propagate"] = propagate_column_formulas(
+        out_path, prior_col, target_col,
+        sheet="Historical Data", start_row=2,
+    )
+    econ_state = state.get("economic_data") or {}
+    result["env"] = apply_env_factors_to_historical_data(
+        out_path, target_col, prior_col,
+        str(econ_state.get("state") or "").strip(),
+        str(econ_state.get("county") or "").strip(),
+        econ_overrides=econ_state,
+    )
+    result["ok"] = True
+    result["applied"] = True
     return result
 
 
@@ -862,7 +1156,39 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
             Path(out_path).unlink()
     except OSError:
         pass
-    fill = fill_template(tmpl["path"], out_path, rows, doc)
+    fill = fill_template(
+        tmpl["path"], out_path, rows, doc,
+        cu_name=_resolve_cu_name(doc, solr_url, solr_core, charter, scale),
+    )
+
+    # When no exact-period template exists the runner falls back to the
+    # newest older template, whose calc formulas are pinned to that
+    # older quarter's Historical Data column. Advance them to this
+    # period's mapping column so the fetched 5300 data actually feeds
+    # the calcs (otherwise the report silently shows the prior quarter).
+    col_advance: dict[str, Any] = {}
+    if tmpl.get("source") == "canonical_fallback":
+        col_advance = advance_fallback_template_column(
+            out_path, rows, period, state,
+        )
+
+    # Override the template's placeholder/sample geography with this
+    # CU's state/county and refresh its environmental factors for the
+    # current column. The fallback-advance path already refreshed the
+    # factors, so only the names need setting there.
+    _econ = state.get("economic_data") or {}
+    _geo_state = str(_econ.get("state") or "").strip()
+    _geo_county = str(_econ.get("county") or "").strip()
+    apply_scale_geography(out_path, _geo_state, _geo_county)
+    if not col_advance.get("applied"):
+        _env_col = _target_column_from_mapping_rows(rows)
+        _prior_env_col = _detect_prior_column(
+            out_path, _PRIOR_COLUMN_ANCHORS) or _env_col
+        if _env_col:
+            apply_env_factors_to_historical_data(
+                out_path, _env_col, _prior_env_col, _geo_state, _geo_county,
+                econ_overrides=_econ,
+            )
 
     try:
         qf_entries = _qfactor_entries_from_state(state)
@@ -943,6 +1269,10 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         "issues": fill["issues"],
         "missing_fields": fill["missing_fields"],
         "missing_sheets": fill["missing_sheets"],
+        "col_advance_applied": bool(col_advance.get("applied")),
+        "col_advance_prior": col_advance.get("prior_col", ""),
+        "col_advance_target": col_advance.get("target_col", ""),
+        "col_advance_error": col_advance.get("error", ""),
         "qfactor_applied": qf_result["applied"],
         "qfactor_total": qf_result["total"],
         "qfactor_missing_sheets": qf_result["missing_sheets"],
@@ -1051,6 +1381,7 @@ def run_multi_quarter(
     skipped: list[dict] = []
     successes = 0
     current_template: str = tmpl["path"]
+    start_rows: list[dict] | None = None
 
     for idx, p in enumerate(periods, start=1):
         # Per-quarter mapping override only applies to the starting
@@ -1088,7 +1419,11 @@ def run_multi_quarter(
             continue
 
         try:
-            fill = fill_template(current_template, out_path, rows, doc)
+            fill = fill_template(
+                current_template, out_path, rows, doc,
+                cu_name=_resolve_cu_name(
+                    doc, solr_url, solr_core, charter, scale),
+            )
         except (_ET.ParseError, zipfile.BadZipFile) as exc:
             # The XLSX we tried to read had malformed inner XML or zip
             # structure. On iter 1 this is the canonical/override
@@ -1121,6 +1456,8 @@ def run_multi_quarter(
             })
             continue
         successes += 1
+        if p == start_period:
+            start_rows = rows
         iterations.append({
             "period": p,
             "index": idx,
@@ -1148,8 +1485,33 @@ def run_multi_quarter(
     env_result = {"ok": False, "applied_delq": 0, "applied_econ": 0,
                   "skipped": [], "error": ""}
     post_write_error: str = ""
+    col_advance: dict = {}
     if successes > 0:
         try:
+            # Fallback template: advance its pinned current-quarter
+            # column to the start period's mapping column before the
+            # calc-dependent overlays run (mirrors carry-history mode).
+            if tmpl.get("source") == "canonical_fallback" and start_rows is not None:
+                col_advance = advance_fallback_template_column(
+                    out_path, start_rows, start_period, state,
+                )
+            # Override the template's placeholder/sample geography and
+            # refresh env factors for the current column (the fallback
+            # advance already refreshed the factors when it ran).
+            _econ = state.get("economic_data") or {}
+            _geo_state = str(_econ.get("state") or "").strip()
+            _geo_county = str(_econ.get("county") or "").strip()
+            apply_scale_geography(out_path, _geo_state, _geo_county)
+            if not col_advance.get("applied") and start_rows is not None:
+                _env_col = _target_column_from_mapping_rows(start_rows)
+                _prior_env_col = _detect_prior_column(
+                    out_path, _PRIOR_COLUMN_ANCHORS) or _env_col
+                if _env_col:
+                    apply_env_factors_to_historical_data(
+                        out_path, _env_col, _prior_env_col,
+                        _geo_state, _geo_county,
+                        econ_overrides=_econ,
+                    )
             qf_entries = _qfactor_entries_from_state(state)
             qf_result = apply_qfactors(out_path, qf_entries)
             mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
@@ -1219,6 +1581,10 @@ def run_multi_quarter(
         "template_path": tmpl["path"],
         "template_source": tmpl["source"],
         "template_message": tmpl.get("message", ""),
+        "col_advance_applied": bool(col_advance.get("applied")),
+        "col_advance_prior": col_advance.get("prior_col", ""),
+        "col_advance_target": col_advance.get("target_col", ""),
+        "col_advance_error": col_advance.get("error", ""),
         "qfactor_applied": qf_result["applied"],
         "qfactor_total": qf_result["total"],
         "qfactor_missing_sheets": qf_result["missing_sheets"],
@@ -1548,7 +1914,10 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
     runs_service.unhide_all_sheets(out_path)
 
     # Now overlay the target quarter's data on top of the carried workbook.
-    fill = fill_template(out_path, out_path, rows, doc)
+    fill = fill_template(
+        out_path, out_path, rows, doc,
+        cu_name=_resolve_cu_name(doc, solr_url, solr_core, charter, scale),
+    )
 
     # The carried workbook's downstream formulas (Scale Calculation,
     # Env Factor by Pool, Executive Summary-Vizo, Cover, etc.) still
@@ -1602,7 +1971,9 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
     env_factors_result = apply_env_factors_to_historical_data(
         out_path, target_col, prior_col,
         env_state_name, env_county_name,
+        econ_overrides=econ_state,
     )
+    apply_scale_geography(out_path, env_state_name, env_county_name)
 
     qf_entries = _qfactor_entries_from_state(state)
     try:
