@@ -1,0 +1,294 @@
+{% extends "base.html" %}
+{% block title %}Upload Impaired Loans — {{ short_name }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Upload Impaired Loans Report</h2>
+  <p class="muted">
+    {{ cfg.credit_union or short_name }} &mdash; drop a new Impaired Loans
+    workbook for an existing reporting period without re-running setup or
+    the full new-quarter pass. The file is saved into this CU's data
+    folder under a canonical name so it becomes the authoritative
+    impaired list for that period's next report run.
+  </p>
+
+  {# View the validation for an already-saved impaired file, no upload / #}
+  {# no new-quarter run needed. #}
+  <div style="margin:12px 0 4px; padding:12px 14px; background:#f3f8ff; border:1px solid #b9cbe0; border-radius:6px;">
+    <strong>View an already-saved impaired file</strong>
+    <p class="muted" style="margin:4px 0 8px;">
+      See the grade/pool validation for a period whose impaired file is
+      already in place &mdash; no upload or new-quarter run required.
+    </p>
+    <form method="get"
+          action="{{ url_for('run.upload_impaired_form', short_name=short_name) }}"
+          style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <label for="view_snap" class="muted">Period</label>
+      {% if snapshots %}
+        <select id="view_snap" name="snapshot_date" style="max-width:200px;">
+          {% for s in snapshots %}
+            <option value="{{ s }}"{% if s == default_snap %} selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <input id="view_snap" type="date" name="snapshot_date"
+               value="{{ default_snap }}" style="max-width:200px;">
+      {% endif %}
+      <button class="btn btn-primary" type="submit">View validation</button>
+    </form>
+  </div>
+
+  <form method="post"
+        enctype="multipart/form-data"
+        action="{{ url_for('run.upload_impaired', short_name=short_name) }}">
+
+    <h3 style="margin-top:18px;">1. Reporting period</h3>
+    <label for="snapshot_date">Snapshot / period-ending date</label>
+    {% if snapshots %}
+      <select id="snapshot_date" name="snapshot_date" required style="max-width:260px;">
+        {% for s in snapshots %}
+          <option value="{{ s }}"{% if s == default_snap %} selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    {% else %}
+      <input id="snapshot_date" type="date" name="snapshot_date"
+             value="{{ default_snap }}" required style="max-width:220px;">
+      <span class="help">No snapshots found in the DB yet.</span>
+    {% endif %}
+    <p class="muted" style="margin-top:4px;">
+      The impaired file will be discovered for this period by the report
+      engine on the next run.
+    </p>
+
+    <h3 style="margin-top:20px;">2. Impaired Loans workbook</h3>
+    <label for="impaired_file"><strong>Choose file</strong> (.xlsx / .xlsm)</label>
+    <input id="impaired_file" type="file" name="impaired_file"
+           accept=".xlsx,.xlsm" required>
+    <p class="muted" style="margin-top:4px;">
+      Whatever the CU named the file, it is saved as
+      <code>YYYY-MM Impaired Loans - {{ cfg.credit_union or short_name }}.xlsx</code>
+      so it always matches the report engine's file finder.
+    </p>
+
+    <div style="margin-top:20px; display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit">Upload &amp; Verify</button>
+      <a class="btn btn-secondary"
+         href="{{ url_for('run.client_dashboard', short_name=short_name) }}">
+        &larr; Back to CU
+      </a>
+    </div>
+  </form>
+
+  <p class="muted" style="margin-top:16px;">
+    After the file verifies below, go back to the CU dashboard and click
+    <strong>Generate reports</strong> for this period &mdash; the reports
+    will use the newly-uploaded impaired data. No re-import is needed.
+  </p>
+</div>
+
+{% if verification %}
+  {% set impaired = verification %}
+  <div class="card">
+    <h3 style="margin-top:0;">Impaired Loans Verification</h3>
+    {% if not impaired.found %}
+      <p class="muted">
+        No impaired workbook could be located for
+        <code>{{ default_snap }}</code> after the upload. Double-check the
+        period you selected matches the file's contents.
+      </p>
+    {% else %}
+      <p class="muted" style="margin:6px 0;">
+        Source: <code>{{ impaired.filename }}</code>
+        {% if impaired.period_ending %}
+          &nbsp;·&nbsp; Period ending: <strong>{{ impaired.period_ending }}</strong>
+        {% endif %}
+        {% if impaired.cu_name %}
+          &nbsp;·&nbsp; CU: {{ impaired.cu_name }}
+        {% endif %}
+      </p>
+      {% if impaired.error %}
+        <p style="margin:6px 0; color:#8a3a00;">
+          <strong>Note:</strong> {{ impaired.error }}
+        </p>
+      {% endif %}
+
+      {# Summary strip: match counts + totals #}
+      <div style="display:flex; gap:24px; margin-bottom:14px; flex-wrap:wrap;">
+        <div>
+          <span class="muted">Rows:</span>
+          <strong>{{ impaired.data_rows|length }}</strong>
+        </div>
+        <div>
+          <span class="muted">Matched in loan data:</span>
+          <strong style="color:#2d662d;">{{ impaired.matched }}</strong>
+        </div>
+        <div>
+          <span class="muted">Unmatched:</span>
+          <strong style="color:{% if impaired.unmatched %}#b03a2e{% else %}#2d662d{% endif %};">{{ impaired.unmatched }}</strong>
+        </div>
+        <div>
+          <span class="muted">Total Current Balance:</span>
+          <strong>${{ "{:,.2f}".format(impaired.totals.current_balance) }}</strong>
+        </div>
+        <div>
+          <span class="muted">Total Provision:</span>
+          <strong>${{ "{:,.2f}".format(impaired.totals.provision_amount) }}</strong>
+        </div>
+        <div>
+          <span class="muted">Total Balance Removed:</span>
+          <strong>${{ "{:,.2f}".format(impaired.totals.balance_removed) }}</strong>
+        </div>
+      </div>
+
+      {# Validation card: codes routing to Ignore ------------------------ #}
+      {% set iv = impaired.validation or {} %}
+      {% if iv.get('unmapped_codes') %}
+        <div style="background:#fff8e6; border:1px solid #b88a00; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+          <h4 style="margin-top:0; color:#7a5c00;">Some impaired loan codes route to Ignore</h4>
+          <p class="muted" style="margin:6px 0;">
+            The codes below appear in the impaired workbook but resolve to
+            an <code>Ignore</code> pool (missing from the loan-code map or
+            explicitly mapped to Ignore). Use the
+            <a href="{{ url_for('run.edit_pool_map', short_name=short_name) }}">Loan Code Mapping editor</a>
+            to assign each one to a real pool, then re-import, so the
+            impaired rows re-pool correctly before reports run.
+          </p>
+          <table class="data-table" style="margin:8px 0;">
+            <thead>
+              <tr>
+                <th>Loan code</th>
+                <th style="text-align:right;">Rows</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for code in iv.unmapped_codes %}
+              <tr>
+                <td><code>{{ code }}</code></td>
+                <td style="text-align:right;">{{ iv.counts.get(code, 0) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="muted" style="margin:8px 0;">
+          All impaired loan codes are mapped to real pools.
+        </p>
+      {% endif %}
+
+      {# Grade & Pool distribution (resolved from the AIRES extract) ----- #}
+      {% set dist = impaired.distribution %}
+      {% if dist and dist.by_pool %}
+        <div style="margin-bottom:18px;">
+          <h4 style="margin:0 0 4px;">Grade &amp; Pool Distribution
+            <span class="muted" style="font-weight:400; font-size:85%;">
+              &mdash; grade &amp; pool resolved from the AIRES loan data{% if impaired.source %}
+              ({{ impaired.source }}){% endif %}
+            </span>
+          </h4>
+          <p class="muted" style="margin:4px 0 10px; font-size:88%;">
+            Confirm each impaired loan lands in the expected pool and credit
+            grade. Each loan's grade comes from the FICO score and its pool
+            from the loan code in the matched AIRES record. Pools shaded
+            <span style="background:#fff3d6; padding:0 3px;">yellow</span>
+            route to <code>Ignore</code>/<code>Exclude</code>; a non-zero
+            <strong style="color:#b03a2e;">Not in AIRES</strong> count means
+            those loans were not found in the extract and fell back to their
+            entered loan-type code with grade <em>Not Reported</em>.
+          </p>
+          <table class="data-table" style="font-size:90%;">
+            <thead>
+              <tr>
+                <th>Pool</th>
+                {% for g in dist.grades %}<th style="text-align:right;">{{ g }}</th>{% endfor %}
+                <th style="text-align:right;">#&nbsp;Loans</th>
+                <th style="text-align:right;">Not in AIRES</th>
+                <th style="text-align:right;">Current Balance</th>
+                <th style="text-align:right;">Provision</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for p in dist.by_pool %}
+              <tr {% if p.is_ignore %}style="background:#fff3d6;"{% endif %}>
+                <td>{% if p.is_ignore %}<em style="color:#b03a2e;">{{ p.pool }}</em>{% else %}{{ p.pool }}{% endif %}</td>
+                {% for g in dist.grades %}
+                <td style="text-align:right;">{{ p.grades.get(g, 0) or '' }}</td>
+                {% endfor %}
+                <td style="text-align:right;">{{ p.count }}</td>
+                <td style="text-align:right;{% if p.unmatched %} color:#b03a2e; font-weight:600;{% endif %}">{{ p.unmatched or '' }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(p.current_balance) }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(p.provision_amount) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot>
+              <tr style="font-weight:600; border-top:2px solid #999;">
+                <td>Total</td>
+                {% for g in dist.grades %}<td style="text-align:right;">{{ dist.grade_totals.get(g, 0) or '' }}</td>{% endfor %}
+                <td style="text-align:right;">{{ dist.totals.count }}</td>
+                <td style="text-align:right;{% if dist.totals.unmatched %} color:#b03a2e;{% endif %}">{{ dist.totals.unmatched or '' }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(dist.totals.current_balance) }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(dist.totals.provision_amount) }}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      {% endif %}
+
+      {# Data rows preview (top 200) ------------------------------------- #}
+      {% if impaired.data_rows %}
+        <details {% if iv.get('unmapped_codes') %}{% else %}open{% endif %} style="margin-bottom:8px;">
+          <summary style="cursor:pointer; font-weight:600;">
+            Show all {{ impaired.data_rows|length }} impaired loan(s)
+          </summary>
+          <table class="data-table" style="margin-top:10px; font-size:90%;">
+            <thead>
+              <tr>
+                <th>Member #</th>
+                <th>Suffix</th>
+                <th>Type</th>
+                <th>Loan Pool</th>
+                <th>Credit Grade</th>
+                <th>In AIRES?</th>
+                <th style="text-align:right;">Current Balance</th>
+                <th style="text-align:right;">Balance (Loan Rpt)</th>
+                <th style="text-align:right;">Diff</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in impaired.data_rows[:200] %}
+                {% set _lp = (row.loan_pool or '')|string %}
+                {% set _lp_low = _lp|lower %}
+                {% set _is_ignore = _lp_low in ('','ignore') %}
+                {% set _unmatched = row.get('unmatched_in_loan_data') %}
+              <tr {% if _unmatched %}style="background:#fde7e7;"{% elif _is_ignore %}style="background:#fff3d6;"{% endif %}>
+                <td>{{ row.member or row.member_number or '' }}</td>
+                <td>{{ row.suffix or row.loan_suffix or '' }}</td>
+                <td><code>{{ row.loan_type or '' }}</code></td>
+                <td>{% if _is_ignore %}<em style="color:#b03a2e;">Ignore</em>{% else %}{{ _lp }}{% endif %}</td>
+                <td>{{ row.credit_grade or '' }}</td>
+                <td>{% if _unmatched %}<span style="color:#b03a2e;">No</span>{% else %}<span style="color:#2d662d;">Yes</span>{% endif %}</td>
+                <td style="text-align:right;">
+                  {% if row.current_balance is not none %}${{ "{:,.2f}".format(row.current_balance|float) }}{% else %}—{% endif %}
+                </td>
+                <td style="text-align:right;">
+                  {% if row.balance_from_loan_report is not none %}${{ "{:,.2f}".format(row.balance_from_loan_report|float) }}{% else %}—{% endif %}
+                </td>
+                <td style="text-align:right;">
+                  {% set _bd = row.balance_difference if row.balance_difference is defined else row.balance_diff %}
+                  {% if _bd is not none %}${{ "{:,.2f}".format(_bd|float) }}{% else %}—{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% if impaired.data_rows|length > 200 %}
+          <p class="muted" style="margin:6px 0;">
+            Showing first 200 of {{ impaired.data_rows|length }} rows.
+          </p>
+          {% endif %}
+        </details>
+      {% endif %}
+    {% endif %}
+  </div>
+{% endif %}
+{% endblock %}

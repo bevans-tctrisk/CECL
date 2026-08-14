@@ -2,6 +2,7 @@
 {% block title %}Charge-Offs &amp; Recoveries{% endblock %}
 {% block content %}
 {% include "setup/_stepper.html" %}
+{% from "setup/_files_used_panel.html" import files_used_panel %}
 
 {% macro co_recov_scan_results(scan, kind_label, clear_action, ignore_action, unignore_action) %}
   {% if scan %}
@@ -148,6 +149,14 @@
     yet must be assigned to a pool here so they flow into the report.
   </p>
 </div>
+
+{% if files_used and files_used.data_directory %}
+{{ files_used_panel(files_used,
+   "You don&rsquo;t need to re-upload monthly files here &mdash; the charge-off
+    &amp; recovery history is read at report time directly from the credit
+    union&rsquo;s data folder. The files below are what the report will actually
+    use; review them to validate the source data.") }}
+{% endif %}
 
 {% set su = state.sample_uploads or {} %}
 
@@ -434,32 +443,40 @@
             file but aren&rsquo;t in the loan-code map yet. Assign each one to a
             pool so its dollars flow into the report.
           </p>
-          <table class="data-table" style="font-size:12px;">
-            <thead>
-              <tr><th>Loan code</th><th>Assign to pool</th><th></th></tr>
-            </thead>
-            <tbody>
-              {% for code in validation.unmapped_codes %}
-                <tr>
-                  <td><code>{{ code }}</code></td>
-                  <td>
-                    <form method="post" style="display:flex; gap:6px; align-items:center; margin:0;">
-                      <input type="hidden" name="action" value="assign_code">
-                      <input type="hidden" name="code" value="{{ code }}">
-                      <select name="new_pool">
+          <form method="post" style="margin:0;">
+            <input type="hidden" name="action" value="assign_codes_bulk">
+            <table class="data-table" style="font-size:12px;">
+              <thead>
+                <tr><th>Loan code</th><th>Assign to pool</th></tr>
+              </thead>
+              <tbody>
+                {% for code in validation.unmapped_codes %}
+                  <tr>
+                    <td>
+                      <code>{{ code }}</code>
+                      <input type="hidden" name="map_code" value="{{ code }}">
+                    </td>
+                    <td>
+                      <select name="map_pool" style="min-width:280px;">
                         <option value="">&mdash; leave unmapped (use default) &mdash;</option>
                         {% for p in pool_choices %}
                           <option value="{{ p }}">{{ p }}</option>
                         {% endfor %}
                       </select>
-                      <button class="btn btn-secondary" type="submit">Save</button>
-                    </form>
-                  </td>
-                  <td></td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <div style="margin-top:10px;">
+              <button class="btn btn-primary" type="submit">
+                Save all mappings
+              </button>
+              <span class="muted" style="margin-left:10px;">
+                Codes left as &ldquo;leave unmapped&rdquo; will use the default pool.
+              </span>
+            </div>
+          </form>
         {% else %}
           <p class="muted" style="margin-top:10px;">
             &#10003; All codes in this file are mapped.
@@ -479,12 +496,28 @@
   {% if su.get('co_files') %}
     <div class="upload-status-list">
       {% for f in su['co_files'] %}
-        <div class="upload-status-item">
+        <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
           <span class="upload-status-icon">&#10003;</span>
-          <code>{{ f.name }}</code>
+          <code style="flex:1;">{{ f.name }}</code>
+          <form method="post" style="margin:0;"
+                onsubmit="return confirm('Remove {{ f.name|e }} from this list?');">
+            <input type="hidden" name="action" value="remove_sample_co_file">
+            <input type="hidden" name="filename" value="{{ f.name }}">
+            <button class="btn btn-link" type="submit"
+                    style="padding:0 4px; color:#a33; font-size:12px;"
+                    title="Remove from list">Remove</button>
+          </form>
         </div>
       {% endfor %}
     </div>
+    <form method="post" style="margin-top:8px;"
+          onsubmit="return confirm('Remove all {{ su['co_files']|length }} charge-off file(s) from this step? Your column mappings will be preserved.');">
+      <input type="hidden" name="action" value="clear_all_sample_co">
+      <button class="btn btn-link" type="submit"
+              style="color:#a04;">
+        Clear all files
+      </button>
+    </form>
   {% endif %}
 
   <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
@@ -544,15 +577,51 @@
   </label>
 
   <div id="sample-recov-upload" {% if su.get('no_recoveries') %}hidden{% endif %}>
+    {% if su.get('co_files') %}
+      <div style="margin-bottom:12px; padding:10px 12px; border:1px solid #cfe5cf;
+                  border-radius:6px; background:#f4faf4;">
+        <strong>Same files as Charge-Offs?</strong>
+        <p class="muted" style="margin:4px 0 8px;">
+          Many credit unions publish charge-offs and recoveries in the
+          <strong>same workbook(s)</strong>. Click below to copy all
+          {{ su['co_files']|length }} Charge-Off file(s) into the
+          Recoveries list. You can still adjust the Recoveries column
+          mapping (e.g. point to the Recovery&nbsp;Amount column) below.
+        </p>
+        <form method="post" style="margin:0;"
+              onsubmit="return confirm('Copy all {{ su['co_files']|length }} Charge-Off file(s) to the Recoveries list?');">
+          <input type="hidden" name="action" value="use_co_files_for_recov">
+          <button class="btn btn-secondary" type="submit">
+            Use the same files as Charge-Offs
+          </button>
+        </form>
+      </div>
+    {% endif %}
     {% if su.get('recov_files') %}
       <div class="upload-status-list">
         {% for f in su['recov_files'] %}
-          <div class="upload-status-item">
+          <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
             <span class="upload-status-icon">&#10003;</span>
-            <code>{{ f.name }}</code>
+            <code style="flex:1;">{{ f.name }}</code>
+            <form method="post" style="margin:0;"
+                  onsubmit="return confirm('Remove {{ f.name|e }} from this list?');">
+              <input type="hidden" name="action" value="remove_sample_recov_file">
+              <input type="hidden" name="filename" value="{{ f.name }}">
+              <button class="btn btn-link" type="submit"
+                      style="padding:0 4px; color:#a33; font-size:12px;"
+                      title="Remove from list">Remove</button>
+            </form>
           </div>
         {% endfor %}
       </div>
+      <form method="post" style="margin-top:8px;"
+            onsubmit="return confirm('Remove all {{ su['recov_files']|length }} recoveries file(s) from this step? Your column mappings will be preserved.');">
+        <input type="hidden" name="action" value="clear_all_sample_recov">
+        <button class="btn btn-link" type="submit"
+                style="color:#a04;">
+          Clear all files
+        </button>
+      </form>
     {% endif %}
     <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
       <label>Recoveries file

@@ -1,0 +1,14 @@
+{# Base layout shared by all report pages. CSS is inlined (passed as
+   `inline_css`) so the rendered HTML is fully self-contained for
+   headless Chromium — no static server or base URL required. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}CECL Credit Migration Report{% endblock %}</title>
+  <style>{{ inline_css | safe }}</style>
+</head>
+<body>
+  {% block body %}{% endblock %}
+</body>
+</html>

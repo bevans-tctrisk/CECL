@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ cover.title }} — {{ cover.credit_union }}{% endblock %}
+{% block body %}
+<section class="page cover-page">
+  {% if cover.top_logo %}
+  <img class="cover-logo-top" src="{{ cover.top_logo }}" alt="Vizo Financial">
+  {% endif %}
+
+  <h1 class="cover-title">{{ cover.title }}</h1>
+  {% if cover.subtitle %}
+  <h2 class="cover-subtitle">{{ cover.subtitle }}</h2>
+  {% endif %}
+
+  <div class="cover-cu">{{ cover.credit_union }}</div>
+  <div class="cover-period">{{ cover.date_text or cover.period_ending }}</div>
+
+  <div class="cover-paragraph">{{ cover.paragraph or cover.confidentiality }}</div>
+
+  <div class="cover-foot-spacer"></div>
+
+  {% if cover.bottom_logo %}
+  <img class="cover-logo-bottom" src="{{ cover.bottom_logo }}" alt="TCT Risk Solutions">
+  {% endif %}
+  {% if cover.footer %}
+  <div class="cover-footer">{{ cover.footer }}</div>
+  {% endif %}
+</section>
+{% endblock %}

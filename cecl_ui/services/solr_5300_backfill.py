@@ -416,3 +416,204 @@ def backfill_missing_quarters(
     out["new_loan_codes"] = sorted(seen_codes)
     out["ok"] = True
     return out
+
+
+
+
+def backfill_missing_quarters_distributed(
+    cu: str,
+    charter: int,
+    solr_url: str,
+    core: str,
+    target_period: str,
+    history_months: int,
+    *,
+    pool_distribution: dict,
+    canonical_map=None,
+    existing_dates=None,
+    overwrite: bool = False,
+    source_period_iso: str = "",
+    username=None,
+    password=None,
+):
+    """Backfill missing quarter-ends by distributing the QUARTER's TOTAL
+    loan balance across the user's configured pools using the supplied
+    ``pool_distribution`` ratios (typically captured from the earliest
+    month of the historical balance file(s)).
+
+    Each row written to ``loan_code_history`` uses the user's pool name
+    directly as ``loan_code`` and is sourced as
+    ``5300-distributed:<qe>``. Choosing this mode also wipes any prior
+    per-loan-code rows (``5300:%``) for this CU to avoid double-
+    counting at report time.
+    """
+    out = {
+        "ok": False,
+        "error": None,
+        "mode": "distributed",
+        "expected": [],
+        "months_filled": [],
+        "months_skipped": [],
+        "months_no_data": [],
+        "rows_written": 0,
+        "stale_rows_removed": 0,
+        "new_loan_codes": [],
+        "pool_distribution": dict(pool_distribution or {}),
+        "distribution_period": source_period_iso,
+    }
+    if not cu:
+        out["error"] = "Credit union name not set on Identity step."
+        return out
+    if not charter:
+        out["error"] = "Charter number not set on Identity step."
+        return out
+    if not pool_distribution:
+        out["error"] = (
+            "Pool distribution is empty - upload at least one historical "
+            "balance file with a non-zero earliest month."
+        )
+        return out
+    cmap = canonical_map if canonical_map is not None else load_canonical_map()
+    if not cmap:
+        out["error"] = (
+            f"Canonical 5300 map is empty or missing: {_CANONICAL_CSV}"
+        )
+        return out
+    try:
+        extract_hist_processor.ensure_table()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"Could not ensure loan_code_history table: {exc}"
+        return out
+
+    pool_names = sorted(pool_distribution.keys())
+    try:
+        from sqlalchemy import text as _sql_text
+        eng = extract_hist_processor._engine_lazy()
+        with eng.begin() as conn:
+            res = conn.execute(
+                _sql_text(
+                    "DELETE FROM loan_code_history "
+                    "WHERE cu = :cu "
+                    "AND source LIKE '5300-distributed:%' "
+                    "AND loan_code <> ALL(:codes)"
+                ),
+                {"cu": cu, "codes": pool_names},
+            )
+            out["stale_rows_removed"] += int(res.rowcount or 0)
+            res = conn.execute(
+                _sql_text(
+                    "DELETE FROM loan_code_history "
+                    "WHERE cu = :cu "
+                    "AND source LIKE '5300:%'"
+                ),
+                {"cu": cu},
+            )
+            out["stale_rows_removed"] += int(res.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        out["months_skipped"].append({
+            "period": "(cleanup)",
+            "reason": f"cleanup failed: {type(exc).__name__}: {exc}",
+        })
+
+    quarter_ends = expected_quarter_ends(target_period, history_months)
+    out["expected"] = quarter_ends
+    existing = set(existing_dates or [])
+
+    _PARENT_CHILDREN = {
+        "1st Mortgage Real Estate": ("First Liens",),
+        "Other Real Estate": (
+            "Junior Liens", "Other Real Estate (Other)"),
+    }
+
+    for qe in quarter_ends:
+        fill_dates = quarter_fill_dates(qe)
+        if overwrite:
+            targets = list(fill_dates)
+        else:
+            targets = [d for d in fill_dates if d not in existing]
+        if not targets:
+            out["months_skipped"].append({
+                "period": qe,
+                "reason": "quarter already covered (all 3 months present)",
+            })
+            continue
+        try:
+            doc = fetch_solr_doc(
+                solr_url, core, int(charter), qe,
+                username=username, password=password,
+            )
+        except Exception as exc:  # noqa: BLE001
+            out["months_skipped"].append({
+                "period": qe,
+                "reason": f"fetch error: {type(exc).__name__}: {exc}",
+            })
+            continue
+        if doc is None:
+            out["months_no_data"].append(qe)
+            continue
+
+        bucket_totals = {}
+        for entry in cmap:
+            code = entry["loan_code"]
+            fc = entry["field_code"]
+            val = _coerce_number(doc.get(fc)) if fc in doc else 0.0
+            bucket_totals[code] = bucket_totals.get(code, 0.0) + val
+        for parent, children in _PARENT_CHILDREN.items():
+            if bucket_totals.get(parent, 0.0) > 0:
+                for ch in children:
+                    bucket_totals.pop(ch, None)
+        total = sum(bucket_totals.values())
+        if total <= 0:
+            out["months_skipped"].append({
+                "period": qe,
+                "reason": "5300 doc had no positive loan balances",
+            })
+            continue
+
+        rollup_rows = [
+            {
+                "loan_code": pool_name,
+                "total_balance": round(total * float(ratio), 2),
+                "loan_count": 0,
+                "fico_histogram": {},
+                "fico_balance": {},
+            }
+            for pool_name, ratio in pool_distribution.items()
+            if float(ratio) > 0
+        ]
+        if not rollup_rows:
+            out["months_skipped"].append({
+                "period": qe,
+                "reason": "all pool ratios were zero",
+            })
+            continue
+
+        for as_of in targets:
+            label = ("quarter-end" if as_of == qe
+                     else "copied from quarter-end")
+            try:
+                written = extract_hist_processor.upsert_month(
+                    cu, as_of, rollup_rows,
+                    source=f"5300-distributed:{qe}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                out["months_skipped"].append({
+                    "period": as_of,
+                    "reason": f"upsert error: {exc}",
+                })
+                continue
+            out["months_filled"].append({
+                "period": as_of,
+                "quarter_end": qe,
+                "rows_written": written,
+                "codes": len(rollup_rows),
+                "total_balance": round(total, 2),
+                "note": label,
+            })
+            out["rows_written"] += written
+            existing.add(as_of)
+
+    out["new_loan_codes"] = pool_names
+    out["ok"] = True
+    return out
+

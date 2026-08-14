@@ -1,6 +1,10 @@
 """Run quarterly reports for an already-configured CU."""
 from __future__ import annotations
 
+import calendar
+import re
+import shutil
+from datetime import date
 from pathlib import Path
 
 from flask import (
@@ -9,10 +13,417 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
+from cecl_ui.services import balance_check as balance_check_service
 from cecl_ui.services import config_service, pipeline_service
+from cecl_ui.services import impaired_check_service
 
 
 run_bp = Blueprint("run", __name__)
+
+
+def _normalize_folder_path(folder_str: str) -> str:
+    """Trim whitespace + surrounding quotes a user may have pasted in."""
+    s = (folder_str or "").strip()
+    if len(s) >= 2 and s[0] in ('"', "'") and s[-1] == s[0]:
+        s = s[1:-1].strip()
+    return s
+
+
+def _period_to_snapshot(period: str) -> str | None:
+    """Convert a 'YYYY-MM' period string to ISO month-end date."""
+    s = (period or "").strip()
+    if len(s) != 7 or s[4] != "-":
+        return None
+    try:
+        y, m = int(s[:4]), int(s[5:7])
+        last = calendar.monthrange(y, m)[1]
+        return date(y, m, last).isoformat()
+    except (ValueError, calendar.IllegalMonthError):
+        return None
+
+
+def _refresh_staged_monthly_balance(
+    cfg: dict, folder_src: str, upload_dir: Path,
+) -> tuple[str, str] | None:
+    """Look among the just-staged files for an updated copy of the CU's
+    monthly balance workbook and refresh the wizard-staged saved_path.
+
+    The wizard captures ``monthly_balance.saved_path`` as a copy under
+    ``%TEMP%\\cecl_ui_monthly_bal\\`` at setup time. Subsequent quarters'
+    updated Historical Balance Sheets files (with new month columns
+    appended) are dropped into the source folder but never touched by
+    Run New Quarter's default file staging (which only routes files
+    through Raw_Uploads/ for the loan importer). This helper closes
+    that gap: when we detect a filename-matching file among the newly
+    staged uploads OR in the source folder, and it's newer than the
+    existing staged copy, we copy it over ``saved_path`` so the
+    Balance Adjustment Review + report engine both pick up May/June/
+    etc. columns without a manual wizard re-visit.
+
+    Returns ``(flash_msg, category)`` or ``None`` when no refresh
+    happened. Best-effort: never raises.
+    """
+    mb = (cfg or {}).get("monthly_balance") or {}
+    saved_path = str(mb.get("saved_path") or "").strip()
+    if not saved_path:
+        return None
+    canonical = str(mb.get("filename") or "").strip() or Path(saved_path).name
+
+    def _norm(name: str) -> str:
+        return re.sub(r"[\s_\-]+", "_", str(name).strip().lower())
+
+    target = _norm(canonical)
+    if not target:
+        return None
+
+    candidates: list[Path] = []
+    try:
+        for entry in upload_dir.iterdir():
+            if entry.is_file() and _norm(entry.name) == target:
+                candidates.append(entry)
+    except OSError:
+        pass
+    if folder_src:
+        try:
+            for entry in Path(folder_src).rglob("*"):
+                if entry.is_file() and _norm(entry.name) == target:
+                    candidates.append(entry)
+        except OSError:
+            pass
+    if not candidates:
+        return None
+    try:
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    src = candidates[0]
+    dest = Path(saved_path)
+    # Skip when the staged copy is already at least as fresh (avoids
+    # clobbering a user's hand-edited local copy on repeat submits).
+    try:
+        if dest.exists() and dest.stat().st_mtime >= src.stat().st_mtime:
+            return None
+    except OSError:
+        pass
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+    except OSError as exc:
+        return (
+            f"Found updated monthly balance file '{src.name}' but could "
+            f"not refresh the staged copy: {exc}",
+            "warning",
+        )
+    return (
+        f"Refreshed staged monthly balance file from '{src.name}' — "
+        "Balance Adjustment Review will use the latest data.",
+        "success",
+    )
+
+
+def _col_to_idx(letter: str) -> int:
+    """Spreadsheet column letter (``A``, ``B``, ``AA`` …) → 0-based index."""
+    s = str(letter or "A").strip().upper()
+    idx = 0
+    for ch in s:
+        if "A" <= ch <= "Z":
+            idx = idx * 26 + (ord(ch) - 64)
+    return max(0, idx - 1)
+
+
+def _autofill_monthly_balance_from_extract(
+    cfg: dict, upload_dir: Path, snapshot: str,
+) -> str | None:
+    """Populate the snapshot month's column of the wizard monthly-balance
+    matrix from the freshly-staged loan extract(s) + the delivered GL
+    balance sheet.
+
+    Opt-in via ``monthly_balance.autofill_from_extract: true``. Removes the
+    recurring manual step of hand-appending each new month's per-pool loan
+    balances to ``monthly_balance.saved_path``: the matrix's per-loan-type
+    rows are filled from the staged loan files grouped by their
+    ``loan_pool_code`` column (these reconcile to the GL loan principal),
+    and any pool-named rows that don't originate in the loan system (e.g.
+    Credit Cards from a card processor, Negative Share Draft) are filled
+    from the delivered GL balance sheet via
+    ``monthly_balance.autofill_gl_lines`` (matched by account code or a
+    label substring).
+
+    Idempotent: skips when the snapshot column already holds values, so a
+    re-run never clobbers manually-entered figures. Best-effort — never
+    raises.
+    """
+    mb = (cfg or {}).get("monthly_balance") or {}
+    if not mb.get("autofill_from_extract"):
+        return None
+    saved_path = str(mb.get("saved_path") or "").strip()
+    if not saved_path or not Path(saved_path).is_file():
+        return None
+    try:
+        y, m = int(snapshot[:4]), int(snapshot[5:7])
+    except (ValueError, TypeError):
+        return None
+
+    import openpyxl
+    import pandas as pd
+    from datetime import datetime as _dt
+
+    def _num(x) -> float:
+        s = str(x).replace("$", "").replace(",", "").strip()
+        if s in ("", "nan", "None", "NaN"):
+            return 0.0
+        neg = s.startswith("(") and s.endswith(")")
+        if neg:
+            s = s[1:-1]
+        try:
+            v = float(s)
+        except ValueError:
+            return 0.0
+        return -v if neg else v
+
+    allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+
+    # --- per-code balances from staged loan extract file(s) ---------------
+    code_bal: dict[str, float] = {}
+    for ext in (cfg.get("loan_data_extracts") or []):
+        pat = str(ext.get("file_pattern") or "").strip()
+        cm = ext.get("column_mappings") or {}
+        code_col = cm.get("loan_pool_code")
+        bal_col = cm.get("current_balance")
+        if not pat or not code_col or not bal_col:
+            continue
+        try:
+            rx = re.compile(pat, re.IGNORECASE)
+        except re.error:
+            continue
+        hdr = 0 if ext.get("has_header", True) else None
+        for entry in sorted(upload_dir.iterdir()):
+            if (not entry.is_file()
+                    or entry.suffix.lower() not in allowed
+                    or entry.name.startswith("~$")
+                    or not rx.match(entry.name)):
+                continue
+            try:
+                df = pd.read_excel(entry, header=hdr)
+            except Exception:  # noqa: BLE001
+                continue
+            df.columns = [str(c).strip() for c in df.columns]
+            if code_col not in df.columns or bal_col not in df.columns:
+                continue
+            grouped = df.groupby(df[code_col].astype(str).str.strip())
+            for code, grp in grouped:
+                if not code or code.lower() == "nan":
+                    continue
+                code_bal[code] = code_bal.get(code, 0.0) + float(
+                    grp[bal_col].map(_num).sum())
+
+    # --- pool-named rows from the delivered GL balance sheet --------------
+    gl_lines = mb.get("autofill_gl_lines") or {}
+    gl_vals: dict[str, float] = {}
+    if gl_lines:
+        gcfg = mb.get("autofill_gl_balance_sheet") or {}
+        gpat = str(gcfg.get("file_pattern") or "").strip()
+        acc_i = _col_to_idx(gcfg.get("account_col") or "A")
+        lab_i = _col_to_idx(gcfg.get("label_col") or "B")
+        amt_i = _col_to_idx(gcfg.get("amount_col") or "D")
+        grx = None
+        if gpat:
+            try:
+                grx = re.compile(gpat, re.IGNORECASE)
+            except re.error:
+                grx = None
+        gl_file = None
+        for entry in sorted(upload_dir.iterdir()):
+            if (entry.is_file() and entry.suffix.lower() in allowed
+                    and not entry.name.startswith("~$")
+                    and (grx is None or grx.match(entry.name))):
+                gl_file = entry
+                break
+        if gl_file is not None:
+            try:
+                gdf = pd.read_excel(gl_file, header=None)
+            except Exception:  # noqa: BLE001
+                gdf = None
+            if gdf is not None:
+                for pool, spec in gl_lines.items():
+                    want_acc = str((spec or {}).get("account") or "").strip()
+                    want_lab = str((spec or {}).get("label_contains")
+                                   or "").strip().lower()
+                    for i in range(gdf.shape[0]):
+                        acc = (str(gdf.iat[i, acc_i]).strip()
+                               if acc_i < gdf.shape[1] else "")
+                        lab = (str(gdf.iat[i, lab_i]).strip().lower()
+                               if lab_i < gdf.shape[1] else "")
+                        hit = ((want_acc and acc == want_acc)
+                               or (want_lab and want_lab in lab))
+                        if hit and amt_i < gdf.shape[1]:
+                            gl_vals[pool] = _num(gdf.iat[i, amt_i])
+                            break
+
+    if not code_bal and not gl_vals:
+        return None
+
+    # --- write into the snapshot month column -----------------------------
+    try:
+        wb = openpyxl.load_workbook(saved_path)
+    except Exception:  # noqa: BLE001
+        return None
+    ws = wb.active
+    target = None
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=1, column=c).value
+        if isinstance(v, _dt) and v.year == y and v.month == m:
+            target = c
+            break
+    if target is None:
+        return None
+    # Idempotent: bail out if any data row already holds a value for this
+    # month so a re-run never clobbers manual or prior figures.
+    for r in range(2, ws.max_row + 1):
+        if (ws.cell(row=r, column=1).value is None
+                and ws.cell(row=r, column=2).value is None):
+            continue
+        if ws.cell(row=r, column=target).value not in (None, ""):
+            return None
+    filled = 0
+    for r in range(2, ws.max_row + 1):
+        code = ws.cell(row=r, column=1).value
+        pool = ws.cell(row=r, column=2).value
+        if code is None and pool is None:
+            continue
+        key = str(code).strip()
+        val = None
+        if key in code_bal:
+            val = code_bal[key]
+        elif str(pool).strip() in gl_vals:
+            val = gl_vals[str(pool).strip()]
+        elif key in gl_vals:
+            val = gl_vals[key]
+        if val is None:
+            continue
+        ws.cell(row=r, column=target).value = round(float(val), 2)
+        filled += 1
+    if not filled:
+        return None
+    try:
+        wb.save(saved_path)
+    except Exception:  # noqa: BLE001
+        return None
+    return (f"Auto-filled {filled} monthly-balance row(s) for "
+            f"{snapshot[:7]} from the loan extract"
+            + (" + GL balance sheet" if gl_vals else "") + ".")
+
+
+def _ingest_monthly_co_recov(cfg: dict, upload_dir: Path) -> str | None:
+    """Fold any staged *monthly-summary* Charge-Off / Recovery files into
+    the historical CO/recovery DB.
+
+    Some CUs (e.g. Central Susquehanna) ship a small monthly workbook that
+    summarizes charge-offs and recoveries *by loan type* — no per-loan
+    account numbers, and no date column: the reporting month is encoded in
+    the filename (``…Totals 1225.xlsx`` → Dec 2025). The wizard's
+    Historical step already knows how to aggregate these, but a quarterly
+    Run New Quarter pass never touched them, so a freshly-dropped month
+    never reached the loss-rate calc.
+
+    This detects such files among the staged uploads and runs the exact
+    same aggregation the wizard uses
+    (:func:`monthly_co_recov_aggregator.aggregate_all`), which upserts one
+    month per file (DELETE+INSERT, so re-runs are idempotent).
+
+    A file qualifies only when it has BOTH a loan-code/type column and a
+    charge-off or recovery *amount* column, AND **no** date column (that
+    last check keeps transaction-level CO/recovery workbooks — which need
+    per-row date binning — out of this filename-dated path). Files that
+    match the CU's loan ``file_pattern`` are skipped so the main loan
+    extract is never mis-ingested.
+
+    Returns a human-readable summary string, or ``None`` when nothing
+    qualified. Best-effort — never raises.
+    """
+    try:
+        from cecl_ui.services import monthly_co_recov_aggregator as agg
+        from cecl_ui.services import extract_hist_service
+    except Exception:  # noqa: BLE001
+        return None
+
+    cu = (cfg or {}).get("credit_union") or ""
+    if not cu:
+        return None
+
+    # Compile the loan file_pattern so we can exclude the loan extract.
+    loan_rx = None
+    pat = (cfg or {}).get("file_pattern") or ""
+    if pat:
+        try:
+            loan_rx = re.compile(pat, re.IGNORECASE)
+        except re.error:
+            loan_rx = None
+
+    allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+    co_files: list[dict] = []
+    recov_files: list[dict] = []
+    for entry in sorted(upload_dir.iterdir()):
+        if not entry.is_file() or entry.suffix.lower() not in allowed:
+            continue
+        if entry.name.startswith("~$"):
+            continue
+        if loan_rx is not None and loan_rx.search(entry.name):
+            continue  # this is the loan extract, not a CO/recovery summary
+        try:
+            insp = agg.inspect_file(entry)
+        except Exception:  # noqa: BLE001
+            continue
+        if not insp.get("ok"):
+            continue
+        sug = insp.get("suggested") or {}
+        has_code = bool((sug.get("code") or "").strip())
+        has_co = bool((sug.get("co_amount") or "").strip())
+        has_recov = bool((sug.get("recov_amount") or "").strip())
+        has_date = bool((sug.get("date") or "").strip())
+        if not has_code or has_date or not (has_co or has_recov):
+            continue
+        # The month must be resolvable from the filename, else we can't
+        # place it — skip rather than let it fall back to file mtime.
+        det = extract_hist_service.detect_as_of_date(entry.name, entry)
+        if not det.get("date") or det.get("source") != "filename":
+            continue
+        item = {"name": entry.name, "path": str(entry)}
+        if has_co:
+            co_files.append(item)
+        if has_recov:
+            recov_files.append(item)
+
+    if not co_files and not recov_files:
+        return None
+
+    state = {
+        "credit_union": cu,
+        "pool_map": (cfg or {}).get("pool_map") or {},
+        "hist_scan": {
+            "monthly_co_files": co_files,
+            "monthly_recov_files": recov_files,
+        },
+    }
+    parts: list[str] = []
+    for kind, files in (("co", co_files), ("recov", recov_files)):
+        if not files:
+            continue
+        try:
+            res = agg.aggregate_all(state, kind)
+        except Exception:  # noqa: BLE001
+            continue
+        if res.get("ok") and res.get("months_written"):
+            label = "charge-off" if kind == "co" else "recovery"
+            months = sorted(res["months_written"])
+            span = (f"{months[0][:7]}…{months[-1][:7]}"
+                    if len(months) > 1 else months[0][:7])
+            parts.append(
+                f"{len(months)} {label} month(s) [{span}]"
+            )
+    if not parts:
+        return None
+    return "Ingested monthly CO/recovery summary file(s): " + ", ".join(parts) + "."
 
 
 @run_bp.route("/", methods=["GET"])
@@ -29,12 +440,17 @@ def client_dashboard(short_name: str):
     upload_dir = config_service.raw_uploads_dir(ws) / short_name
     upload_dir.mkdir(parents=True, exist_ok=True)
     pending = [p.name for p in upload_dir.glob("*") if p.is_file()]
+    acl_cfg = cfg.get("acl") or {}
+    acl_history = acl_cfg.get("history") or {}
     return render_template(
         "run/client_dashboard.html",
         short_name=short_name,
         cfg=cfg,
         snapshots=snapshots,
         pending_files=pending,
+        acl_history=acl_history,
+        economic_data=cfg.get("economic_data") or {},
+        report_period_end=_period_to_snapshot(cfg.get("report_period") or ""),
     )
 
 
@@ -132,21 +548,53 @@ def import_data(short_name: str):
     return redirect(url_for("run.client_dashboard", short_name=short_name))
 
 
+@run_bp.route("/<short_name>/reimport_period", methods=["POST"])
+def reimport_period(short_name: str):
+    """Force a re-import of a single older period (outlier re-runs).
+
+    Pulls just that period's loan files from the configured source folder,
+    imports only that snapshot (idempotent replace), and cleans up. The
+    current period staged in Raw_Uploads is left untouched.
+    """
+    period = (request.form.get("period") or "").strip()
+    if not period:
+        flash("Enter a period (e.g. 2025-06) to re-import.", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+    try:
+        res = pipeline_service.reimport_period(short_name, period)
+    except Exception as exc:  # noqa: BLE001
+        flash(f"Re-import failed: {exc}", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+    if res.get("ok"):
+        files = res.get("files") or []
+        flash(
+            f"Re-imported {res['period']}: {res['rows']} loan row(s) from "
+            f"{len(files)} file(s) ({', '.join(files)}). "
+            f"You can now run reports for {res['period']}.",
+            "success",
+        )
+    else:
+        flash(f"Re-import ({period}): {res.get('error')}", "warning")
+    return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+
 @run_bp.route("/<short_name>/reports", methods=["POST"])
 def reports(short_name: str):
     snap = request.form.get("snapshot_date") or None
     selected: list[str] = []
-    for r in ("tct", "vizo", "vizo_supp"):
+    for r in ("tct", "vizo", "vizo_supp", "mgmt_adj_napkin"):
         if request.form.get(r) == "on":
             selected.append(r)
     impdet = request.form.get("impdet") == "on"
 
     outputs: list[str] = []
     errors: list[str] = []
+    hybrid_notes: list[str] = []
 
     if selected:
         try:
-            paths, log = pipeline_service.run_reports(short_name, snap, selected)
+            paths, log, hybrid_notes = pipeline_service.run_reports_hybrid(
+                short_name, snap, selected)
             outputs.extend(paths)
             if not paths:
                 # Surface the underlying ERROR line(s) so the user isn't
@@ -181,12 +629,159 @@ def reports(short_name: str):
         flash("Pick at least one report to generate.", "error")
         return redirect(url_for("run.client_dashboard", short_name=short_name))
 
+    # If reports succeeded and this CU has no Completed-setup entry yet,
+    # auto-adopt its YAML config so it shows up alongside wizard-built
+    # CUs on the home page. Lazy-imported to avoid a circular import
+    # between home.py and run.py at module load.
+    if outputs and not errors:
+        try:
+            from cecl_ui.routes.home import adopt_config_to_completed
+            adopt_config_to_completed(
+                current_app.config["WORKSPACE_ROOT"], short_name,
+            )
+        except Exception:  # noqa: BLE001
+            # Auto-adoption is a UX-nicety; never block the results page.
+            pass
+
     return render_template(
         "run/results.html",
         short_name=short_name,
         outputs=outputs,
         errors=errors,
+        hybrid_notes=hybrid_notes,
     )
+
+
+def _month_end_iso(value: str) -> str | None:
+    """Normalize a user-supplied date to an ISO month-end string.
+
+    Accepts ``YYYY-MM`` or a full ``YYYY-MM-DD`` and always returns the
+    last calendar day of that month (e.g. ``2026-06`` → ``2026-06-30``),
+    matching how ACL history / snapshot dates are keyed elsewhere.
+    """
+    s = (value or "").strip()
+    if not s:
+        return None
+    if len(s) == 7 and s[4] == "-":
+        return _period_to_snapshot(s)
+    try:
+        d = date.fromisoformat(s)
+    except ValueError:
+        return None
+    last = calendar.monthrange(d.year, d.month)[1]
+    return date(d.year, d.month, last).isoformat()
+
+
+@run_bp.route("/<short_name>/set-acl", methods=["POST"])
+def set_acl(short_name: str):
+    """Override the ACL (allowance) balance for a single month-end without
+    re-running the wizard.
+
+    Writes the value into ``cfg['acl']['history'][<month-end>]`` — the
+    authoritative source the report engine merges with precedence over
+    the monthly-balance file (see ``_merge_acl_history`` in
+    ``generate_report.py``). When the CU's ACL source is ``manual`` the
+    ``acl.manual`` map is kept in sync too, and the top-level
+    ``acl_balance`` is refreshed when the edited month is the current
+    ``report_period``.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+
+    month_end = _month_end_iso(request.form.get("acl_month") or "")
+    raw_amount = (request.form.get("acl_balance") or "").strip().replace(",", "")
+    if not month_end:
+        flash("Pick a valid month-end for the ACL balance.", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+    try:
+        amount = float(raw_amount)
+    except ValueError:
+        flash(f"Invalid ACL balance: {raw_amount!r}", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+    if amount < 0:
+        flash("ACL balance cannot be negative.", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+    acl = dict(cfg.get("acl") or {})
+    history = dict(acl.get("history") or {})
+    history[month_end] = amount
+    acl["history"] = history
+    # Keep the manual map aligned when the CU sources ACL manually.
+    if (acl.get("source") or "").strip().lower() == "manual":
+        manual = dict(acl.get("manual") or {})
+        manual[month_end] = amount
+        acl["manual"] = manual
+    cfg["acl"] = acl
+
+    # Refresh the scalar top-level balance when editing the current period.
+    period_end = _period_to_snapshot(cfg.get("report_period") or "")
+    if period_end and period_end == month_end:
+        cfg["acl_balance"] = amount
+
+    config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+    flash(
+        f"ACL balance for {month_end} set to ${amount:,.2f}. "
+        f"Re-generate the report to apply it.",
+        "success",
+    )
+    return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+
+@run_bp.route("/<short_name>/set-economic", methods=["POST"])
+def set_economic(short_name: str):
+    """Edit the CU's ``economic_data`` (environmental factors) without
+    re-running the setup wizard.
+
+    Writes the submitted values into ``cfg['economic_data']`` (the same block
+    the wizard's Economic Data step populates), which feeds the environmental
+    -factor overlay in the report engine. Blank fields are left unchanged so a
+    partial edit never wipes an existing value.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    econ = dict(cfg.get("economic_data") or {})
+    errors: list[str] = []
+
+    # Text fields — update only when a non-blank value is supplied.
+    for key in ("state", "county"):
+        v = (request.form.get(key) or "").strip()
+        if v:
+            econ[key] = v
+
+    # Unemployment rate — decimal in [0, 1].
+    ur_raw = (request.form.get("unemployment_rate") or "").strip()
+    if ur_raw:
+        try:
+            ur = float(ur_raw)
+            if 0.0 <= ur <= 1.0:
+                econ["unemployment_rate"] = ur
+            else:
+                errors.append("unemployment rate must be a decimal between 0 and 1")
+        except ValueError:
+            errors.append(f"invalid unemployment rate: {ur_raw!r}")
+
+    # Integer counts.
+    for key in ("population", "bankruptcies", "foreclosures"):
+        raw = (request.form.get(key) or "").strip().replace(",", "")
+        if raw:
+            try:
+                n = int(float(raw))
+                if n < 0:
+                    errors.append(f"{key} cannot be negative")
+                else:
+                    econ[key] = n
+            except ValueError:
+                errors.append(f"invalid {key}: {raw!r}")
+
+    cfg["economic_data"] = econ
+    config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+    if errors:
+        flash("Economic data saved, but some fields were skipped: "
+              + "; ".join(errors), "error")
+    else:
+        flash("Economic data saved. Re-generate the report to apply it.",
+              "success")
+    return redirect(url_for("run.client_dashboard", short_name=short_name))
 
 
 @run_bp.route("/download")
@@ -205,6 +800,1063 @@ def download():
     if not p.exists():
         return ("Not found", 404)
     return send_file(p, as_attachment=True, download_name=p.name)
+
+
+@run_bp.route("/<short_name>/new-quarter", methods=["GET", "POST"])
+def new_quarter(short_name: str):
+    """Streamlined per-quarter ingest + run.
+
+    GET: shows a single-page form (period picker + multi-file upload +
+    optional folder path + report checkboxes pre-checked from the CU's
+    saved ``cfg.reports``).
+
+    POST: copies the supplied files into ``Raw_Uploads/<short>/``,
+    invokes ``run_import``, then runs the selected reports for the
+    requested period and renders the existing results template.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    upload_dir = config_service.raw_uploads_dir(ws) / short_name
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    if request.method == "GET":
+        return render_template(
+            "run/new_quarter.html",
+            short_name=short_name,
+            cfg=cfg,
+        )
+
+    # POST
+    period = (request.form.get("period") or "").strip()
+    snapshot = _period_to_snapshot(period)
+    if not snapshot:
+        flash("Pick a valid reporting period (YYYY-MM).", "error")
+        return redirect(url_for("run.new_quarter", short_name=short_name))
+
+    # ``stage`` distinguishes the initial submit ("") from a resubmit after
+    # the user has filled in the new-loan-code mapping form
+    # (``stage="mapped"``). On the resubmit we skip file staging (files are
+    # already on disk from phase 1) and instead apply the user-supplied
+    # mappings to ``cfg["pool_map"]`` before continuing with import +
+    # reports.
+    stage = (request.form.get("stage") or "").strip()
+
+    if stage == "mapped":
+        posted_codes = request.form.getlist("map_code")
+        posted_pools = request.form.getlist("map_pool")
+        posted_new_pools = request.form.getlist("map_pool_new")
+        new_map = dict(cfg.get("pool_map") or {})
+        added = 0
+        for i, code in enumerate(posted_codes):
+            code = (code or "").strip()
+            if not code:
+                continue
+            sel = (posted_pools[i] if i < len(posted_pools) else "").strip()
+            np_name = (posted_new_pools[i] if i < len(posted_new_pools) else "").strip()
+            pool = np_name if sel == "__new__" else sel
+            if not pool:
+                continue
+            new_map[code] = pool
+            added += 1
+        if added:
+            cfg["pool_map"] = new_map
+            try:
+                config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+                flash(f"Mapped {added} new loan code(s) and saved YAML.", "success")
+            except (OSError, ValueError) as exc:
+                flash(f"Could not save pool mappings: {exc}", "error")
+                return redirect(url_for("run.new_quarter", short_name=short_name))
+        # Skip phase-1 staging block; jump to the import step below.
+        saved = 0
+        copied = 0
+        folder_skipped: list[str] = []
+        # Fall through to the import + report block.
+
+    if stage == "balance_checked":
+        # User reviewed the per-pool balance comparison and clicked
+        # "Continue → Run Reports". Files were already staged and
+        # imported on the prior submit; jump straight to the report
+        # block. Mirror the ``mapped`` skip pattern.
+        saved = 0
+        copied = 0
+        folder_skipped = []
+        # Fall through to the report block (import is skipped below).
+
+    if stage == "balance_remapped":
+        # User adjusted one or more loan-code → pool mappings on the
+        # Balance Adjustment Review page. Apply the new mappings to
+        # cfg["pool_map"], persist to YAML, and re-run import so the
+        # ``monthly_loan_data`` snapshot re-stamps each row with the
+        # new pool name. Then fall through to the balance-check
+        # intercept again so the user sees updated totals and can
+        # either keep editing or click Continue → Run Reports.
+        posted_codes = request.form.getlist("map_code")
+        posted_pools = request.form.getlist("map_pool")
+        new_map = dict(cfg.get("pool_map") or {})
+        changed = 0
+        for i, code in enumerate(posted_codes):
+            code = (code or "").strip()
+            if not code:
+                continue
+            new_pool = (posted_pools[i] if i < len(posted_pools) else "").strip()
+            old_pool = new_map.get(code, "")
+            if new_pool == old_pool:
+                continue
+            new_map[code] = new_pool
+            changed += 1
+        if changed:
+            cfg["pool_map"] = new_map
+            try:
+                config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+            except (OSError, ValueError) as exc:
+                flash(f"Could not save pool mappings: {exc}", "error")
+                return redirect(url_for("run.new_quarter", short_name=short_name))
+            # Re-stamp ONLY this snapshot so the DB loan_pool reflects the
+            # new pool_map. Use reimport_period (idempotent per-snapshot
+            # replace) rather than run_import: run_import does an incremental
+            # folder scan and skips files already swept into Archive, so it
+            # would NOT re-stamp the current period's stored rows.
+            try:
+                res = pipeline_service.reimport_period(short_name, period)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            if res.get("ok"):
+                flash(
+                    f"Reassigned {changed} loan code(s) and re-imported "
+                    f"{res.get('period', period)}: {res.get('rows', 0)} "
+                    "loan row(s). Review the updated balances below.",
+                    "success",
+                )
+            else:
+                flash(
+                    f"Saved {changed} mapping change(s), but could not "
+                    f"re-import {period}: {res.get('error')}. The mapping is "
+                    "saved; the Loan Extract totals below may be stale until "
+                    "the period is re-imported.",
+                    "warning",
+                )
+        else:
+            flash("No mapping changes detected.", "info")
+        saved = 0
+        copied = 0
+        folder_skipped = []
+        # Fall through; import block is skipped via _skip_stage below.
+
+    if stage == "impaired_checked":
+        # User reviewed the impaired-loans verification page and clicked
+        # "Continue → Run Reports". Files were already staged and
+        # imported on the prior submit; jump straight to the report
+        # block. Mirror the ``balance_checked`` skip pattern.
+        saved = 0
+        copied = 0
+        folder_skipped = []
+        # Fall through to the report block (import is skipped below).
+
+    if stage == "impaired_remapped":
+        # User adjusted one or more loan-code → pool mappings on the
+        # Impaired Loans Verification page. Apply the new mappings to
+        # cfg["pool_map"], persist to YAML, and re-run import so the
+        # loan-data extract lookup sees the new pools. Then fall
+        # through to the impaired-check intercept so the user sees
+        # updated rows.
+        posted_codes = request.form.getlist("map_code")
+        posted_pools = request.form.getlist("map_pool")
+        new_map = dict(cfg.get("pool_map") or {})
+        changed = 0
+        for i, code in enumerate(posted_codes):
+            code = (code or "").strip()
+            if not code:
+                continue
+            new_pool = (posted_pools[i] if i < len(posted_pools) else "").strip()
+            old_pool = new_map.get(code, "")
+            if new_pool == old_pool:
+                continue
+            new_map[code] = new_pool
+            changed += 1
+        if changed:
+            cfg["pool_map"] = new_map
+            try:
+                config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+            except (OSError, ValueError) as exc:
+                flash(f"Could not save pool mappings: {exc}", "error")
+                return redirect(url_for("run.new_quarter", short_name=short_name))
+            # Re-stamp ONLY this snapshot (idempotent per-snapshot replace).
+            # run_import would skip already-archived files and leave the
+            # stored rows stale, so use reimport_period instead.
+            try:
+                res = pipeline_service.reimport_period(short_name, period)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            if res.get("ok"):
+                flash(
+                    f"Reassigned {changed} loan code(s) and re-imported "
+                    f"{res.get('period', period)}: {res.get('rows', 0)} "
+                    "loan row(s). Review the updated impaired loans below.",
+                    "success",
+                )
+            else:
+                flash(
+                    f"Saved {changed} mapping change(s), but could not "
+                    f"re-import {period}: {res.get('error')}. The mapping is "
+                    "saved; the rows below may be stale until the period is "
+                    "re-imported.",
+                    "warning",
+                )
+        else:
+            flash("No mapping changes detected.", "info")
+        saved = 0
+        copied = 0
+        folder_skipped = []
+        # Fall through; import block is skipped via _skip_stage below.
+
+    if stage == "balance_none":
+        # User acknowledged on the Balance Adjustment decision page that the
+        # review can't be shown (typically no loans imported for the period)
+        # and chose to proceed anyway. Skip staging/import; section 3b is
+        # skipped for this stage so we continue to the impaired check + reports.
+        flash(
+            "Proceeding without the Balance Adjustment review for this "
+            "period.",
+            "warning",
+        )
+        saved = 0
+        copied = 0
+        folder_skipped = []
+
+    if stage == "impaired_none":
+        # User confirmed on the "no impaired file" decision page that the CU
+        # has no impaired loans to report this period. Skip staging/import;
+        # section 3c is skipped for this stage so we go straight to reports.
+        flash(
+            "Confirmed: no impaired loans report for this period. "
+            "Continuing to reports.",
+            "info",
+        )
+        saved = 0
+        copied = 0
+        folder_skipped = []
+
+    if stage == "impaired_uploaded":
+        # User uploaded an Impaired Loans workbook on the "no impaired file"
+        # decision page. Save it under a canonical, matcher-friendly name for
+        # the period (superseding any older same-period impaired file), then
+        # fall through to the impaired intercept (3c) which re-verifies and
+        # shows the review page.
+        up = request.files.get("impaired_file")
+        if not up or not up.filename:
+            flash("Choose an Impaired Loans file to upload, or confirm none.",
+                  "error")
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+        _ext = Path(up.filename).suffix.lower()
+        if _ext not in (".xlsx", ".xlsm"):
+            flash(
+                "Impaired Loans workbook must be an .xlsx or .xlsm file "
+                f"(got {_ext or 'no extension'}).",
+                "error",
+            )
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+        _target_dir = _impaired_data_dir(cfg, ws, short_name)
+        try:
+            _target_dir.mkdir(parents=True, exist_ok=True)
+            _dest_name = _canonical_impaired_name(cfg, snapshot, up.filename)
+            try:
+                _supersede_existing_impaired(_target_dir, snapshot, _dest_name)
+            except Exception:  # noqa: BLE001
+                pass
+            up.save(_target_dir / _dest_name)
+            flash(
+                f"Saved impaired workbook as '{_dest_name}'. "
+                "Review the parsed impaired loans below.",
+                "success",
+            )
+        except OSError as exc:
+            flash(f"Could not save the impaired file: {exc}", "error")
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+        saved = 0
+        copied = 0
+        folder_skipped = []
+
+    _skip_stage = stage in (
+        "mapped", "balance_checked", "balance_remapped", "balance_none",
+        "impaired_checked", "impaired_remapped",
+        "impaired_uploaded", "impaired_none",
+    )
+    folder_raw = _normalize_folder_path(request.form.get("folder_path") or "") if not _skip_stage else ""
+
+    # 1) Save uploaded files
+    saved = 0
+    files = request.files.getlist("files") if not _skip_stage else []
+    for f in files:
+        if not f or not f.filename:
+            continue
+        fn = secure_filename(f.filename)
+        f.save(upload_dir / fn)
+        saved += 1
+
+    # 2) Copy from folder path (recursive, common spreadsheet formats).
+    # Subfolder layouts like 2026-Q1/{Jan,Feb,Mar} 2026/ are common, so
+    # walk the tree and flatten every spreadsheet into Raw_Uploads/.
+    copied = 0
+    folder_skipped: list[str] = []
+    if folder_raw:
+        src = Path(folder_raw)
+        if not src.is_dir():
+            flash(f"Folder not found: {folder_raw}", "error")
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+        allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+        for entry in src.rglob("*"):
+            if not entry.is_file():
+                continue
+            if entry.name.startswith("~$") or entry.name.startswith("."):
+                continue
+            if entry.suffix.lower() not in allowed:
+                folder_skipped.append(entry.name)
+                continue
+            try:
+                shutil.copy2(entry, upload_dir / entry.name)
+                copied += 1
+            except OSError as exc:
+                flash(f"Could not copy {entry.name}: {exc}", "error")
+
+    if saved == 0 and copied == 0 and not _skip_stage:
+        flash(
+            "No files were uploaded or copied. Pick at least one file or "
+            "supply a folder path.",
+            "error",
+        )
+        return redirect(url_for("run.new_quarter", short_name=short_name))
+
+    if not _skip_stage:
+        flash(
+            f"Staged {saved} uploaded + {copied} folder file(s) into Raw_Uploads/{short_name}/.",
+            "success",
+        )
+    if folder_skipped:
+        flash(
+            f"Skipped non-spreadsheet file(s): {', '.join(folder_skipped[:6])}"
+            + ("…" if len(folder_skipped) > 6 else ""),
+            "info",
+        )
+
+    # 2a) Refresh the wizard-staged monthly balance workbook if the
+    # source folder / uploads contain a newer copy (e.g. Vizo dropped
+    # an updated Historical Balance Sheets file with May/June columns
+    # into 2026-Q2/June 2026/). Best-effort — never blocks the run.
+    if not _skip_stage:
+        try:
+            _mb_msg = _refresh_staged_monthly_balance(cfg, folder_raw, upload_dir)
+            if _mb_msg:
+                flash(_mb_msg[0], _mb_msg[1])
+        except Exception as _mb_exc:  # noqa: BLE001
+            flash(
+                f"Monthly-balance auto-refresh skipped: {_mb_exc}",
+                "warning",
+            )
+
+    # 2a-1) Monthly-balance auto-fill from the loan extract. For CUs whose
+    # per-pool monthly balances are derived from the loan system (matrix
+    # rows reconcile to the loan extract) rather than an independent
+    # per-pool balance file, populate this snapshot's column of the matrix
+    # from the freshly-staged loan file(s) + the delivered GL balance
+    # sheet. Opt-in via ``monthly_balance.autofill_from_extract``. Runs
+    # BEFORE import (loan files still in Raw_Uploads, not yet archived).
+    # Idempotent; best-effort — never blocks the run.
+    if not _skip_stage:
+        try:
+            _af_msg = _autofill_monthly_balance_from_extract(
+                cfg, upload_dir, snapshot)
+            if _af_msg:
+                flash(_af_msg, "success")
+        except Exception as _af_exc:  # noqa: BLE001
+            flash(
+                f"Monthly-balance auto-fill skipped: {_af_exc}",
+                "warning",
+            )
+
+    # 2a-2) Monthly Charge-Off / Recovery ingestion. When a CU ships a
+    # by-loan-type monthly summary workbook (date encoded in the filename,
+    # no account numbers), fold any freshly-staged month(s) into the
+    # historical CO/recovery DB so the loss-rate calc reflects them. Mirrors
+    # the wizard's Historical step; idempotent per month. Best-effort.
+    if not _skip_stage:
+        try:
+            _cr_msg = _ingest_monthly_co_recov(cfg, upload_dir)
+            if _cr_msg:
+                flash(_cr_msg, "success")
+        except Exception as _cr_exc:  # noqa: BLE001
+            flash(
+                f"Monthly CO/recovery ingestion skipped: {_cr_exc}",
+                "warning",
+            )
+
+    # 2b) Update YAML's ``report_period`` to the user-selected period so
+    # the import step targets the correct snapshot. Filenames without a
+    # parseable date (e.g. ``February Loan File Upload.xlsx``) fall back
+    # to ``report_period``'s year inside ``import_data.process_client``;
+    # if we left a stale period in the YAML those files would be
+    # mis-attributed to a previous year.
+    if period and (cfg.get("report_period") or "") != period:
+        try:
+            cfg["report_period"] = period
+            config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+        except (OSError, ValueError) as exc:
+            flash(f"Could not persist report_period={period}: {exc}", "warning")
+
+    # 2b-1) External-source retarget. CUs configured to read loan files in
+    # place from a client-owned quarter folder (``loan_file_folder``) rather
+    # than the staged Raw_Uploads area must have that path advanced to the
+    # new quarter's folder each run — otherwise the import keeps scanning the
+    # prior quarter and no snapshot lands for this period (the classic
+    # "Balance Adjustment review unavailable / no imported loans" symptom).
+    # When the user supplies a folder path and the CU uses external-source
+    # mode, repoint ``loan_file_folder`` (and ``data_directory`` when it
+    # mirrored the loan folder) at the supplied folder.
+    if folder_raw and (cfg.get("loan_file_folder") or "").strip():
+        try:
+            src_dir = Path(folder_raw)
+            old_lff = str(Path(cfg.get("loan_file_folder")))
+            if src_dir.is_dir() and str(src_dir) != old_lff:
+                cfg["loan_file_folder"] = str(src_dir)
+                if str(Path(cfg.get("data_directory") or "")) == old_lff:
+                    cfg["data_directory"] = str(src_dir)
+                config_service.save_client_config(
+                    ws, short_name, cfg, overwrite=True)
+                flash(
+                    f"Repointed loan source folder to {src_dir} for this "
+                    "quarter.",
+                    "info",
+                )
+        except (OSError, ValueError) as exc:
+            flash(
+                f"Could not repoint loan source folder: {exc}", "warning")
+
+    # 2b-2) ACL Balance override — Phase 9.36. The user can override the
+    # default ACL source for this run from the new-quarter form:
+    #
+    #   * ``acl_mode="manual"`` → record ``acl_manual_value`` as the
+    #     ACL Balance for this quarter, written to
+    #     ``cfg['acl']['history'][snapshot]`` so ``_merge_acl_history``
+    #     picks it up at report time. The YAML history entry persists
+    #     so subsequent quarters can carry it forward; if the user
+    #     wants to revert they re-pick "default" on a future run with
+    #     a non-matching snapshot (the old history entry stays for
+    #     that quarter, which is what an audit trail should do).
+    #   * ``acl_mode="solr"`` → enable the 5300 fallback with the
+    #     user's preferred field code (default ``AAS0048``). Written to
+    #     ``cfg['acl']['use_5300_fallback']=True`` and
+    #     ``cfg['acl']['solr_fields']=[<field>]`` so the engine probes
+    #     only the chosen field. Legacy fields (A007/A718A3/A718A5/A719)
+    #     are NOT auto-appended — per user direction AAS0048 is the
+    #     canonical source. Users who need legacy backstops can list
+    #     multiple fields by submitting them comma-separated.
+    #
+    # Empty / "default" mode leaves cfg['acl'] untouched, preserving
+    # whatever the wizard configured originally.
+    if not _skip_stage:
+        acl_mode = (request.form.get("acl_mode") or "default").strip()
+        if acl_mode in ("manual", "solr"):
+            acl_block = dict(cfg.get("acl") or {})
+            persist = False
+            flash_msg = ""
+            if acl_mode == "manual":
+                raw = (request.form.get("acl_manual_value") or "").strip()
+                try:
+                    val = float(raw.replace(",", "")) if raw else 0.0
+                except ValueError:
+                    val = 0.0
+                if val > 0:
+                    hist_map = dict(acl_block.get("history") or {})
+                    hist_map[snapshot] = round(val, 2)
+                    acl_block["history"] = hist_map
+                    cfg["acl"] = acl_block
+                    cfg["acl_balance"] = round(val, 2)
+                    persist = True
+                    flash_msg = (
+                        f"Saved manual ACL Balance ${val:,.2f} for "
+                        f"{snapshot} (acl.history[{snapshot}])."
+                    )
+                else:
+                    flash(
+                        "Manual ACL mode selected but no positive value "
+                        "provided; using YAML defaults instead.",
+                        "warning",
+                    )
+            else:  # acl_mode == "solr"
+                raw_field = (request.form.get("acl_solr_field") or "").strip()
+                # Allow comma-separated lists so power users can add
+                # legacy backstops (e.g. "AAS0048,A007,A718A3"). Single
+                # field is the common case.
+                if raw_field:
+                    field_order = [
+                        f.strip().upper()
+                        for f in raw_field.split(",")
+                        if f.strip()
+                    ]
+                else:
+                    field_order = []
+                if field_order:
+                    acl_block["use_5300_fallback"] = True
+                    acl_block["solr_fields"] = field_order
+                    cfg["acl"] = acl_block
+                    persist = True
+                    if len(field_order) == 1:
+                        flash_msg = (
+                            f"Enabled NCUA 5300 ACL fallback with "
+                            f"field '{field_order[0]}'."
+                        )
+                    else:
+                        flash_msg = (
+                            f"Enabled NCUA 5300 ACL fallback (probe order: "
+                            f"{', '.join(field_order)})."
+                        )
+                else:
+                    flash(
+                        "5300 ACL mode selected but no field code provided; "
+                        "using YAML defaults instead.",
+                        "warning",
+                    )
+            if persist:
+                try:
+                    config_service.save_client_config(
+                        ws, short_name, cfg, overwrite=True)
+                    if flash_msg:
+                        flash(flash_msg, "success")
+                except (OSError, ValueError) as exc:
+                    flash(
+                        f"Could not persist ACL override: {exc}",
+                        "warning",
+                    )
+
+    # 2c) On the initial submit, scan the staged files for any new
+    # ``loan_pool_code`` values that aren't yet in ``cfg["pool_map"]``.
+    # If any are found, re-render the page with a mapping section so the
+    # user can assign each new code to an existing pool BEFORE we run
+    # import/reports — otherwise those codes would silently fall through
+    # to ``default_pool`` (often "Ignore") and the report would show a
+    # spurious "Ignore" pool. The user fills the form, submits with
+    # ``stage="mapped"``, and we land at the top of this handler again
+    # to apply the mappings + continue.
+    if not _skip_stage:
+        try:
+            unmapped = _scan_unmapped_loan_codes(cfg, short_name)
+        except Exception:  # noqa: BLE001
+            unmapped = []
+        if unmapped:
+            report_selection = {
+                r: (request.form.get(r) == "on")
+                for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
+            }
+            return render_template(
+                "run/new_quarter.html",
+                short_name=short_name,
+                cfg=cfg,
+                stage="awaiting_mappings",
+                unmapped_codes=unmapped,
+                all_pools=_all_known_pools(cfg, short_name),
+                staged_period=period,
+                staged_reports=report_selection,
+                staged_count=saved + copied,
+            )
+
+    # 3) Import (skip on balance_checked / balance_remapped /
+    # impaired_checked / impaired_remapped resubmits — import already
+    # ran on the prior submit or inside the remap branch).
+    if stage in ("balance_checked", "balance_remapped", "balance_none",
+                 "impaired_checked", "impaired_remapped",
+                 "impaired_uploaded", "impaired_none"):
+        n_imported = 0  # already imported on prior submit
+    else:
+        try:
+            n_imported = pipeline_service.run_import(short_name)
+            if n_imported:
+                flash(f"Imported {n_imported} loan file(s).", "success")
+            else:
+                # Surface a hint listing which staged spreadsheets did NOT
+                # match the configured file_pattern so the user can spot
+                # version-suffix / spelling drift quickly.
+                unmatched: list[str] = []
+                try:
+                    pat = (cfg or {}).get("file_pattern") or ""
+                    if pat:
+                        rx = re.compile(pat)
+                        for entry in upload_dir.iterdir():
+                            if not entry.is_file():
+                                continue
+                            if entry.suffix.lower() not in {".xlsx", ".xlsm", ".xls", ".csv"}:
+                                continue
+                            if not rx.match(entry.name):
+                                unmatched.append(entry.name)
+                except (re.error, OSError):
+                    unmatched = []
+                base = (
+                    "No loan files were imported. Confirm filenames match the "
+                    "configured file_pattern and that a snapshot date can be "
+                    "parsed."
+                )
+                if unmatched:
+                    preview = ", ".join(unmatched[:5])
+                    more = f" (+{len(unmatched) - 5} more)" if len(unmatched) > 5 else ""
+                    base += (
+                        f" Files staged but not matched by file_pattern: {preview}{more}."
+                        " Re-run the wizard's Sample step (or hand-edit the YAML)"
+                        " to relax the pattern."
+                    )
+                flash(base, "warning")
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Import failed: {exc}", "error")
+            return redirect(url_for("run.new_quarter", short_name=short_name))
+
+    # 3b) Balance Adjustment intercept — show per-pool monthly-vs-loan
+    # balance comparison so the user can review discrepancies BEFORE
+    # the reports are produced. Mirrors wizard Step 14. On the resubmit
+    # the user clicks "Continue → Run Reports" and we fall through.
+    # Also skip once the user has advanced PAST balance to the impaired
+    # intercept — otherwise clicking Continue on the impaired page would
+    # bounce them back to the balance page (loop).
+    if stage not in ("balance_checked", "balance_none", "impaired_checked",
+                     "impaired_remapped", "impaired_uploaded",
+                     "impaired_none"):
+        try:
+            comparison = balance_check_service.compare_run(
+                cfg, snapshot, short_name=short_name)
+        except Exception as _bexc:  # noqa: BLE001
+            comparison = {"ok": False,
+                          "error": f"Balance comparison failed: {_bexc}",
+                          "rows": []}
+        report_selection = {
+            r: (request.form.get(r) == "on")
+            for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
+        }
+        # Case 1: a populated comparison — show the Balance Adjustment review.
+        if comparison and comparison.get("ok") and comparison.get("rows"):
+            # Build the pool-name dropdown for the inline remap UI.
+            try:
+                pool_choices = _all_known_pools(cfg, short_name)
+            except Exception:  # noqa: BLE001
+                pool_choices = []
+            return render_template(
+                "run/new_quarter.html",
+                short_name=short_name,
+                cfg=cfg,
+                stage="awaiting_balance_check",
+                comparison=comparison,
+                staged_period=period,
+                staged_reports=report_selection,
+                pool_choices=pool_choices,
+            )
+        # Case 2: no reviewable comparison. ALWAYS stop and make the user
+        # decide instead of silently skipping to the impaired step — a silent
+        # skip is how a mis-named / unimported loan file used to slip a CU
+        # straight past the Balance Adjustment review (e.g. the loan file
+        # didn't match file_pattern, so nothing imported and the DB snapshot
+        # was empty). Surfacing the reason + the unmatched staged files lets
+        # the user fix the naming and retry rather than unknowingly running
+        # reports with no loan data.
+        _berr = ((comparison or {}).get("error")
+                 or "The per-pool balance comparison could not be produced "
+                    "(no imported loans found for this period).")
+        _unmatched: list[str] = []
+        try:
+            _pat = (cfg or {}).get("file_pattern") or ""
+            _rx = re.compile(_pat) if _pat else None
+            for _entry in upload_dir.iterdir():
+                if not _entry.is_file():
+                    continue
+                if _entry.suffix.lower() not in {".xlsx", ".xlsm", ".xls", ".csv"}:
+                    continue
+                if _rx is None or not _rx.match(_entry.name):
+                    _unmatched.append(_entry.name)
+        except (re.error, OSError):
+            _unmatched = []
+        return render_template(
+            "run/new_quarter.html",
+            short_name=short_name,
+            cfg=cfg,
+            stage="awaiting_balance_decision",
+            balance_error=_berr,
+            balance_unmatched=sorted(_unmatched)[:12],
+            staged_period=period,
+            staged_reports=report_selection,
+        )
+
+    # 3c) Impaired Loans Verification intercept — show the parsed
+    # impaired workbook (if one is on disk for this period) so the user
+    # can confirm each impaired loan resolves to a real pool BEFORE the
+    # reports are produced. Mirrors wizard Step 16. Skipped when no
+    # impaired workbook is found — most CUs don't ship one and there's
+    # nothing to review.
+    if stage not in ("impaired_checked", "impaired_none"):
+        try:
+            impaired_result = impaired_check_service.verify_for_run(
+                cfg, snapshot, short_name=short_name)
+        except Exception:  # noqa: BLE001
+            impaired_result = None
+        report_selection = {
+            r: (request.form.get(r) == "on")
+            for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin")
+        }
+        # Case 1: a workbook was found with usable impaired rows / codes —
+        # show the verification page so the user can review it.
+        if (impaired_result
+                and impaired_result.get("ok")
+                and impaired_result.get("found")
+                and (impaired_result.get("data_rows")
+                     or impaired_result.get("validation", {}).get(
+                         "unmapped_codes"))):
+            return render_template(
+                "run/new_quarter.html",
+                short_name=short_name,
+                cfg=cfg,
+                stage="awaiting_impaired_check",
+                impaired=impaired_result,
+                staged_period=period,
+                staged_reports=report_selection,
+            )
+        # Case 2: no usable impaired data. ALWAYS stop and make the user
+        # decide — confirm the CU has none this period, or upload the
+        # report — instead of silently skipping (which is how a renamed /
+        # unrecognised impaired file used to slip past the run).
+        if (impaired_result and impaired_result.get("found")
+                and impaired_result.get("error")):
+            _reason = "parse_error"
+        elif impaired_result and impaired_result.get("found"):
+            _reason = "found_empty"
+        else:
+            _reason = "not_found"
+        return render_template(
+            "run/new_quarter.html",
+            short_name=short_name,
+            cfg=cfg,
+            stage="awaiting_impaired_decision",
+            impaired_reason=_reason,
+            impaired_error=(impaired_result or {}).get("error"),
+            staged_period=period,
+            staged_reports=report_selection,
+        )
+
+    # 4) Run reports — selection comes from form (defaults seeded from cfg)
+    selected: list[str] = []
+    for r in ("tct", "vizo", "vizo_supp", "mgmt_adj_napkin"):
+        if request.form.get(r) == "on":
+            selected.append(r)
+    impdet = request.form.get("impdet") == "on"
+
+    outputs: list[str] = []
+    errors: list[str] = []
+    hybrid_notes: list[str] = []
+    if selected:
+        try:
+            paths, log, hybrid_notes = pipeline_service.run_reports_hybrid(
+                short_name, snapshot, selected)
+            outputs.extend(paths)
+            if not paths:
+                lines = [ln for ln in (log or "").splitlines() if ln.strip()]
+                err_lines = [
+                    ln for ln in lines
+                    if "ERROR" in ln or "Error" in ln or "Warning" in ln
+                    or "No data" in ln or "no data" in ln
+                    or "not found" in ln or "Not found" in ln
+                ]
+                if err_lines:
+                    msg = "; ".join(err_lines)
+                elif lines:
+                    msg = "No reports were generated. Last log lines: " + " | ".join(lines[-8:])
+                else:
+                    msg = "No reports were generated (no log output captured)."
+                errors.append(f"Standard reports: {msg}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Standard reports: {exc}")
+
+    if impdet:
+        try:
+            p = pipeline_service.run_impdet_report(short_name, snapshot)
+            if p:
+                outputs.append(p)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Impaired/Deteriorated: {exc}")
+
+    if not selected and not impdet:
+        flash("Pick at least one report to generate.", "warning")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+    return render_template(
+        "run/results.html",
+        short_name=short_name,
+        outputs=outputs,
+        errors=errors,
+        hybrid_notes=hybrid_notes,
+    )
+
+
+def _impaired_data_dir(cfg: dict, ws: str | Path, short_name: str) -> Path:
+    """Resolve the folder the report engine searches for the standalone
+    Impaired Loans workbook.
+
+    ``generate_report.find_standalone_impaired_file`` walks
+    ``cfg['data_directory']`` (relative paths are resolved against the
+    workspace root). When the CU has no ``data_directory`` configured we
+    fall back to ``Raw_Uploads/<short>/`` — which is where the loan
+    importer already stages files, and is inside the workspace so the
+    download containment check keeps working.
+    """
+    data_dir = str((cfg or {}).get("data_directory") or "").strip()
+    if data_dir:
+        p = Path(data_dir)
+        if not p.is_absolute():
+            p = Path(ws) / data_dir
+        return p
+    return config_service.raw_uploads_dir(ws) / short_name
+
+
+def _canonical_impaired_name(cfg: dict, snapshot: str, original: str) -> str:
+    """Build a filename the strict impaired-file matcher will accept.
+
+    ``find_standalone_impaired_file`` matches
+    ``^YYYY\\s*[-_]?\\s*MM.*Impaired[\\s_-]+Loans.*\\.xlsx$`` (plus a few
+    looser fallbacks). Saving under ``YYYY-MM Impaired Loans - <CU>.xlsx``
+    guarantees a hit regardless of what the CU named the file they sent —
+    so the very next report run discovers it with no config change.
+    Preserves the uploaded file's extension.
+    """
+    ext = Path(original).suffix.lower() or ".xlsx"
+    prefix = (snapshot or "")[:7]  # YYYY-MM
+    cu = str((cfg or {}).get("credit_union") or "").strip()
+    cu = re.sub(r'[\\/:*?"<>|]', "", cu).strip()  # strip path-hostile chars
+    base = f"{prefix} Impaired Loans"
+    if cu:
+        base += f" - {cu}"
+    return secure_filename(f"{base}{ext}") or f"{prefix}_Impaired_Loans{ext}"
+
+
+def _supersede_existing_impaired(
+    target_dir: Path, snapshot: str, keep_name: str,
+) -> list[str]:
+    """Archive any impaired workbooks for the same period already on disk.
+
+    ``find_standalone_impaired_file`` walks the folder and returns the
+    *first* ``.xlsx`` that matches the period — filesystem order is not
+    deterministic, so leaving an older workbook for the same month next
+    to the freshly-uploaded one risks the report engine silently reading
+    the stale file. To make "upload a new report" mean "use this one",
+    we rename every other same-period impaired workbook by appending a
+    ``.superseded-<UTC timestamp>`` suffix. The suffix pushes the name
+    past the ``\\.xlsx$`` anchor so it no longer matches discovery, while
+    nothing is deleted (the analyst can recover it if needed).
+
+    ``keep_name`` (the canonical target we're about to write) is never
+    archived. Returns the list of archived basenames for flash display.
+    Best-effort — logs nothing, raises nothing.
+    """
+    prefix = (snapshot or "")[:7]  # YYYY-MM
+    if not prefix or len(prefix) != 7:
+        return []
+    year, month = prefix[:4], prefix[5:7]
+    # Same loose date matching the finder uses (YYYY-MM, MM-YYYY, month name).
+    month_names = {
+        "01": r"jan(?:uary)?", "02": r"feb(?:ruary)?", "03": r"mar(?:ch)?",
+        "04": r"apr(?:il)?", "05": r"may", "06": r"jun(?:e)?",
+        "07": r"jul(?:y)?", "08": r"aug(?:ust)?",
+        "09": r"sep(?:t(?:ember)?)?", "10": r"oct(?:ober)?",
+        "11": r"nov(?:ember)?", "12": r"dec(?:ember)?",
+    }
+    mnum = str(int(month))
+    alts = [
+        rf"{year}[-_.\s]*0?{mnum}(?!\d)",
+        rf"(?<!\d)0?{mnum}[-_.\s]*{year}",
+    ]
+    mname = month_names.get(month, "")
+    if mname:
+        alts.append(rf"{mname}[-_.\s]*{year}")
+        alts.append(rf"{year}[-_.\s]*{mname}")
+    try:
+        date_rx = re.compile("|".join(alts), re.IGNORECASE)
+        imp_rx = re.compile(r"impaired[\s_\-]+loans", re.IGNORECASE)
+    except re.error:
+        return []
+
+    from datetime import datetime, timezone
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archived: list[str] = []
+    try:
+        entries = list(target_dir.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if name == keep_name:
+            continue
+        if name.startswith("~$") or name.upper().startswith("DNU"):
+            continue
+        if "WARM" in name.upper():
+            continue
+        if not name.lower().endswith(".xlsx"):
+            continue
+        if not (imp_rx.search(name) and date_rx.search(name)):
+            continue
+        archive_to = entry.with_name(f"{name}.superseded-{stamp}")
+        try:
+            entry.rename(archive_to)
+            archived.append(name)
+        except OSError:
+            continue
+    return archived
+
+
+@run_bp.route("/<short_name>/impaired", methods=["GET"])
+def upload_impaired_form(short_name: str):
+    """Standalone Impaired Loans upload page.
+
+    Lets a user drop a *new* Impaired Loans workbook for an existing CU
+    without re-running the wizard or the full new-quarter pass. The file
+    is saved into the CU's ``data_directory`` under a canonical name so
+    the report engine's ``find_standalone_impaired_file`` picks it up on
+    the next report run. Shows the currently-discovered impaired file (if
+    any) for the selected period.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    snapshots = pipeline_service.list_snapshots_for_cu(short_name)
+    # Default the period to the CU's configured report_period, else the
+    # latest snapshot in the DB.
+    default_snap = ""
+    rp = _period_to_snapshot((cfg or {}).get("report_period") or "")
+    if rp:
+        default_snap = rp
+    elif snapshots:
+        default_snap = snapshots[0]
+
+    # Let the user VIEW the validation for an already-present impaired file
+    # without uploading a new one or re-running the new-quarter pass. The
+    # period comes from the ?snapshot_date= / ?period= query arg (the "View
+    # validation" selector below), falling back to the default period so the
+    # section auto-renders when a file is already in place.
+    sel = (request.args.get("snapshot_date") or "").strip()
+    if not sel:
+        sel = _period_to_snapshot(request.args.get("period") or "") or ""
+    view_snap = sel or default_snap
+    verification = None
+    if view_snap:
+        try:
+            verification = impaired_check_service.verify_for_run(
+                cfg, view_snap, short_name=short_name)
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Could not verify the existing impaired file: {exc}",
+                  "warning")
+            verification = None
+        # Keep the page a plain upload form when no workbook exists yet for
+        # the period (nothing to validate).
+        if verification and not verification.get("found"):
+            verification = None
+    return render_template(
+        "run/impaired_upload.html",
+        short_name=short_name,
+        cfg=cfg,
+        snapshots=snapshots,
+        default_snap=view_snap or default_snap,
+        verification=verification,
+    )
+
+
+@run_bp.route("/<short_name>/impaired", methods=["POST"])
+def upload_impaired(short_name: str):
+    """Save an uploaded Impaired Loans workbook and verify it.
+
+    The file is written into the CU's impaired-search folder using a
+    canonical, matcher-friendly name for the requested period, then
+    parsed + enriched via ``impaired_check_service.verify_for_run`` so
+    the user immediately sees the parsed rows and loan-data match counts.
+    No import or report generation is triggered — the file simply becomes
+    the authoritative impaired list for that period's next report run.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+
+    snapshot = (request.form.get("snapshot_date") or "").strip()
+    if not snapshot:
+        # Allow a YYYY-MM period picker too.
+        snapshot = _period_to_snapshot(request.form.get("period") or "") or ""
+    if not snapshot:
+        flash("Pick the reporting period this impaired file is for.", "error")
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    f = request.files.get("impaired_file")
+    if not f or not f.filename:
+        flash("Choose an Impaired Loans file to upload.", "error")
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    ext = Path(f.filename).suffix.lower()
+    if ext not in (".xlsx", ".xlsm"):
+        flash(
+            "Impaired Loans workbook must be an .xlsx or .xlsm file "
+            f"(got {ext or 'no extension'}).",
+            "error",
+        )
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    target_dir = _impaired_data_dir(cfg, ws, short_name)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        flash(f"Could not access the CU's data folder ({target_dir}): {exc}",
+              "error")
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    dest_name = _canonical_impaired_name(cfg, snapshot, f.filename)
+    dest = target_dir / dest_name
+
+    # Archive any other impaired workbook already present for the same
+    # period so discovery deterministically resolves to this upload.
+    try:
+        archived = _supersede_existing_impaired(target_dir, snapshot, dest_name)
+    except Exception:  # noqa: BLE001
+        archived = []
+    if archived:
+        preview = ", ".join(archived[:4]) + ("…" if len(archived) > 4 else "")
+        flash(
+            f"Archived {len(archived)} older impaired file(s) for this "
+            f"period (renamed with a .superseded suffix): {preview}",
+            "info",
+        )
+
+    try:
+        f.save(dest)
+    except OSError as exc:
+        flash(f"Could not save the impaired file: {exc}", "error")
+        return redirect(url_for("run.upload_impaired_form", short_name=short_name))
+
+    flash(
+        f"Saved impaired workbook as '{dest_name}' in "
+        f"{target_dir}. It will be used by the next report run for "
+        f"{snapshot}.",
+        "success",
+    )
+
+    # Verify + preview so the user can confirm the file parses and its
+    # loans resolve to real pools before running reports.
+    verification = None
+    try:
+        verification = impaired_check_service.verify_for_run(
+            cfg, snapshot, short_name=short_name)
+    except Exception as exc:  # noqa: BLE001
+        flash(f"Uploaded, but verification failed: {exc}", "warning")
+    if verification and verification.get("error"):
+        flash(
+            f"Uploaded, but the workbook did not fully verify: "
+            f"{verification['error']}",
+            "warning",
+        )
+
+    snapshots = pipeline_service.list_snapshots_for_cu(short_name)
+    return render_template(
+        "run/impaired_upload.html",
+        short_name=short_name,
+        cfg=cfg,
+        snapshots=snapshots,
+        default_snap=snapshot,
+        verification=verification,
+    )
 
 
 @run_bp.route("/<short_name>/settings", methods=["GET", "POST"])
@@ -238,6 +1890,7 @@ def edit_settings(short_name: str):
         posted_names = request.form.getlist("pool_name")
         seen: set[str] = set()
         new_pools: list[dict] = []
+        new_overlay: dict[str, float] = {}
         for i, n in enumerate(posted_names):
             n = (n or "").strip()
             if not n or n in seen:
@@ -251,15 +1904,30 @@ def edit_settings(short_name: str):
                     acl_int = None
             except ValueError:
                 acl_int = None
+            # Per-pool management adjustment overlay (percent -> decimal),
+            # mirroring the setup wizard's Mgmt Adjustments step. Empty / 0
+            # entries are dropped so the YAML stays clean.
+            madj_raw = (request.form.get(f"madj_{i}") or "").strip().replace("%", "")
+            if madj_raw:
+                try:
+                    madj_dec = round(float(madj_raw) / 100.0, 6)
+                    if abs(madj_dec) > 1e-9:
+                        new_overlay[n] = madj_dec
+                except ValueError:
+                    pass
             new_pools.append({
                 "name": n,
                 "risk_rated": rr_val == "yes",
                 "acl_months": acl_int,
                 "excluded": rr_val == "excluded",
-                "use_default_mgmt_adj": False,
+                "use_default_mgmt_adj": request.form.get(f"usedef_{i}") is not None,
             })
 
         config_service.set_pools(cfg, new_pools)
+
+        # Per-pool management adjustment overlays (top-level ``mgmt_adj_by_pool``
+        # keyed by pool name -> decimal). Read by every report engine.
+        cfg["mgmt_adj_by_pool"] = new_overlay
 
         # Global mgmt_adj knobs
         ma = dict(cfg.get("mgmt_adj") or {})
@@ -276,12 +1944,25 @@ def edit_settings(short_name: str):
         flash("Pool settings saved.", "success")
         return redirect(url_for("run.edit_settings", short_name=short_name))
 
+    overlay = cfg.get("mgmt_adj_by_pool") or {}
+
+    def _overlay_pct(name: str) -> str:
+        d = overlay.get(name)
+        if d in (None, ""):
+            return ""
+        try:
+            return "%g" % (float(d) * 100.0)
+        except (TypeError, ValueError):
+            return ""
+
     rows = [
         {
             "name": p["name"],
             "risk_rated": p["risk_rated"] and not p["excluded"],
             "excluded": p["excluded"],
             "acl_months": p["acl_months"] or "",
+            "mgmt_adj_pct": _overlay_pct(p["name"]),
+            "use_default": bool(p.get("use_default_mgmt_adj")),
         }
         for p in pools_list
     ]
@@ -332,25 +2013,37 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
     # patterns first (most specific), then fall back to the top-level
     # ``file_pattern`` + top-level ``column_mappings`` so files that no
     # extract matches still get scanned.
+    def _compile_list(value):
+        """str | list[str] -> list[Pattern]; invalid regexes silently skipped."""
+        if not value:
+            return []
+        items = [value] if isinstance(value, str) else [
+            v for v in value if isinstance(v, str) and v
+        ]
+        out: list = []
+        for s in items:
+            try:
+                out.append(re.compile(s, re.IGNORECASE))
+            except re.error:
+                continue
+        return out
+
     extracts = cfg.get("loan_data_extracts") or []
     patterns: list[tuple] = []
     for e in extracts:
-        pat = (e or {}).get("file_pattern") or ""
-        if not pat:
-            continue
-        try:
-            pre = re.compile(pat, re.IGNORECASE)
-        except re.error:
+        pres = _compile_list((e or {}).get("file_pattern"))
+        if not pres:
             continue
         cm = (e or {}).get("column_mappings") or {}
-        patterns.append((pre, cm))
-    top_pat = cfg.get("file_pattern") or ""
-    if top_pat:
-        try:
-            patterns.append((re.compile(top_pat, re.IGNORECASE),
-                             cfg.get("column_mappings") or {}))
-        except re.error:
-            pass
+        # One tuple per regex so the existing single-Pattern consumer
+        # below works unchanged for multi-pattern extracts.
+        for pre in pres:
+            patterns.append((pre, cm))
+    top_pres = _compile_list(cfg.get("file_pattern"))
+    if top_pres:
+        top_cm = cfg.get("column_mappings") or {}
+        for pre in top_pres:
+            patterns.append((pre, top_cm))
     if not patterns:
         return []
 
@@ -361,9 +2054,20 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
         folders.append(raw_dir)
     cp_folder = ((cfg.get("credit_pull") or {}).get("source_folder") or "").strip()
     if cp_folder and os.path.isdir(cp_folder):
-        folders.append(Path(cp_folder))
+        # Guard: credit_pull.source_folder can point at a SHARED wizard temp
+        # staging area (e.g. ``%TEMP%\\cecl_ui_samples``) that holds sample
+        # loan files uploaded for OTHER credit unions during setup. Scanning
+        # it here pulls in foreign LOAN TYPE codes (another CU's numeric
+        # coding scheme), which then surface as bogus "new loan codes" for
+        # THIS CU — with inflated counts summed across every CU's samples.
+        # The wizard's temp folders all live under a ``cecl_ui_*`` directory;
+        # skip any source folder that resolves inside one. Real credit-pull
+        # folders live on the client's network share and never match.
+        if "cecl_ui_" not in cp_folder.replace("\\", "/").lower():
+            folders.append(Path(cp_folder))
 
     counts: dict[str, int] = {}
+    sources: dict[str, set] = {}
     samples: dict[str, set] = {}
 
     def _read_column(path: Path, col_mappings: dict) -> pd.Series | None:
@@ -412,6 +2116,7 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
                     if not code or _resolves_to_pool(code, pool_map, split):
                         continue
                     counts[code] = counts.get(code, 0) + 1
+                    sources.setdefault(code, set()).add(f"file:{p.name}")
                     samples.setdefault(code, set())
                 break
 
@@ -424,9 +2129,22 @@ def _scan_unmapped_loan_codes(cfg: dict, short_name: str) -> list[dict]:
     db_counts = _scan_unmapped_codes_from_db(cfg, pool_map, split)
     for code, n in db_counts.items():
         counts[code] = counts.get(code, 0) + n
+        sources.setdefault(code, set()).add("db:historical")
+
+    def _src_label(code: str) -> str:
+        srcs = sources.get(code) or set()
+        has_file = any(s.startswith("file:") for s in srcs)
+        has_db = "db:historical" in srcs
+        if has_file and has_db:
+            return "loan files + historical data"
+        if has_file:
+            return "loan files"
+        if has_db:
+            return "historical data (DB)"
+        return ""
 
     return [
-        {"code": c, "count": counts[c]}
+        {"code": c, "count": counts[c], "source": _src_label(c)}
         for c in sorted(counts, key=lambda k: (-counts[k], k.lower()))
     ]
 
@@ -435,7 +2153,17 @@ def _scan_unmapped_codes_from_db(cfg: dict, pool_map: dict,
                                  split: str) -> dict[str, int]:
     """Pull distinct loan_code values from the historical-data DB tables
     (chargeoffs, recoveries, delinquency) that don't resolve to any pool
-    via ``cfg['pool_map']``. Returns ``{code: row_count}``.
+    via ``cfg['pool_map']`` AND don't resolve via the NCUA canonical
+    fallback (``_resolve_pool_with_ncua``). Returns ``{code: row_count}``.
+
+    The NCUA fallback check is critical: rows in ``loan_code_*_history``
+    populated by 5300 backfills (``source LIKE '5300%'``) are keyed by
+    NCUA canonical labels like 'First Liens', 'New Vehicles',
+    'Unsecured Credit Card'. Those resolve automatically at report time
+    via :func:`generate_report._resolve_pool_with_ncua` — surfacing them
+    here as "needs mapping" misleads the user (they have nothing to map;
+    the resolution is automatic). Only codes that resolve to NEITHER
+    pool_map NOR NCUA fallback are genuinely unmapped.
 
     Returns an empty dict on any error (missing tables, no DB access).
     """
@@ -451,6 +2179,56 @@ def _scan_unmapped_codes_from_db(cfg: dict, pool_map: dict,
         eng = create_engine(get_database_url())
     except Exception:  # noqa: BLE001
         return {}
+
+    # Build NCUA canonical -> pool fallback (best-effort; if generate_report
+    # isn't importable for any reason we degrade to pool_map-only matching).
+    ncua_lookup: dict[str, str] = {}
+    try:
+        import generate_report as _gr
+        ncua_lookup = _gr._build_ncua_canonical_pool_lookup(cfg) or {}
+    except Exception:  # noqa: BLE001
+        ncua_lookup = {}
+    default_pool = (cfg.get("default_pool") or "").strip()
+
+    # Build set of known pool names (lower-cased) from the canonical pools
+    # registry. DB historical rows from 5300 backfills (5300-distributed:*,
+    # 5300CO:*, 5300REC:*, 5300DQ:*) often carry the ALREADY-RESOLVED pool
+    # name as ``loan_code`` (because the backfill writers persist the
+    # destination pool, not a raw NCUA label, when one resolves). Surfacing
+    # those as "needs mapping" misleads the user — the code IS the pool.
+    known_pool_names: set[str] = set()
+    try:
+        for _p in config_service.get_pools(cfg) or []:
+            nm = (_p.get("name") or "").strip().lower()
+            if nm:
+                known_pool_names.add(nm)
+    except Exception:  # noqa: BLE001
+        known_pool_names = set()
+
+    def _resolves(code: str) -> bool:
+        if _resolves_to_pool(code, pool_map, split):
+            return True
+        if ncua_lookup:
+            key = str(code).strip().lower()
+            pool = ncua_lookup.get(key) or ncua_lookup.get(" ".join(key.split()))
+            if pool and pool.strip().lower() not in ("ignore", "exclude"):
+                return True
+        # Code IS already a configured pool name (DB historical rows often
+        # carry the resolved pool name as loan_code — nothing to map).
+        if known_pool_names and str(code).strip().lower() in known_pool_names:
+            return True
+        # default_pool resolution: any non-empty default_pool is a deliberate
+        # user choice for how unmapped codes should flow. For DB-historical
+        # NCUA-canonical aggregations (e.g. 'Agricultural',
+        # 'Commercial and Industrial' for a non-commercial CU) the user has
+        # already opted into Ignore via default_pool — flagging them every
+        # quarter forces the same answer the user already gave. File-side
+        # scanning (in the caller) still surfaces genuinely-new codes via
+        # the loan_data_extracts path; this DB-only path defers to the
+        # configured default.
+        if default_pool:
+            return True
+        return False
 
     counts: dict[str, int] = {}
     for table in ("loan_code_history",
@@ -472,7 +2250,7 @@ def _scan_unmapped_codes_from_db(cfg: dict, pool_map: dict,
             continue
         for r in rows:
             code = (r[0] or "").strip()
-            if not code or _resolves_to_pool(code, pool_map, split):
+            if not code or _resolves(code):
                 continue
             counts[code] = counts.get(code, 0) + int(r[1] or 0)
     return counts
@@ -567,4 +2345,257 @@ def edit_pool_map(short_name: str):
         unmapped_codes=unmapped_codes,
         pool_distribution=pool_distribution,
         snapshots=snapshots,
+    )
+
+
+@run_bp.route("/<short_name>/balance-compare", methods=["GET", "POST"])
+def balance_compare(short_name: str):
+    """Standalone loan-to-pool comparison for a user-chosen period, with an
+    inline loan-code → pool remapping editor.
+
+    Mirrors the wizard's Step 14 (Balance Adjustment) but on demand: pick
+    any imported snapshot, see the per-pool comparison (monthly balance
+    file vs the imported loan extract) plus the raw loan codes sitting in
+    each pool, and reassign a mis-mapped code to the correct pool. Saving a
+    reassignment updates ``pool_map`` and re-imports that period so the
+    stored snapshot re-stamps with the new pool.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    snapshots = pipeline_service.list_snapshots_for_cu(short_name)
+
+    if request.method == "POST":
+        period = (request.form.get("period") or "").strip()
+        map_codes = request.form.getlist("map_code")
+        map_pools = request.form.getlist("map_pool")
+        new_map = dict(cfg.get("pool_map") or {})
+        changed = 0
+        for i, code in enumerate(map_codes):
+            code = (code or "").strip()
+            if not code:
+                continue
+            new_pool = (map_pools[i] if i < len(map_pools) else "").strip()
+            old_pool = new_map.get(code, "")
+            if new_pool == "":
+                # Empty selection means "unmap" — the code then falls
+                # through to the CU's default_pool.
+                if code in new_map:
+                    del new_map[code]
+                    changed += 1
+                continue
+            if new_pool == old_pool:
+                continue
+            new_map[code] = new_pool
+            changed += 1
+
+        if not changed:
+            flash("No mapping changes detected.", "info")
+            return redirect(url_for("run.balance_compare",
+                                    short_name=short_name, period=period))
+
+        cfg["pool_map"] = new_map
+        try:
+            config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+        except (OSError, ValueError) as exc:
+            flash(f"Could not save pool mappings: {exc}", "error")
+            return redirect(url_for("run.balance_compare",
+                                    short_name=short_name, period=period))
+
+        # Re-import the selected period so its stored rows re-stamp with the
+        # new mapping and the comparison reflects the change immediately.
+        if period:
+            try:
+                res = pipeline_service.reimport_period(short_name, period)
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            if res.get("ok"):
+                flash(
+                    f"Reassigned {changed} loan code(s) and re-imported "
+                    f"{res.get('period', period)}: {res.get('rows', 0)} "
+                    "loan row(s). Review the updated comparison below.",
+                    "success",
+                )
+            else:
+                flash(
+                    f"Saved {changed} mapping change(s) to the config, but "
+                    f"could not re-import {period}: {res.get('error')}. The "
+                    "mapping is saved for future runs; run Import Data (or "
+                    "Re-import that period) to apply it to stored data.",
+                    "warning",
+                )
+        else:
+            flash(f"Saved {changed} mapping change(s).", "success")
+        return redirect(url_for("run.balance_compare",
+                                short_name=short_name, period=period))
+
+    # ── GET ──────────────────────────────────────────────────────────
+    period = (request.args.get("period") or "").strip()
+    if not period and snapshots:
+        period = snapshots[0]
+    comparison = None
+    if period:
+        try:
+            comparison = balance_check_service.compare_run(
+                cfg, period, short_name=short_name)
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Comparison failed: {exc}", "error")
+    pool_choices = _all_known_pools(cfg, short_name)
+    return render_template(
+        "run/balance_compare.html",
+        short_name=short_name,
+        cfg=cfg,
+        snapshots=snapshots,
+        period=period,
+        comparison=comparison,
+        pool_choices=pool_choices,
+    )
+
+
+def _oac_norm_code(c) -> str:
+    s = str(c).strip()
+    return s.lstrip("0") or "0"
+
+
+def _unfunded_pools_for_codes(cfg: dict, codes) -> list[str]:
+    """Pools that the given loan type codes map to (via ``pool_map``)."""
+    if isinstance(codes, (str, int)):
+        codes = [codes]
+    pm = cfg.get("pool_map") or {}
+    npm: dict[str, str] = {}
+    for k, v in pm.items():
+        npm.setdefault(_oac_norm_code(k), v)
+    default_pool = cfg.get("default_pool", "Ignore")
+    pools: list[str] = []
+    for c in (codes or []):
+        p = npm.get(_oac_norm_code(c), default_pool)
+        if p and p not in pools and p not in ("Exclude", "Ignore"):
+            pools.append(p)
+    return pools
+
+
+def _oac_unfunded_pools(cfg: dict, entry: dict, calc_rows: dict):
+    """Return ``(base_title, [pool, ...])`` for an unfunded-commitment entry.
+
+    Prefers the pools captured in ``oac_last_calculated`` (real report run);
+    falls back to deriving them from the configured codes so the page still
+    works before the first run.
+    """
+    base_title = (str(entry.get("title") or "Unfunded Commitments").strip()
+                  or "Unfunded Commitments")
+    cached = [v.get("pool") for v in (calc_rows or {}).values()
+              if v.get("kind") == "unfunded_commitment"
+              and v.get("base_title") == base_title and v.get("pool")]
+    if cached:
+        seen: set[str] = set()
+        pools = [p for p in cached if not (p in seen or seen.add(p))]
+        return base_title, sorted(pools)
+    codes = entry.get("loan_type_codes")
+    if codes is None:
+        codes = entry.get("loan_type_code")
+    return base_title, _unfunded_pools_for_codes(cfg, codes or [])
+
+
+@run_bp.route("/<short_name>/oac", methods=["GET", "POST"])
+def oac_overrides(short_name: str):
+    """View and override the calculated loss rate for data-derived Other
+    Allowance Considerations (Negative Share Provision, Unfunded Commitments).
+
+    Overrides are stored on the OAC template entries in the client YAML
+    (``override_percentage`` for negative shares, ``override_percentage_by_pool``
+    for unfunded commitments) and consumed by the report engine on the next
+    run. The most recently calculated values (from ``oac_last_calculated``)
+    are shown so the user can compare against the model's number.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    oac_list = cfg.get("other_allowance_considerations") or []
+    calc_rows = (cfg.get("oac_last_calculated") or {}).get("rows") or {}
+
+    if request.method == "POST":
+        def _parse_pct(raw):
+            raw = (raw or "").strip().replace("%", "")
+            if raw == "":
+                return None
+            try:
+                return round(float(raw), 6)
+            except ValueError:
+                return None
+
+        for i, entry in enumerate(oac_list):
+            src = str((entry or {}).get("source") or "").strip()
+            if src == "negative_share":
+                val = _parse_pct(request.form.get(f"ns_override__{i}"))
+                if val is None:
+                    entry.pop("override_percentage", None)
+                else:
+                    entry["override_percentage"] = val
+            elif src == "unfunded_commitment":
+                _base, pools = _oac_unfunded_pools(cfg, entry, calc_rows)
+                ov_map: dict[str, float] = {}
+                for j, pool in enumerate(pools):
+                    val = _parse_pct(request.form.get(f"uc_override__{i}__{j}"))
+                    if val is not None:
+                        ov_map[pool] = val
+                if ov_map:
+                    entry["override_percentage_by_pool"] = ov_map
+                else:
+                    entry.pop("override_percentage_by_pool", None)
+
+        cfg["other_allowance_considerations"] = oac_list
+        config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+        flash("Other Allowance Consideration overrides saved. "
+              "They take effect on the next report run.", "success")
+        return redirect(url_for("run.oac_overrides", short_name=short_name))
+
+    # ── GET: build display rows ──
+    ns_rows = []
+    unf_rows = []
+    static_rows = []
+    for i, entry in enumerate(oac_list):
+        src = str((entry or {}).get("source") or "").strip()
+        title = str(entry.get("title") or "").strip()
+        if src == "negative_share":
+            c = calc_rows.get(title, {})
+            ns_rows.append({
+                "idx": i,
+                "title": title or "Negative Share Provision",
+                "life_of_loan_months": entry.get("life_of_loan_months", 12),
+                "calc": c,
+                "override": entry.get("override_percentage"),
+            })
+        elif src == "unfunded_commitment":
+            base_title, pools = _oac_unfunded_pools(cfg, entry, calc_rows)
+            ov_map = entry.get("override_percentage_by_pool") or {}
+            prows = []
+            for j, pool in enumerate(pools):
+                c = calc_rows.get(f"{base_title} - {pool}", {})
+                prows.append({
+                    "j": j,
+                    "pool": pool,
+                    "calc": c,
+                    "override": ov_map.get(pool),
+                })
+            unf_rows.append({
+                "idx": i,
+                "base_title": base_title,
+                "codes": entry.get("loan_type_codes") or entry.get("loan_type_code") or [],
+                "pools": prows,
+            })
+        else:
+            static_rows.append({
+                "title": title or "(untitled)",
+                "balance": entry.get("balance"),
+                "percentage": entry.get("percentage"),
+                "amount": entry.get("amount"),
+            })
+
+    return render_template(
+        "run/oac_overrides.html",
+        short_name=short_name,
+        cfg=cfg,
+        ns_rows=ns_rows,
+        unf_rows=unf_rows,
+        static_rows=static_rows,
+        asof=(cfg.get("oac_last_calculated") or {}).get("asof"),
+        has_data_derived=bool(ns_rows or unf_rows),
     )

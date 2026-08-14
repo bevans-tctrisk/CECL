@@ -33,7 +33,7 @@ from cecl_ui.routes.setup import (
 )
 from cecl_ui.services import admin_defaults, wizard_drafts
 from cecl_ui.services.scale import (
-    impaired_loader, mapping_loader, mgmt_adj_writer,
+    impaired_loader, lol_writer, mapping_loader, mgmt_adj_writer,
     qfactor_loader, runner as scale_runner, solr_fetcher,
     template_loader,
 )
@@ -65,15 +65,19 @@ WIZARD_STEPS_SCALE = [
     ("scale_solr",     "2. Solr & Period"),
     ("scale_template", "3. Template & Map"),
     ("scale_qfactors", "4. Q-Factors"),
-    ("scale_impaired", "5. Impaired Loans"),
-    ("scale_review",   "6. Review"),
-    ("scale_run",      "7. Run"),
+    ("scale_lol",      "5. Life of Loan Months"),
+    ("scale_mgmt_adj", "6. Mgmt Adjustments"),
+    ("scale_impaired", "7. Impaired Loans"),
+    ("scale_review",   "8. Review"),
+    ("scale_run",      "9. Run"),
 ]
 
 SCALE_STEP_ENDPOINTS: dict[str, str] = {
     "scale_solr":     "scale_setup.step_solr",
     "scale_template": "scale_setup.step_template_map",
     "scale_qfactors": "scale_setup.step_qfactors",
+    "scale_lol":      "scale_setup.step_lol",
+    "scale_mgmt_adj": "scale_setup.step_mgmt_adj",
     "scale_impaired": "scale_setup.step_impaired",
     "scale_review":   "scale_setup.step_review",
     "scale_run":      "scale_setup.step_run",
@@ -118,6 +122,12 @@ def _default_scale_block() -> dict[str, Any]:
             "pool_rows": {},
             "portfolio": {"hard_code_pct": 0.0, "use_default": False},
         },
+        # Per-pool Life-of-Loan month overrides written to the
+        # SCALE template's ``Industry Data`` tab. Keyed by pool name
+        # (matches ``Scale Calculation``!C9:C21) so the override
+        # survives a template-pool reorder. Values are positive ints;
+        # absence/0 means "keep template default".
+        "life_of_loan_overrides": {},   # {pool_name: months_int}
         "impaired_file": {},       # {saved_path, uploaded_filename, parsed:{...}}
         "report_variant": "both",  # 'tct' | 'vizo' | 'both'
         "last_test": {},   # {ok, status, message, ran_at}
@@ -160,6 +170,163 @@ def _persist_scale_draft(state: dict[str, Any], active_step: str) -> None:
 def _ensure_scale_mode(state: dict[str, Any]) -> None:
     state["model"] = "scale"
     _scale(state)
+
+
+def _flash_recalc_warnings(result: dict[str, Any]) -> None:
+    """Surface any ``_recalc_outputs`` skips/failures as user-visible
+    flash warnings. The runner's post-write Excel recalc is
+    best-effort and silent on failure; without this, a missing
+    ``pywin32`` install (or any other recalc failure) leaves every
+    output workbook with stale template-cached formula values and the
+    analyst sees identical numbers across periods until they open
+    each file in Excel and trigger a manual recalc (F9 / Save).
+    """
+    recalc = result.get("recalc") or []
+    if not isinstance(recalc, list):
+        return
+    skipped: list[str] = []
+    failed: list[str] = []
+    skip_reason = ""
+    for entry in recalc:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        name = Path(path).name if path else "(unknown)"
+        if entry.get("skipped"):
+            skipped.append(name)
+            if not skip_reason:
+                skip_reason = str(entry.get("error") or "").strip()
+        elif not entry.get("ok"):
+            err = str(entry.get("error") or "").strip()
+            failed.append(f"{name}: {err}" if err else name)
+    if skipped:
+        n = len(skipped)
+        sample = ", ".join(skipped[:3])
+        more = f" (+{n - 3} more)" if n > 3 else ""
+        detail = f" — {skip_reason}" if skip_reason else ""
+        flash(
+            f"Workbook formulas were NOT auto-recalculated for {n} "
+            f"file(s){detail}. Open each file in Excel and press F9 "
+            f"(or Save) so cached values refresh; otherwise viewers "
+            f"that don't recompute (SharePoint preview, Outlook "
+            f"preview, Excel set to manual calc) will show stale "
+            f"template values that may look identical across "
+            f"periods. Files: {sample}{more}.",
+            "warning",
+        )
+    if failed:
+        n = len(failed)
+        sample = "; ".join(failed[:3])
+        more = f" (+{n - 3} more)" if n > 3 else ""
+        flash(
+            f"Excel recalc failed for {n} file(s): {sample}{more}. "
+            "Open the file(s) in Excel manually so cached values "
+            "refresh before reviewing the ACL numbers.",
+            "warning",
+        )
+
+
+def _flash_prior_acl_warnings(result: dict[str, Any]) -> None:
+    """Surface ``_inject_prior_acl`` fallbacks as user-visible flash
+    warnings, and announce DB hits / captures as success info.
+
+    Resolution order in the runner:
+
+    * Path 1 (preferred) -- read from ``scale_acl_history`` PostgreSQL
+      table. No Excel dependency, no pywin32.
+    * Path 2 -- read cached values from the prior workbook (best
+      effort; requires Excel to have saved cached values).
+    * Path 3 -- write literal 0 to AY2..AY5 to break the formula leak.
+
+    This helper surfaces:
+
+    * The DB-hit case as an info-level confirmation.
+    * The Path-2 capture-into-DB success so the user knows the next
+      quarter will be automatic.
+    * The Path-3 fallback as a warning with actionable remediation.
+    * Any ``db_captures`` from the just-finished run so the user can
+      see whether the current period's values are now persisted.
+    """
+    prior = result.get("prior_acl") or {}
+    if not isinstance(prior, dict):
+        prior = {}
+    source = str(prior.get("source") or "")
+    fallback_used = bool(prior.get("fallback_used"))
+    prev_period = str(prior.get("prior_period") or "")
+
+    # Case A: DB hit -- no Excel dependency.
+    if source.startswith("db:") and not fallback_used:
+        flash(
+            f"Prior ACL values were loaded from the database "
+            f"(scale_acl_history) for {prev_period}; no Excel "
+            f"dependency required.",
+            "info",
+        )
+
+    # Case B: read from prior workbook and persisted to DB.
+    db_persist = prior.get("db_persist") or {}
+    if source == "prior-workbook" and db_persist.get("ok"):
+        flash(
+            f"Prior ACL values were read from the prior-quarter "
+            f"workbook for {prev_period} and persisted to the "
+            f"database. Next quarter's run will use the DB copy "
+            f"and won't require Excel access.",
+            "info",
+        )
+
+    # Case C: fallback to zero -- analyst needs to act.
+    if fallback_used:
+        reason = str(prior.get("error") or "").strip()
+        prior_path = str(prior.get("prior_path") or "")
+        prior_name = Path(prior_path).name if prior_path else "(unknown)"
+        applied = prior.get("applied") or []
+        n_written = sum(
+            1 for a in applied if isinstance(a, dict) and a.get("ok")
+        )
+        detail = f" — {reason}" if reason else ""
+        flash(
+            f"Prior ACL values for {prev_period} could NOT be loaded "
+            f"from the database OR read from the prior-quarter "
+            f"workbook ({prior_name}); wrote 0 to "
+            f"Historical Data!AY2..AY5 on {n_written} output file(s) "
+            f"to prevent the 'prior column duplicates current column' "
+            f"leak{detail}. To populate the database for this period: "
+            f"(1) open the prior workbook in Excel and Save so cached "
+            f"values populate, then run "
+            f"`scripts/scale_acl_backfill.py` to harvest them; or "
+            f"(2) install pywin32 in the wizard Python environment so "
+            f"the runner can headlessly recalc prior workbooks. After "
+            f"either, re-run this report and the DB will be populated "
+            f"automatically.",
+            "warning",
+        )
+
+    # Always surface DB captures for the CURRENT period.
+    db_captures = result.get("db_captures") or []
+    if isinstance(db_captures, list) and db_captures:
+        ok_count = sum(1 for c in db_captures if isinstance(c, dict) and c.get("ok"))
+        skipped_count = sum(
+            1 for c in db_captures
+            if isinstance(c, dict) and c.get("skipped")
+        )
+        if ok_count:
+            flash(
+                f"Persisted ACL values for the current period to the "
+                f"database ({ok_count} file(s)); next quarter's run "
+                f"will read them automatically.",
+                "info",
+            )
+        elif skipped_count:
+            flash(
+                f"Could not persist ACL values for the current period "
+                f"to the database: {skipped_count} output file(s) have "
+                f"no cached formula values yet (Excel hasn't evaluated "
+                f"them). Open the workbook in Excel + Save, then run "
+                f"`scripts/scale_acl_backfill.py` to populate the DB. "
+                f"Or install pywin32 so the runner can do this "
+                f"automatically.",
+                "warning",
+            )
 
 
 # -------------------------------------------------------------------
@@ -383,7 +550,7 @@ def step_qfactors():
         sc["qfactor_overrides"] = overrides
         _save_state(state)
         if action == "next":
-            return redirect(url_for("scale_setup.step_mgmt_adj"))
+            return redirect(url_for("scale_setup.step_lol"))
         flash("Q-factor overrides saved.", "success")
         return redirect(url_for("scale_setup.step_qfactors"))
     entries = qfactor_loader.merge_with_overrides(
@@ -398,7 +565,104 @@ def step_qfactors():
 
 
 # -------------------------------------------------------------------
-# Step 5 — Management Adjustments
+# Step 5 — Life of Loan Months (per-pool ACL Lifetime Months / WAM)
+# -------------------------------------------------------------------
+
+def _coerce_months_form(value: str) -> int:
+    """Form value -> non-negative int; blank or invalid returns 0."""
+    if value is None:
+        return 0
+    s = str(value).strip()
+    if not s:
+        return 0
+    try:
+        n = int(round(float(s)))
+    except (TypeError, ValueError):
+        return 0
+    return max(n, 0)
+
+
+@scale_setup_bp.route("/step/lol", methods=["GET", "POST"])
+def step_lol():
+    state = _state()
+    _ensure_scale_mode(state)
+    sc = _scale(state)
+    overrides = sc.setdefault("life_of_loan_overrides", {})
+
+    tmpl_path = _resolved_template_path(sc)
+    template_rows: list[dict[str, Any]] = []
+    if tmpl_path:
+        try:
+            template_rows = lol_writer.read_lol_months(tmpl_path)
+        except Exception as exc:  # noqa: BLE001
+            current_app.logger.warning(
+                "lol: could not read months from %s: %s", tmpl_path, exc,
+            )
+
+    if request.method == "POST":
+        action = request.form.get("action", "save")
+
+        if action == "reset":
+            sc["life_of_loan_overrides"] = {}
+            _save_state(state)
+            flash(
+                "Life of Loan overrides cleared. Template defaults will "
+                "apply on the next run.", "info",
+            )
+            return redirect(url_for("scale_setup.step_lol"))
+
+        new_overrides: dict[str, int] = {}
+        for i, tr in enumerate(template_rows):
+            name = tr["name"]
+            raw = request.form.get(f"lol_months__{i}", "")
+            months = _coerce_months_form(raw)
+            template_default = tr.get("months") or 0
+            # Only persist values that differ from the template default.
+            # 0 / blank means "use template default" -> drop the entry.
+            if months > 0 and months != template_default:
+                new_overrides[name] = months
+        sc["life_of_loan_overrides"] = new_overrides
+        _save_state(state)
+
+        if action == "next":
+            return redirect(url_for("scale_setup.step_mgmt_adj"))
+        flash("Life of Loan overrides saved.", "success")
+        return redirect(url_for("scale_setup.step_lol"))
+
+    # Build display rows merging template defaults with any saved overrides.
+    saved = overrides if isinstance(overrides, dict) else {}
+    pool_display: list[dict[str, Any]] = []
+    for i, tr in enumerate(template_rows):
+        name = tr["name"]
+        default_months = tr.get("months")
+        override = saved.get(name)
+        try:
+            override_int = int(override) if override is not None else 0
+        except (TypeError, ValueError):
+            override_int = 0
+        pool_display.append({
+            "idx": i,
+            "name": name,
+            "default_months": default_months,
+            "override_months": override_int,
+            "effective_months": (
+                override_int if override_int > 0 else (default_months or 0)
+            ),
+            "is_overridden": override_int > 0 and override_int != (default_months or 0),
+        })
+
+    return render_template(
+        "setup/scale/step_lol.html",
+        pool_rows=pool_display,
+        template_path=tmpl_path,
+        template_missing=(not tmpl_path),
+        override_count=sum(1 for p in pool_display if p["is_overridden"]),
+        **_wizard_ctx("scale_lol"),
+    )
+
+
+# -------------------------------------------------------------------
+# Step 6 — Management Adjustments
 # -------------------------------------------------------------------
 
 def _resolved_template_path(sc: dict) -> str:
@@ -644,6 +908,11 @@ def step_review():
         1 for r in qf_entries
         if abs(r["effective_bps"] - r["default_bps"]) > 1e-9
     )
+    lol_overrides = sc.get("life_of_loan_overrides") or {}
+    lol_count = sum(
+        1 for v in lol_overrides.values()
+        if isinstance(v, (int, float)) and int(v) > 0
+    )
     imp = sc.get("impaired_file") or {}
     imp_parsed = imp.get("parsed") or {}
     return render_template(
@@ -653,6 +922,7 @@ def step_review():
         map_summary=map_summary,
         qf_total=len(qf_entries),
         qf_active=qf_active,
+        lol_count=lol_count,
         imp=imp,
         imp_parsed=imp_parsed,
         **_wizard_ctx("scale_review"),
@@ -684,6 +954,8 @@ def step_run():
                     f"{result.get('quarters_requested', 32)} quarter(s) filled.",
                     "success",
                 )
+                _flash_recalc_warnings(result)
+                _flash_prior_acl_warnings(result)
             else:
                 for err in result.get("errors", []):
                     flash(err, "error")
@@ -701,6 +973,8 @@ def step_run():
                     f"of {result['total_rows']} cells.",
                     "success",
                 )
+                _flash_recalc_warnings(result)
+                _flash_prior_acl_warnings(result)
             else:
                 for err in result.get("errors", []):
                     flash(err, "error")
@@ -714,19 +988,26 @@ def step_run():
 
 @scale_setup_bp.route("/step/run/complete", methods=["POST"])
 def complete_and_home():
-    """Mark the SCALE wizard as completed for this CU and return home.
+    """Mark the SCALE wizard as completed for this CU and jump to
+    that CU's SCALE Runs dashboard.
 
-    Triggered by the "Done -- Home" button on the Run step. Stamps the
-    draft's ``_draft_meta.completed_at`` so the dashboard moves it from
-    "Resume in-progress setup" to "Completed setup". The draft itself
-    is kept so the user can still Edit setup or Delete it later.
+    Triggered by the "Continue to SCALE Runs" button on the Run step.
+    Stamps the draft's ``_draft_meta.completed_at`` so the home
+    dashboard moves it from "Resume in-progress setup" to "Completed
+    setup". The draft itself is kept so the user can still Edit setup
+    or Delete it later. Redirect target is the per-CU SCALE Runs page
+    (``scale_runs.cu_dashboard``) so the user lands on the page that
+    matches their next step of the workflow -- not the generic home
+    page, which was the pre-fix behaviour and led to confusion when
+    Migration and SCALE dashboards look similar.
     """
     state = _state()
     _ensure_scale_mode(state)
+    sn = state.get("short_name") or ""
     # Make sure the on-disk draft exists (Run-step saves are usually
     # already persisted, but call save_draft as a safety net before
     # stamping completion).
-    if state.get("short_name") or state.get("credit_union"):
+    if sn or state.get("credit_union"):
         try:
             wizard_drafts.save_draft(
                 current_app.config["WORKSPACE_ROOT"], state,
@@ -738,10 +1019,14 @@ def complete_and_home():
                 model="scale",
             )
             flash(
-                f"Marked {state.get('credit_union') or state.get('short_name')} "
+                f"Marked {state.get('credit_union') or sn} "
                 f"setup as completed.",
                 "success",
             )
         except Exception as exc:  # noqa: BLE001
             flash(f"Could not mark setup completed: {exc}", "warning")
-    return redirect(url_for("home.index"))
+    if sn:
+        return redirect(url_for("scale_runs.cu_dashboard", short_name=sn))
+    # Missing short_name (edge case: user hit Complete before Identity
+    # step saved). Fall back to the SCALE Runs index.
+    return redirect(url_for("scale_runs.index"))

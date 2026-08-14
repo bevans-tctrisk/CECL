@@ -15,6 +15,38 @@
 </div>
 {% endif %}
 
+{% if state.autoderive and state.autoderive.decisions %}
+<div class="card">
+  <h2 style="display:flex;align-items:center;gap:.5rem;">
+    Auto-derived from WARM
+    {% set _t = state.autoderive.overall_tier %}
+    <span style="font-size:.7rem;padding:.15rem .55rem;border-radius:.75rem;color:#fff;background:{{ '#1a7f37' if _t=='green' else ('#b7791f' if _t=='yellow' else '#b42318') }};">
+      {{ _t|upper }}
+    </span>
+  </h2>
+  <p class="muted">
+    The validated resolver path derived the items below from the WARM workbook
+    and pre-filled them into the wizard (column mappings, loan-code map, credit
+    grades / BRR, reserve pins, credit-pull key, monthly book, pool order).
+    <strong>Green</strong> = tie-validated logic; review any
+    <strong>yellow / red</strong> before saving. You can still adjust any
+    value on its step.
+  </p>
+  <table style="width:100%;border-collapse:collapse;font-size:.9rem;">
+    <tbody>
+    {% for d in state.autoderive.decisions %}
+      {% set c = '#1a7f37' if d.tier=='green' else ('#b7791f' if d.tier=='yellow' else '#b42318') %}
+      <tr style="border-top:1px solid #eee;">
+        <td style="width:1rem;padding:.4rem .3rem;vertical-align:top;"><span style="display:inline-block;width:.6rem;height:.6rem;border-radius:50%;background:{{ c }};" title="{{ d.tier }}"></span></td>
+        <td style="padding:.4rem .5rem;white-space:nowrap;vertical-align:top;"><strong>{{ d.label }}</strong></td>
+        <td style="padding:.4rem .5rem;color:#666;">{{ d.evidence }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 <div class="card">
   <h2>Loan Pools</h2>
   <p class="muted">

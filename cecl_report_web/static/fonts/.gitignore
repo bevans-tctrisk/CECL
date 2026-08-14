@@ -1,0 +1,4 @@
+# Do not commit proprietary fonts (Calibri is Microsoft-licensed).
+# See README.md — swap for Carlito (redistributable) on a shared server.
+*.ttf
+*.otf

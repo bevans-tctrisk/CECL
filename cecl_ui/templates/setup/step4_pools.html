@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Loan Pools{% endblock %}
 {% block content %}
+{% set step_form_id = 'step-form' %}
 {% include "setup/_stepper.html" %}
 
 {% set warm_pools = (state.warm.pools if state.warm else []) or [] %}
@@ -66,11 +67,86 @@
         Upload &amp; review
       </button>
     </form>
+    {% set _has_pool_map = (state.pool_map or {}) | length > 0 %}
+    {% if _has_pool_map %}
+    <div style="margin-top:14px; padding:10px 12px; background:#fff7f0; border:1px solid #f0c8a0; border-radius:4px;">
+      <strong style="color:#a04a00;">Need to start over?</strong>
+      <span class="muted">
+        If a previously uploaded pool-map file pulled in pool names from a
+        different credit union, you can clear those values here and re-map
+        from scratch. This also deletes any cached upload files on disk.
+      </span>
+      <form method="post" style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+        <label style="display:flex; align-items:center; gap:4px;">
+          <input type="radio" name="clear_scope" value="values" checked>
+          Clear pool names only (keep the {{ (state.pool_map or {}) | length }} code(s))
+        </label>
+        <label style="display:flex; align-items:center; gap:4px;">
+          <input type="radio" name="clear_scope" value="all">
+          Remove all entries
+        </label>
+        <button class="btn btn-secondary" type="submit" name="action" value="clear_pool_map"
+                style="background:#fbe3cc; border-color:#e0a060; color:#7a3a00;"
+                onclick="return confirm('Clear the pool-name on every code and delete cached upload files? This cannot be undone.');">
+          Clear pool mappings
+        </button>
+      </form>
+    </div>
+    {% endif %}
     {% else %}
       <p class="muted">
-        Detected columns: code = <code>{{ upload_review.code_column }}</code>,
+        Detected: header row <code>{{ upload_review.header_row or 1 }}</code>,
+        code = <code>{{ upload_review.code_column }}</code>,
         name = <code>{{ upload_review.name_column }}</code>.
       </p>
+      {# --- Manual column override -------------------------------- #}
+      {# Wrong column auto-detected?  Pick the right ones and
+         re-parse the same uploaded file. #}
+      <form method="post" style="margin:6px 0 14px 0; padding:8px 10px; background:#f7f9fc; border:1px solid #e3e7ee; border-radius:4px;">
+        <strong>Wrong column or header row picked?</strong>
+        <span class="muted">Adjust below and re-parse:</span>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-top:6px;">
+          <label style="display:flex; flex-direction:column; gap:2px;">
+            <span class="muted" style="font-size:0.85em;">Header row (1-based)</span>
+            <input type="number" name="header_row" min="1" step="1"
+                   value="{{ upload_review.header_row or 1 }}"
+                   style="width:90px;">
+          </label>
+          <button class="btn btn-secondary" type="submit" name="action" value="apply_header_row"
+                  title="Re-read the file using the new header row and let the tool pick columns automatically">
+            Apply header row &amp; refresh columns
+          </button>
+        </div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-top:10px;">
+          <label style="display:flex; flex-direction:column; gap:2px;">
+            <span class="muted" style="font-size:0.85em;">Code column</span>
+            <select name="code_col" style="min-width:180px;">
+              {% for h in upload_review.headers %}
+                <option value="{{ h }}" {% if h == upload_review.code_column %}selected{% endif %}>{{ h }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label style="display:flex; flex-direction:column; gap:2px;">
+            <span class="muted" style="font-size:0.85em;">Pool name column</span>
+            <select name="name_col" style="min-width:180px;">
+              {% for h in upload_review.headers %}
+                <option value="{{ h }}" {% if h == upload_review.name_column %}selected{% endif %}>{{ h }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          {# Hidden flag is irrelevant once we have two distinct
+             actions; the route reads the action name to decide
+             whether to honor user-picked columns or auto-detect. #}
+          <button class="btn btn-secondary" type="submit" name="action" value="rechoose_columns">
+            Re-parse with these columns
+          </button>
+          <button class="btn btn-link" type="submit" name="action" value="dismiss_upload"
+                  formnovalidate
+                  style="color:#a00;">
+            Discard upload
+          </button>
+        </div>
+      </form>
       {% set c = upload_review.counts %}
       <p style="margin:6px 0;">
         <span class="badge" style="background:#dfd; padding:2px 8px; border-radius:3px;">{{ c.match }} already match</span>
@@ -307,10 +383,31 @@
   </div>
   {% endif %}
 
-  <form method="post">
+  <form method="post" id="step-form">
+    {# Count + locate unmapped rows so we can render an "Unmapped pool
+       codes" callout up top AND drop a #unmapped-row anchor on the
+       first blank row. The Review step links here with that anchor so
+       the user lands on (and can highlight) the offending row. #}
+    {% set _blank_codes = [] %}
+    {% for code, name in state.pool_map.items() %}
+      {% if not (name or '').strip() %}{{ _blank_codes.append(code) or '' }}{% endif %}
+    {% endfor %}
+    {% if _blank_codes %}
+      <div class="flash error" style="margin-bottom:12px;">
+        <strong>{{ _blank_codes|length }} loan code(s) have no pool selected:</strong>
+        {% for c in _blank_codes[:20] %}<code>{{ c }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+        {% if _blank_codes|length > 20 %} (+{{ _blank_codes|length - 20 }} more){% endif %}.
+        Pick a pool name (or <em>Ignore</em>) for each before saving — anything left blank
+        will fall through to <code>{{ state.default_pool or 'Ignore' }}</code>.
+      </div>
+    {% endif %}
     <div id="pool-rows">
+      {% set _ns = namespace(first_blank=true) %}
       {% for code, name in state.pool_map.items() %}
-      <div class="kv-row">
+      {% set _is_blank = not (name or '').strip() %}
+      <div class="kv-row{% if _is_blank %} unmapped-pool-row{% endif %}"
+           {% if _is_blank and _ns.first_blank %}id="unmapped-row"{% endif %}
+           {% if _is_blank %}style="background:#fff4e0; border:1px solid #e0b070; padding:6px; border-radius:4px;"{% endif %}>
         <input type="text" name="pool_code" value="{{ code }}"
                placeholder="Raw code (e.g., AUTO_NEW)">
         <select name="pool_name">
@@ -326,6 +423,7 @@
         <button type="button" class="icon-btn"
                 onclick="this.parentElement.remove()">&times;</button>
       </div>
+      {% if _is_blank %}{% set _ns.first_blank = false %}{% endif %}
       {% endfor %}
     </div>
     <button type="button" class="btn btn-secondary"
@@ -347,11 +445,49 @@
     </label>
 
     <div class="btn-row">
-      <a class="btn btn-secondary" href="{{ url_for('setup.step3_columns') }}">&larr; Back</a>
+      {% set _back = url_for('setup.step2_warm') if state.has_warm_files == 'yes' else url_for('setup.step_loan_pools') %}
+      {% set _next_label = 'Balance Titles' if state.has_warm_files == 'yes' else 'Historical Balances' %}
+      <a class="btn btn-secondary" href="{{ _back }}">&larr; Back</a>
       <button class="btn btn-primary" type="submit" name="action" value="save">
-        Next: Balance Adjustment &rarr;
+        Next: {{ _next_label }} &rarr;
       </button>
     </div>
   </form>
 </div>
+
+<script>
+  // Defines the global addPoolRow() called by the "+ Add row" button.
+  // Reads the pool list from the JSON island rendered above.
+  (function () {
+    function getPoolChoices() {
+      var el = document.getElementById('pool-options-data');
+      if (!el) return [];
+      try { return JSON.parse(el.textContent || '[]') || []; }
+      catch (e) { return []; }
+    }
+    window.addPoolRow = function () {
+      var container = document.getElementById('pool-rows');
+      if (!container) return;
+      var pools = getPoolChoices();
+      var row = document.createElement('div');
+      row.className = 'kv-row';
+      var html = '<input type="text" name="pool_code" value="" '
+        + 'placeholder="Raw code (e.g., AUTO_NEW)">'
+        + '<select name="pool_name">'
+        + '<option value="" selected>&mdash; choose &mdash;</option>';
+      for (var i = 0; i < pools.length; i++) {
+        var p = String(pools[i]).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        html += '<option value="' + p + '">' + p + '</option>';
+      }
+      html += '<option value="Ignore">Ignore (exclude from report)</option>'
+        + '</select>'
+        + '<button type="button" class="icon-btn" '
+        + 'onclick="this.parentElement.remove()">&times;</button>';
+      row.innerHTML = html;
+      container.appendChild(row);
+      var input = row.querySelector('input[name="pool_code"]');
+      if (input) input.focus();
+    };
+  })();
+</script>
 {% endblock %}

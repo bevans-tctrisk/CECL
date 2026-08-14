@@ -1,0 +1,697 @@
+{% extends "base.html" %}
+{% block title %}Run New Quarter — {{ short_name }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Run New Quarter</h2>
+  <p class="muted">
+    {{ cfg.credit_union or short_name }} &mdash; stage this quarter's files,
+    import them, and generate reports in one pass.
+  </p>
+
+{% if stage == "awaiting_mappings" %}
+  <div style="background:#fff8e7; border:1px solid #d6940a; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#8a5a00;">⚠ New loan code(s) detected</h3>
+    <p style="margin:6px 0;">
+      Staged {{ staged_count }} file(s). Found
+      <strong>{{ unmapped_codes|length }} loan code(s)</strong>
+      that aren't yet in this CU's pool map. Without a mapping they would
+      silently fall through to <code>{{ cfg.default_pool or 'Ignore' }}</code>
+      and create a spurious pool in the report.
+    </p>
+    <p style="margin:6px 0;">
+      The <em>Source</em> column shows where each code came from:
+      <strong>loan files</strong> means it's in the freshly-staged
+      quarter's loan extract (raw CU codes you typically map on
+      wizard Step 3); <strong>historical data (DB)</strong> means it's
+      sitting in the <code>loan_code_*_history</code> tables from a prior
+      5300 backfill / monthly aggregation and only surfaces here because
+      it doesn't resolve via your pool map <em>or</em> the NCUA canonical
+      fallback. NCUA-style labels that auto-route via canonical fallback
+      (e.g. "First Liens" → "Mortgage Loan") are filtered out and don't
+      need attention here.
+    </p>
+    <p style="margin:6px 0;">
+      Pick a pool for each code below. Pick
+      <em>{{ cfg.default_pool or 'Ignore' }}</em> intentionally if you want
+      that code excluded from the analysis.
+    </p>
+  </div>
+
+  <form method="post"
+        action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+    <input type="hidden" name="stage" value="mapped">
+    <input type="hidden" name="period" value="{{ staged_period }}">
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+      {% if staged_reports and staged_reports.get(r) %}
+        <input type="hidden" name="{{ r }}" value="on">
+      {% endif %}
+    {% endfor %}
+
+    <table class="data-table" style="margin-bottom:18px;">
+      <thead>
+        <tr>
+          <th>Loan Code</th>
+          <th>Occurrences</th>
+          <th>Source</th>
+          <th>Map to Pool</th>
+          <th>or New Pool Name</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in unmapped_codes %}
+        <tr>
+          <td>
+            <code>{{ u.code }}</code>
+            <input type="hidden" name="map_code" value="{{ u.code }}">
+          </td>
+          <td>{{ u.count }}</td>
+          <td><span class="muted">{{ u.source or '—' }}</span></td>
+          <td>
+            <select name="map_pool">
+              <option value="" selected>— choose pool —</option>
+              {% for p in all_pools %}
+                <option value="{{ p }}">{{ p }}</option>
+              {% endfor %}
+              <option value="{{ cfg.default_pool or 'Ignore' }}">{{ cfg.default_pool or 'Ignore' }}</option>
+              <option value="__new__">+ New pool…</option>
+            </select>
+          </td>
+          <td>
+            <input type="text" name="map_pool_new" placeholder="(only if “New pool…” above)" style="width:240px;">
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div style="display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit">Save mappings &amp; Run</button>
+      <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
+    </div>
+    <p class="muted" style="margin-top:8px;">
+      Selecting <em>+ New pool…</em> creates a fresh pool. Reporting
+      conventions (risk-rated, life-of-loan, ACL months) for new pools
+      can be configured later on the
+      <a href="{{ url_for('run.edit_pool_map', short_name=short_name) }}">Pool Map editor</a>
+      or the wizard.
+    </p>
+  </form>
+{% elif stage == "awaiting_balance_check" %}
+  <div style="background:#eef6ff; border:1px solid #3a78d8; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#1a4480;">Balance Adjustment Review</h3>
+    <p style="margin:6px 0;">
+      Files were staged and loans imported successfully. Review the
+      per-pool comparison below — monthly balance file vs the freshly
+      imported loan extract — then click <strong>Continue → Run
+      Reports</strong> to produce the reports. Mirrors the wizard's
+      Step 14 (Balance Adjustment).
+    </p>
+    {% if comparison.error %}
+      <p style="margin:6px 0; color:#8a3a00;">
+        <strong>Note:</strong> {{ comparison.error }}
+      </p>
+    {% endif %}
+    {% if comparison.monthly_period and comparison.monthly_period != comparison.period %}
+      <p style="margin:6px 0; color:#5a5a5a;">
+        Monthly balances reflect the latest available period
+        <strong>{{ comparison.monthly_period }}</strong>; loans reflect
+        the snapshot <strong>{{ comparison.period }}</strong>.
+      </p>
+    {% endif %}
+  </div>
+
+  <table class="data-table" style="margin-bottom:18px;">
+    <thead>
+      <tr>
+        <th>Pool</th>
+        <th style="text-align:right;">Monthly Balance</th>
+        <th style="text-align:right;">Loan Extract</th>
+        <th style="text-align:right;">Difference</th>
+        <th style="text-align:right;">% Diff</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in comparison.rows %}
+      <tr>
+        <td>
+          {% if row.loan_codes %}
+            <details style="margin-top:2px;">
+              <summary style="cursor:pointer;"><strong>{{ row.pool }}</strong>
+                <span class="muted" style="font-weight:normal;">({{ row.loan_codes|length }} code{{ '' if row.loan_codes|length == 1 else 's' }} — click to reassign)</span>
+              </summary>
+              <table style="margin-top:6px; font-size:90%; border-collapse:collapse; background:#fafafa;">
+                <thead>
+                  <tr style="background:#f0f0f0;">
+                    <th style="text-align:left; padding:4px 8px; border:1px solid #ddd;">Loan code</th>
+                    <th style="text-align:right; padding:4px 8px; border:1px solid #ddd;">Balance</th>
+                    <th style="padding:4px 8px; border:1px solid #ddd;">Reassign to pool</th>
+                    <th style="padding:4px 8px; border:1px solid #ddd;"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for code, bal in row.loan_codes %}
+                  <tr>
+                    <td style="padding:4px 8px; border:1px solid #ddd;"><code>{{ code }}</code></td>
+                    <td style="padding:4px 8px; border:1px solid #ddd; text-align:right;">${{ "{:,.2f}".format(bal) }}</td>
+                    <td style="padding:4px 8px; border:1px solid #ddd;">
+                      <form method="post"
+                            action="{{ url_for('run.new_quarter', short_name=short_name) }}"
+                            style="display:flex; gap:6px; margin:0;">
+                        <input type="hidden" name="stage" value="balance_remapped">
+                        <input type="hidden" name="period" value="{{ staged_period }}">
+                        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+                          {% if staged_reports and staged_reports.get(r) %}
+                            <input type="hidden" name="{{ r }}" value="on">
+                          {% endif %}
+                        {% endfor %}
+                        <input type="hidden" name="map_code" value="{{ code }}">
+                        <select name="map_pool" style="min-width:200px;">
+                          {% for choice in (pool_choices or []) %}
+                            <option value="{{ choice }}"{% if choice == row.pool %} selected{% endif %}>{{ choice }}</option>
+                          {% endfor %}
+                          <option value="Ignore"{% if row.pool == 'Ignore' %} selected{% endif %}>Ignore</option>
+                          <option value="">(unmapped &mdash; use default)</option>
+                        </select>
+                        <button class="btn btn-secondary" type="submit" style="padding:2px 10px;">Save &amp; refresh</button>
+                      </form>
+                    </td>
+                    <td style="padding:4px 8px; border:1px solid #ddd;"></td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </details>
+          {% else %}
+            <strong>{{ row.pool }}</strong>
+          {% endif %}
+        </td>
+        <td style="text-align:right;">
+          {% if row.monthly is not none %}${{ "{:,.2f}".format(row.monthly) }}{% else %}—{% endif %}
+        </td>
+        <td style="text-align:right;">
+          {% if row.loans is not none %}${{ "{:,.2f}".format(row.loans) }}{% else %}—{% endif %}
+        </td>
+        <td style="text-align:right;{% if row.diff is not none and (row.diff > 1 or row.diff < -1) %} color:#b03a2e; font-weight:600;{% endif %}">
+          {% if row.diff is not none %}${{ "{:,.2f}".format(row.diff) }}{% else %}—{% endif %}
+        </td>
+        <td style="text-align:right;{% if row.pct is not none and (row.pct > 1 or row.pct < -1) %} color:#b03a2e;{% endif %}">
+          {% if row.pct is not none %}{{ "{:,.2f}".format(row.pct) }}%{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      <tr style="font-weight:700; background:#f0f4f0; border-top:2px solid #2d662d;">
+        <td>Total</td>
+        <td style="text-align:right;">${{ "{:,.2f}".format(comparison.totals.monthly) }}</td>
+        <td style="text-align:right;">${{ "{:,.2f}".format(comparison.totals.loans) }}</td>
+        <td style="text-align:right;{% if comparison.totals.diff > 1 or comparison.totals.diff < -1 %} color:#b03a2e;{% endif %}">
+          ${{ "{:,.2f}".format(comparison.totals.diff) }}
+        </td>
+        <td style="text-align:right;">
+          {% if comparison.totals.monthly %}{{ "{:,.2f}".format(comparison.totals.diff / comparison.totals.monthly * 100.0) }}%{% else %}—{% endif %}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="muted" style="margin:8px 0;">
+    Loans imported: <strong>{{ comparison.loan_summary.row_count }}</strong>
+    row(s) at <code>{{ comparison.period }}</code>. To reassign a loan
+    code to a different pool, expand the pool name in the table above
+    and pick a new pool from the dropdown &mdash; the tool will update
+    the pool map, re-import the snapshot, and redraw this page with the
+    new totals. Mirrors the wizard's Step 14 (Balance Adjustment) UX.
+  </p>
+
+  <form method="post"
+        action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+    <input type="hidden" name="stage" value="balance_checked">
+    <input type="hidden" name="period" value="{{ staged_period }}">
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+      {% if staged_reports and staged_reports.get(r) %}
+        <input type="hidden" name="{{ r }}" value="on">
+      {% endif %}
+    {% endfor %}
+
+    <div style="display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit">Continue &rarr; Run Reports</button>
+      <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
+    </div>
+  </form>
+{% elif stage == "awaiting_impaired_check" %}
+  <div style="background:#eef6ff; border:1px solid #3a78d8; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#1a4480;">Impaired Loans Verification</h3>
+    <p style="margin:6px 0;">
+      An impaired-loans workbook was found for this period. Review the
+      distribution below to confirm each impaired loan resolves to the
+      correct pool BEFORE the reports are produced. Mirrors the
+      wizard's Step 16 (Impaired Loans).
+    </p>
+    <p class="muted" style="margin:6px 0;">
+      Source: <code>{{ impaired.filename }}</code>
+      {% if impaired.period_ending %}
+        &nbsp;·&nbsp; Period ending: <strong>{{ impaired.period_ending }}</strong>
+      {% endif %}
+      {% if impaired.cu_name %}
+        &nbsp;·&nbsp; CU: {{ impaired.cu_name }}
+      {% endif %}
+    </p>
+    {% if impaired.error %}
+      <p style="margin:6px 0; color:#8a3a00;">
+        <strong>Note:</strong> {{ impaired.error }}
+      </p>
+    {% endif %}
+  </div>
+
+  {# Summary strip: match counts + totals #}
+  <div style="display:flex; gap:24px; margin-bottom:14px; flex-wrap:wrap;">
+    <div>
+      <span class="muted">Rows:</span>
+      <strong>{{ impaired.data_rows|length }}</strong>
+    </div>
+    <div>
+      <span class="muted">Matched in loan data:</span>
+      <strong style="color:#2d662d;">{{ impaired.matched }}</strong>
+    </div>
+    <div>
+      <span class="muted">Unmatched:</span>
+      <strong style="color:{% if impaired.unmatched %}#b03a2e{% else %}#2d662d{% endif %};">{{ impaired.unmatched }}</strong>
+    </div>
+    <div>
+      <span class="muted">Total Current Balance:</span>
+      <strong>${{ "{:,.2f}".format(impaired.totals.current_balance) }}</strong>
+    </div>
+    <div>
+      <span class="muted">Total Provision:</span>
+      <strong>${{ "{:,.2f}".format(impaired.totals.provision_amount) }}</strong>
+    </div>
+    <div>
+      <span class="muted">Total Balance Removed:</span>
+      <strong>${{ "{:,.2f}".format(impaired.totals.balance_removed) }}</strong>
+    </div>
+  </div>
+
+  {# --- Validation card: unmapped codes routing to Ignore -------------- #}
+  {% set iv = impaired.validation or {} %}
+  {% if iv.get('unmapped_codes') %}
+    <div style="background:#fff8e6; border:1px solid #b88a00; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+      <h4 style="margin-top:0; color:#7a5c00;">Some impaired loan codes route to Ignore</h4>
+      <p class="muted" style="margin:6px 0;">
+        The codes below appear in the impaired workbook but resolve to
+        an <code>Ignore</code> pool (either missing from the loan-code
+        map or explicitly mapped to Ignore). Assign each one to a real
+        pool so the impaired rows re-pool correctly before reports
+        run.
+      </p>
+      <form method="post"
+            action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+        <input type="hidden" name="stage" value="impaired_remapped">
+        <input type="hidden" name="period" value="{{ staged_period }}">
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+          {% if staged_reports and staged_reports.get(r) %}
+            <input type="hidden" name="{{ r }}" value="on">
+          {% endif %}
+        {% endfor %}
+        <table class="data-table" style="margin:8px 0;">
+          <thead>
+            <tr>
+              <th>Loan code</th>
+              <th style="text-align:right;">Rows</th>
+              <th>Assign to pool</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for code in iv.unmapped_codes %}
+            <tr>
+              <td><code>{{ code }}</code>
+                <input type="hidden" name="map_code" value="{{ code }}">
+              </td>
+              <td style="text-align:right;">{{ iv.counts.get(code, 0) }}</td>
+              <td>
+                <select name="map_pool" style="min-width:280px;">
+                  <option value="">(leave unmapped — will use default)</option>
+                  {% for p in (iv.pool_choices or []) %}
+                  <option value="{{ p }}">{{ p }}</option>
+                  {% endfor %}
+                </select>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <button class="btn btn-primary" type="submit"
+                onclick="return confirm('Save pool mapping changes and re-import the snapshot? This will rewrite monthly_loan_data with the new pool assignments.');">
+          Save all mappings &amp; re-check impaired loans
+        </button>
+      </form>
+    </div>
+  {% else %}
+    <p class="muted" style="margin:8px 0;">
+      All impaired loan codes are mapped to real pools.
+    </p>
+  {% endif %}
+
+  {# --- Grade & Pool distribution (resolved from the AIRES extract) --- #}
+  {% set dist = impaired.distribution %}
+  {% if dist and dist.by_pool %}
+    <div style="margin-bottom:18px;">
+      <h4 style="margin:0 0 4px;">Grade &amp; Pool Distribution
+        <span class="muted" style="font-weight:400; font-size:85%;">
+          — grade &amp; pool resolved from the AIRES loan data{% if impaired.source %}
+          ({{ impaired.source }}){% endif %}
+        </span>
+      </h4>
+      <p class="muted" style="margin:4px 0 10px; font-size:88%;">
+        Confirm each impaired loan lands in the expected pool and credit grade.
+        Each loan's grade comes from the FICO score and its pool from the loan
+        code in the matched AIRES record. Pools shaded
+        <span style="background:#fff3d6; padding:0 3px;">yellow</span> route to
+        <code>Ignore</code>/<code>Exclude</code>; a non-zero
+        <strong style="color:#b03a2e;">Not in AIRES</strong> count means those
+        loans were not found in the extract and fell back to their entered
+        loan-type code with grade <em>Not Reported</em>.
+      </p>
+      <table class="data-table" style="font-size:90%;">
+        <thead>
+          <tr>
+            <th>Pool</th>
+            {% for g in dist.grades %}<th style="text-align:right;">{{ g }}</th>{% endfor %}
+            <th style="text-align:right;">#&nbsp;Loans</th>
+            <th style="text-align:right;">Not in AIRES</th>
+            <th style="text-align:right;">Current Balance</th>
+            <th style="text-align:right;">Provision</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in dist.by_pool %}
+          <tr {% if p.is_ignore %}style="background:#fff3d6;"{% endif %}>
+            <td>{% if p.is_ignore %}<em style="color:#b03a2e;">{{ p.pool }}</em>{% else %}{{ p.pool }}{% endif %}</td>
+            {% for g in dist.grades %}
+            <td style="text-align:right;">{{ p.grades.get(g, 0) or '' }}</td>
+            {% endfor %}
+            <td style="text-align:right;">{{ p.count }}</td>
+            <td style="text-align:right;{% if p.unmatched %} color:#b03a2e; font-weight:600;{% endif %}">{{ p.unmatched or '' }}</td>
+            <td style="text-align:right;">${{ "{:,.2f}".format(p.current_balance) }}</td>
+            <td style="text-align:right;">${{ "{:,.2f}".format(p.provision_amount) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr style="font-weight:600; border-top:2px solid #999;">
+            <td>Total</td>
+            {% for g in dist.grades %}<td style="text-align:right;">{{ dist.grade_totals.get(g, 0) or '' }}</td>{% endfor %}
+            <td style="text-align:right;">{{ dist.totals.count }}</td>
+            <td style="text-align:right;{% if dist.totals.unmatched %} color:#b03a2e;{% endif %}">{{ dist.totals.unmatched or '' }}</td>
+            <td style="text-align:right;">${{ "{:,.2f}".format(dist.totals.current_balance) }}</td>
+            <td style="text-align:right;">${{ "{:,.2f}".format(dist.totals.provision_amount) }}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  {% endif %}
+
+  {# --- Data rows preview (top 200) -------------------------------- #}
+  {% if impaired.data_rows %}
+    <details {% if iv.get('unmapped_codes') %}{% else %}open{% endif %} style="margin-bottom:18px;">
+      <summary style="cursor:pointer; font-weight:600;">
+        Show all {{ impaired.data_rows|length }} impaired loan(s)
+      </summary>
+      <table class="data-table" style="margin-top:10px; font-size:90%;">
+        <thead>
+          <tr>
+            <th>Member #</th>
+            <th>Suffix</th>
+            <th>Type</th>
+            <th>Loan Pool</th>
+            <th>Credit Grade</th>
+            <th>In AIRES?</th>
+            <th style="text-align:right;">Current Balance</th>
+            <th style="text-align:right;">Balance (Loan Rpt)</th>
+            <th style="text-align:right;">Diff</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in impaired.data_rows[:200] %}
+            {% set _lp = (row.loan_pool or '')|string %}
+            {% set _lp_low = _lp|lower %}
+            {% set _is_ignore = _lp_low in ('','ignore') %}
+            {% set _unmatched = row.get('unmatched_in_loan_data') %}
+          <tr {% if _unmatched %}style="background:#fde7e7;"{% elif _is_ignore %}style="background:#fff3d6;"{% endif %}>
+            <td>{{ row.member or row.member_number or '' }}</td>
+            <td>{{ row.suffix or row.loan_suffix or '' }}</td>
+            <td><code>{{ row.loan_type or '' }}</code></td>
+            <td>{% if _is_ignore %}<em style="color:#b03a2e;">Ignore</em>{% else %}{{ _lp }}{% endif %}</td>
+            <td>{{ row.credit_grade or '' }}</td>
+            <td>{% if _unmatched %}<span style="color:#b03a2e;">No</span>{% else %}<span style="color:#2d662d;">Yes</span>{% endif %}</td>
+            <td style="text-align:right;">
+              {% if row.current_balance is not none %}${{ "{:,.2f}".format(row.current_balance|float) }}{% else %}—{% endif %}
+            </td>
+            <td style="text-align:right;">
+              {% if row.balance_from_loan_report is not none %}${{ "{:,.2f}".format(row.balance_from_loan_report|float) }}{% else %}—{% endif %}
+            </td>
+            <td style="text-align:right;">
+              {% set _bd = row.balance_difference if row.balance_difference is defined else row.balance_diff %}
+              {% if _bd is not none %}${{ "{:,.2f}".format(_bd|float) }}{% else %}—{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if impaired.data_rows|length > 200 %}
+      <p class="muted" style="margin:6px 0;">
+        Showing first 200 of {{ impaired.data_rows|length }} rows.
+      </p>
+      {% endif %}
+    </details>
+  {% endif %}
+
+  <form method="post"
+        action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+    <input type="hidden" name="stage" value="impaired_checked">
+    <input type="hidden" name="period" value="{{ staged_period }}">
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+      {% if staged_reports and staged_reports.get(r) %}
+        <input type="hidden" name="{{ r }}" value="on">
+      {% endif %}
+    {% endfor %}
+
+    <div style="display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit">Continue &rarr; Run Reports</button>
+      <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
+    </div>
+  </form>
+{% elif stage == "awaiting_impaired_decision" %}
+  <div style="background:#fff8e6; border:1px solid #d9a406; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#7a5c00;">&#9888; No recognizable Impaired Loans file</h3>
+    <p style="margin:6px 0;">
+      {% if impaired_reason == "parse_error" %}
+        A file that looks like an impaired-loans workbook was found for
+        <strong>{{ staged_period }}</strong>, but it could not be validated
+        against the expected Impaired Loans format{% if impaired_error %}:
+        <em>{{ impaired_error }}</em>{% endif %}.
+      {% elif impaired_reason == "found_empty" %}
+        An impaired-loans workbook was found for
+        <strong>{{ staged_period }}</strong>, but it contains no impaired
+        loan rows.
+      {% else %}
+        No file matching the Impaired Loans format was found for
+        <strong>{{ staged_period }}</strong> in this credit union's data
+        folder.
+      {% endif %}
+    </p>
+    <p style="margin:6px 0;">
+      Confirm this is correct (the credit union has no impaired loans to
+      report this period), or upload the Impaired Loans report to continue.
+    </p>
+  </div>
+
+  <div style="display:flex; gap:24px; flex-wrap:wrap;">
+    <div style="flex:1; min-width:280px; border:1px solid #cbd7c7; border-radius:6px; padding:14px 16px; background:#f6faf5;">
+      <h4 style="margin-top:0; color:#2d662d;">No impaired loans this month</h4>
+      <p class="muted" style="margin:6px 0 12px;">
+        Confirm the credit union has no impaired loans report for
+        <strong>{{ staged_period }}</strong> and continue to reports.
+      </p>
+      <form method="post" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+        <input type="hidden" name="stage" value="impaired_none">
+        <input type="hidden" name="period" value="{{ staged_period }}">
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+          {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
+        {% endfor %}
+        <button class="btn btn-success" type="submit">Confirm &mdash; no impaired loans &rarr; Run Reports</button>
+      </form>
+    </div>
+
+    <div style="flex:1; min-width:280px; border:1px solid #b9cbe0; border-radius:6px; padding:14px 16px; background:#f3f8ff;">
+      <h4 style="margin-top:0; color:#1a4480;">Upload an Impaired Loans report</h4>
+      <p class="muted" style="margin:6px 0 12px;">
+        Select the Impaired Loans workbook (.xlsx / .xlsm) for
+        <strong>{{ staged_period }}</strong>. It will be saved for this
+        period and re-validated.
+      </p>
+      <form method="post" enctype="multipart/form-data" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+        <input type="hidden" name="stage" value="impaired_uploaded">
+        <input type="hidden" name="period" value="{{ staged_period }}">
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+          {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
+        {% endfor %}
+        <input type="file" name="impaired_file" accept=".xlsx,.xlsm" required style="margin-bottom:10px; display:block;">
+        <button class="btn btn-primary" type="submit">Upload &amp; validate</button>
+      </form>
+    </div>
+  </div>
+
+  <p style="margin-top:16px;">
+    <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
+  </p>
+{% elif stage == "awaiting_balance_decision" %}
+  <div style="background:#fff8e6; border:1px solid #d9a406; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
+    <h3 style="margin-top:0; color:#7a5c00;">&#9888; Balance Adjustment review unavailable</h3>
+    <p style="margin:6px 0;">
+      The per-pool Balance Adjustment review could not be produced for
+      <strong>{{ staged_period }}</strong>{% if balance_error %}:
+      <em>{{ balance_error }}</em>{% endif %}.
+    </p>
+    <p style="margin:6px 0;">
+      This almost always means <strong>no loans were imported</strong> for this
+      period &mdash; most often the loan extract's file name did not match the
+      configured pattern, so the import produced no snapshot to compare against.
+    </p>
+    {% if balance_unmatched %}
+    <p style="margin:6px 0;">Spreadsheets staged but <strong>not matched</strong> by the loan file pattern:</p>
+    <ul style="margin:6px 0 0 18px;">
+      {% for f in balance_unmatched %}<li><code>{{ f }}</code></li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+
+  <div style="display:flex; gap:24px; flex-wrap:wrap;">
+    <div style="flex:1; min-width:280px; border:1px solid #b9cbe0; border-radius:6px; padding:14px 16px; background:#f3f8ff;">
+      <h4 style="margin-top:0; color:#1a4480;">Fix the loan file &amp; retry</h4>
+      <p class="muted" style="margin:6px 0 12px;">
+        Rename the loan extract to match the expected pattern (or relax the
+        pattern in the wizard's Sample step), then start the run again so the
+        loans import and the Balance Adjustment review appears.
+      </p>
+      <a class="btn btn-primary" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Start over</a>
+    </div>
+
+    <div style="flex:1; min-width:280px; border:1px solid #cbd7c7; border-radius:6px; padding:14px 16px; background:#f6faf5;">
+      <h4 style="margin-top:0; color:#2d662d;">Proceed without the review</h4>
+      <p class="muted" style="margin:6px 0 12px;">
+        Continue to the reports anyway. Note: with no imported loans the
+        reports will likely fail or come out empty.
+      </p>
+      <form method="post" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+        <input type="hidden" name="stage" value="balance_none">
+        <input type="hidden" name="period" value="{{ staged_period }}">
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin'] %}
+          {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
+        {% endfor %}
+        <button class="btn" type="submit">Proceed anyway &rarr;</button>
+      </form>
+    </div>
+  </div>
+{% else %}
+  <form method="post"
+        enctype="multipart/form-data"
+        action="{{ url_for('run.new_quarter', short_name=short_name) }}">
+
+    <h3>1. Reporting period</h3>
+    <label for="period">Period (month-end)</label>
+    <input id="period" type="month" name="period" required style="max-width:220px;">
+    <p class="muted" style="margin-top:4px;">
+      The selected month is converted to its last day for the snapshot date.
+    </p>
+
+    <h3 style="margin-top:24px;">2. Provide quarterly files</h3>
+    <p class="muted">
+      Drop the loan extract, credit pull, charge-offs, recoveries, balance
+      sheet, etc. for this quarter. You can use either or both methods.
+    </p>
+
+    <label for="files"><strong>Upload files</strong></label>
+    <input id="files" type="file" name="files" multiple
+           accept=".xlsx,.xlsm,.xls,.csv">
+
+    <label for="folder_path" style="margin-top:14px;"><strong>or paste a folder path</strong></label>
+    <input id="folder_path" type="text" name="folder_path"
+           placeholder="e.g. Z:\Shared\Clients\…\2026-03"
+           style="max-width:600px;">
+    <p class="muted" style="margin-top:4px;">
+      All <code>.xlsx / .xlsm / .xls / .csv</code> files in that folder
+      (non-recursive) will be copied into
+      <code>Raw_Uploads/{{ short_name }}/</code>.
+    </p>
+
+    <h3 style="margin-top:24px;">3. Reports to generate</h3>
+    <label><input type="checkbox" name="tct"
+           {% if cfg.reports and cfg.reports.tct %}checked{% endif %}>
+      TCT CECL-Migration Report</label><br>
+    <label><input type="checkbox" name="vizo"
+           {% if cfg.reports and cfg.reports.vizo %}checked{% endif %}>
+      Vizo CECL-Migration Report</label><br>
+    <label><input type="checkbox" name="vizo_supp"
+           {% if cfg.reports and cfg.reports.vizo_supp %}checked{% endif %}>
+      Vizo Supplemental Report</label><br>
+    <label><input type="checkbox" name="impdet"
+           {% if cfg.reports and cfg.reports.impdet %}checked{% endif %}>
+      Improved / Deteriorated Loans Report</label><br>
+    <label><input type="checkbox" name="mgmt_adj_napkin"
+           {% if cfg.reports is not defined or cfg.reports.get('mgmt_adj_napkin', True) %}checked{% endif %}>
+      Management Adjustment Worksheet</label>
+
+    <details style="margin-top:24px;" open>
+      <summary style="cursor:pointer;"><strong>4. Allowance for Credit Loss Balance (optional override)</strong></summary>
+      <div style="padding:10px 4px 4px 4px;">
+        <p class="muted" style="margin:6px 0;">
+          By default the report's
+          <em>Allowance for Credit Loss Balance</em> (R125 of the
+          <code>ACL Env by Pool Mgmt Adj</code> tab) is read from the
+          monthly balance file row configured in the wizard
+          (<code>cfg.acl.row</code>). When that row is blank/zero — or
+          if you want to force a value for this quarter — use one of
+          the overrides below. The choice is persisted to this CU's
+          YAML so future quarters carry it forward (manual values are
+          stored per-quarter under <code>acl.history</code>; 5300 field
+          preference is stored under <code>acl.solr_fields</code>).
+        </p>
+        <label style="display:block; margin:6px 0;">
+          <input type="radio" name="acl_mode" value="default" checked>
+          <strong>Default</strong> — read from monthly balance file;
+          fall back to NCUA 5300 (probes
+          <code>{% if cfg.acl and cfg.acl.solr_fields %}{{ cfg.acl.solr_fields|join(', ') }}{% else %}AAS0048{% endif %}</code>)
+          when the file row is empty.
+        </label>
+        <label style="display:block; margin:6px 0;">
+          <input type="radio" name="acl_mode" value="manual">
+          <strong>Manual value:</strong>
+          <input type="number" step="0.01" min="0" name="acl_manual_value"
+                 placeholder="e.g. 125000.00"
+                 style="width:160px; margin-left:6px;">
+          dollars
+          <span class="muted" style="margin-left:6px; font-size:90%;">
+            (saved as <code>acl.history[{{ cfg.report_period or 'snapshot' }}]</code> — overrides the file and the 5300 fallback for this quarter)
+          </span>
+        </label>
+        <label style="display:block; margin:6px 0;">
+          <input type="radio" name="acl_mode" value="solr">
+          <strong>Pull from NCUA 5300,</strong> field code(s):
+          <input type="text" name="acl_solr_field" value="AAS0048"
+                 placeholder="AAS0048"
+                 style="width:160px; margin-left:6px; text-transform:uppercase;">
+          <span class="muted" style="margin-left:6px; font-size:90%;">
+            (<code>AAS0048</code> is the canonical ACL on Loans field; comma-separated list allowed if you want legacy backstops like <code>AAS0048,A007</code>)
+          </span>
+        </label>
+      </div>
+    </details>
+
+    <div style="margin-top:24px; display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit">Stage, Import &amp; Run</button>
+      <a class="btn" href="{{ url_for('run.client_dashboard', short_name=short_name) }}">Open full dashboard</a>
+      <a class="btn" href="{{ url_for('run.select_cu') }}">&larr; Back</a>
+    </div>
+  </form>
+{% endif %}
+</div>
+{% endblock %}

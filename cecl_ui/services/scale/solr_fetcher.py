@@ -210,3 +210,48 @@ def list_charter_periods(
     result["periods"] = periods
     return result
 
+
+def coerce_cu_name(value: Any) -> str:
+    """Normalize a Solr ``cuname`` value (which may be multi-valued /
+    a list) to a trimmed string. Returns ``""`` for empty/None."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else ""
+    return str(value).strip() if value not in (None, "") else ""
+
+
+def most_recent_cuname(
+    solr_url: str,
+    core: str,
+    charter: int,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    timeout: int = 10,
+) -> str:
+    """Return the credit union name from the **most recent** 5300 filing
+    for ``charter`` (``""`` on failure).
+
+    Walks the charter's available quarter-ends newest-first so a CU that
+    was renamed always reports its current legal name, regardless of which
+    period a given report models.
+    """
+    listing = list_charter_periods(
+        solr_url, core, charter,
+        username=username, password=password, timeout=timeout,
+    )
+    periods = sorted(listing.get("periods") or [], reverse=True)
+    for ym in periods[:8]:
+        try:
+            doc = fetch_doc(
+                solr_url, core, charter, ym,
+                username=username, password=password, timeout=timeout,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        name = coerce_cu_name(
+            doc.get("cuname") or doc.get("CU_NAME") or doc.get("cu_name")
+        )
+        if name:
+            return name
+    return ""
+

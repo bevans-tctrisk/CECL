@@ -87,7 +87,12 @@ def read_extract_headers(path: Path, sheet: str | None = None) -> dict[str, Any]
 def _clean_header(cell: Any) -> str:
     if cell is None:
         return ""
-    return str(cell).strip()
+    # Collapse all internal whitespace runs (including newlines / tabs from
+    # multi-line header cells like "Current \nLoan Bal") to a single space.
+    # Browsers normalise whitespace in <option value="..."> attributes when
+    # the form is submitted, so storing the literal-newline form would make
+    # the round-trip comparison fail at save time.
+    return re.sub(r"\s+", " ", str(cell)).strip()
 
 
 def compute_header_signature(headers: list[str]) -> str:
@@ -186,6 +191,33 @@ def detect_as_of_date(filename: str, path: Path | None = None) -> dict[str, Any]
         y = int(m.group(2))
         if mo:
             iso = _end_of_month(y, mo)
+            if iso:
+                return {"date": iso, "source": "filename", "confidence": "medium"}
+
+    # MMYYYY (six digits, month-first): "122025" -> Dec 2025. Guarded so
+    # the leading two digits are a real month (01-12); the year must be a
+    # 20xx value. Placed after the 20xx-leading forms so YYYYMM wins when
+    # both could apply.
+    m = re.search(r"(?<!\d)(0[1-9]|1[0-2])(20\d{2})(?!\d)", base)
+    if m:
+        mo, y = int(m.group(1)), int(m.group(2))
+        iso = _end_of_month(y, mo)
+        if iso:
+            return {"date": iso, "source": "filename", "confidence": "medium"}
+
+    # MMYY / MM-YY / MM_YY (month + 2-digit year; no day -> end of month).
+    # Handles monthly-summary filenames like
+    # "Charge_Off_and_Recovery_Summary_Totals_1225.xlsx" (Dec 2025) where
+    # the period is a bare MMYY token. MM must be 01-12; the 2-digit year
+    # is windowed to a plausible recent range (2010-2049) so stray 4-digit
+    # tokens (counts, batch ids) aren't misread as dates. This runs only
+    # after every stronger (4-digit-year / month-name) form has failed, so
+    # it strictly improves on the mtime fallback below.
+    m = re.search(r"(?<!\d)(0[1-9]|1[0-2])[-_]?(\d{2})(?!\d)", base)
+    if m:
+        mo, yy = int(m.group(1)), int(m.group(2))
+        if 10 <= yy <= 49:
+            iso = _end_of_month(2000 + yy, mo)
             if iso:
                 return {"date": iso, "source": "filename", "confidence": "medium"}
 

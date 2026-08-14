@@ -8,12 +8,64 @@ mis-mapped pool codes / balance-format issues before generating reports.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from cecl_ui.services import monthly_bal_parser
+
+
+_UNNAMED_RX = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$", re.IGNORECASE)
+_WS_RX = re.compile(r"\s+")
+
+
+def _excel_idx_to_letter(idx: int) -> str:
+    """0 -> 'A', 25 -> 'Z', 26 -> 'AA'..."""
+    if idx < 0:
+        return ""
+    s = ""
+    n = idx
+    while True:
+        s = chr(ord("A") + (n % 26)) + s
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return s
+
+
+def _normalize_header_columns(cols) -> list[str]:
+    """Mirror ``sample_parser._clean_header`` so wizard-saved mapping
+    values (e.g. ``'Current Loan Bal'`` for a wrap-text cell, or
+    ``'col_X'`` for a blank header) resolve correctly against the
+    DataFrame's columns at lookup time.
+
+    Also dedupes duplicate header names by appending an Excel-letter
+    suffix to the second+ occurrence (mirrors
+    ``sample_parser._dedupe_headers``). Some workbooks (e.g. CUMA MTG
+    Servicing reports) ship with duplicate column labels, which would
+    otherwise cause ``df[name]`` to return a DataFrame slice instead of
+    a Series and break downstream string ops.
+    """
+    out: list[str] = []
+    for i, c in enumerate(cols):
+        s = "" if c is None else _WS_RX.sub(" ", str(c)).strip()
+        low = s.lower()
+        if (not s) or low == "nan" or _UNNAMED_RX.match(s):
+            out.append(f"col_{_excel_idx_to_letter(i)}")
+        else:
+            out.append(s)
+    seen: dict[str, int] = {}
+    deduped: list[str] = []
+    for i, name in enumerate(out):
+        if name in seen:
+            seen[name] += 1
+            deduped.append(f"{name} ({_excel_idx_to_letter(i)})")
+        else:
+            seen[name] = 1
+            deduped.append(name)
+    return deduped
 
 
 def _report_period_cutoff(state: dict[str, Any]) -> str:
@@ -74,7 +126,7 @@ def _load_loan_extract(
     except Exception:  # noqa: BLE001
         return None
     if has_header:
-        df.columns = [str(c).strip() for c in df.columns]
+        df.columns = _normalize_header_columns(df.columns)
     return df
 
 
@@ -120,16 +172,40 @@ def _clean_balance(series: pd.Series, remove_chars, accounting_negatives) -> pd.
     return pd.to_numeric(s, errors="coerce")
 
 
+def _normalize_raw_code(x: Any) -> str:
+    """Coerce a pool-code cell to a clean string.
+
+    Handles NaN/None/float values that survive ``astype(str).str.*``
+    chains (pandas preserves NaN through the str accessor) and
+    normalises numeric strings like ``"85.0"`` to ``"85"``.
+    """
+    if x is None:
+        return ""
+    try:
+        if isinstance(x, float) and pd.isna(x):
+            return ""
+    except Exception:  # noqa: BLE001
+        pass
+    s = str(x).strip()
+    if not s or s.lower() == "nan":
+        return ""
+    if s.replace(".", "", 1).isdigit():
+        try:
+            return str(int(float(s)))
+        except (ValueError, OverflowError):
+            return s
+    return s
+
+
 def _map_pool_codes(series: pd.Series, pool_map: dict, split_char: str,
                     default_pool: str) -> pd.Series:
     if split_char:
         raw = series.astype(str).str.split(split_char).str[0].str.strip()
     else:
         raw = series.astype(str).str.strip()
-    # Normalise "85.0" -> "85" for numeric codes.
-    raw = raw.apply(
-        lambda x: str(int(float(x))) if x.replace(".", "", 1).isdigit() else x
-    )
+    # Normalise "85.0" -> "85" for numeric codes (defensive against
+    # NaN/float survivors).
+    raw = raw.apply(_normalize_raw_code)
     pmap = {str(k): v for k, v in (pool_map or {}).items()}
     return raw.map(pmap).fillna(default_pool or "")
 
@@ -165,6 +241,94 @@ def canonical_pool_order(state: dict[str, Any]) -> list[str]:
     return out
 
 
+def _loan_balances_from_db(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Fallback loan-side balances sourced from the imported ``monthly_loan_data``
+    DB snapshot, for CUs whose wizard draft has no readable sample loan files
+    (e.g. a script-built config where each extract entry's ``path`` is absent).
+
+    Resolves the snapshot as the latest on/before the Report Period (or the
+    latest available for the CU), sums ``current_balance`` per ``loan_pool``,
+    and returns the same shape as :func:`loan_balances_by_pool`. Returns
+    ``None`` when the CU/DB/snapshot can't be resolved so the caller keeps its
+    own "no extracts" error.
+    """
+    cu = (state.get("credit_union") or "").strip()
+    if not cu:
+        return None
+    try:
+        from sqlalchemy import create_engine, text
+        from cecl_credentials import get_database_url
+        engine = create_engine(get_database_url())
+    except Exception:  # noqa: BLE001
+        return None
+    cutoff = _report_period_cutoff(state)
+    default_pool = (state.get("default_pool") or "Other/Uncategorized").strip()
+    try:
+        with engine.connect() as conn:
+            snap = None
+            if cutoff:
+                snap = conn.execute(
+                    text("SELECT MAX(snapshot_date) FROM monthly_loan_data "
+                         "WHERE credit_union=:c AND snapshot_date<=:cut"),
+                    {"c": cu, "cut": cutoff},
+                ).scalar()
+            if not snap:
+                snap = conn.execute(
+                    text("SELECT MAX(snapshot_date) FROM monthly_loan_data "
+                         "WHERE credit_union=:c"),
+                    {"c": cu},
+                ).scalar()
+            if not snap:
+                return None
+            rows = conn.execute(
+                text("SELECT loan_pool, SUM(current_balance) AS t, "
+                     "COUNT(*) AS n FROM monthly_loan_data "
+                     "WHERE credit_union=:c AND snapshot_date=:s "
+                     "GROUP BY loan_pool"),
+                {"c": cu, "s": snap},
+            ).fetchall()
+    except Exception:  # noqa: BLE001
+        return None
+    if not rows:
+        return None
+    by_pool: dict[str, float] = {}
+    default_total = 0.0
+    grand_total = 0.0
+    row_count = 0
+    for pool, t, n in rows:
+        name = str(pool or "").strip()
+        if name in ("Ignore", "Exclude"):
+            continue
+        v = float(t or 0.0)
+        row_count += int(n or 0)
+        grand_total += v
+        if name == default_pool:
+            default_total += v
+        else:
+            by_pool[name] = by_pool.get(name, 0.0) + v
+    snap_str = str(snap)[:10]
+    return {
+        "ok": True,
+        "error": None,
+        "by_pool": by_pool,
+        "by_pool_code": {},
+        "default_total": default_total,
+        "file_count": 0,
+        "row_count": row_count,
+        "files": [{
+            "name": f"Imported snapshot {snap_str} (monthly_loan_data)",
+            "rows": row_count,
+            "total": grand_total,
+            "current_balance_col": "current_balance (DB)",
+            "loan_pool_code_col": "loan_pool (DB)",
+            "error": None,
+        }],
+        "unmapped_codes": [],
+        "source": "db",
+        "period": snap_str,
+    }
+
+
 def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
     """Sum ``current_balance`` per mapped pool across all loan-data extracts.
 
@@ -180,15 +344,22 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
     remove_chars = state.get("balance_remove_chars") or []
     accounting_negatives = bool(state.get("accounting_negatives", True))
     pool_map = state.get("pool_map") or {}
-    split_char = state.get("pool_code_split") or ""
+    top_split_char = state.get("pool_code_split") or ""
     default_pool = state.get("default_pool") or "Other/Uncategorized"
 
     # Collect candidate file entries: prefer the multi-upload list (so we
     # can honor per-file column_mappings / has_header / header_row), but
     # fall back to the single-sample saved_path if that's all the user
     # provided. Each tuple: (display_name, path, col_map, has_header,
-    # header_row_or_None).
-    files: list[tuple[str, str, dict, bool, int | None]] = []
+    # header_row_or_None, file_split_char).
+    #
+    # Phase 9.22: ``file_split_char`` lets each extract override the
+    # top-level ``pool_code_split``. When the entry has the key
+    # ``pool_code_split`` (including ``""`` to mean "no split"), it wins;
+    # otherwise the top-level value is inherited. CUMA mortgage extracts
+    # with codes like ``15/15 ARM`` need an explicit per-file ``""`` so
+    # the importer doesn't truncate to ``15``.
+    files: list[tuple[str, str, dict, bool, int | None, str]] = []
     uploads = state.get("sample_uploads") or {}
     for entry in (uploads.get("loan_data_files") or []):
         n = entry.get("name") or Path(entry.get("path", "")).name
@@ -206,20 +377,24 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
             hr = int(hr_raw) if hr_raw not in (None, "", 0) else None
         except (TypeError, ValueError):
             hr = None
-        files.append((n, p, cm, hh, hr))
+        if "pool_code_split" in entry:
+            file_split = str(entry.get("pool_code_split") or "")
+        else:
+            file_split = top_split_char
+        files.append((n, p, cm, hh, hr, file_split))
     if not files:
         sample = state.get("sample") or {}
         if sample.get("saved_path"):
             files.append((sample.get("filename") or "sample",
                           sample["saved_path"], top_col_map,
-                          top_has_header, None))
+                          top_has_header, None, top_split_char))
 
     # Fail-fast if NO file (including fallback top-level) has the required
     # column mapping pair. Per-file misses degrade gracefully below.
     if files and not any(
         (cm.get("current_balance")
          and (cm.get("loan_pool_code") or cm.get("loan_pool_code_static")))
-        for _, _, cm, _, _ in files
+        for _, _, cm, _, _, _ in files
     ):
         return {"ok": False, "error":
                 "Set both 'current_balance' and 'loan_pool_code' on the "
@@ -229,6 +404,9 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
                 "unmapped_codes": []}
 
     if not files:
+        db = _loan_balances_from_db(state)
+        if db is not None:
+            return db
         return {"ok": False, "error":
                 "No loan-data extracts have been uploaded yet.",
                 "by_pool": {}, "by_pool_code": {}, "default_total": 0.0,
@@ -243,12 +421,24 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
     file_summaries: list[dict[str, Any]] = []
     unmapped: dict[str, float] = {}
 
-    for name, path, col_map, has_header, header_row in files:
+    for name, path, col_map, has_header, header_row, file_split in files:
         bal_ref = col_map.get("current_balance")
         pool_ref = col_map.get("loan_pool_code")
         static_pool = (col_map.get("loan_pool_code_static") or "").strip()
+        # The column references chosen for this file — surfaced back to
+        # the UI so users can confirm at a glance which mapping each
+        # file's total is being summed on. ``loan_pool_code_col`` may
+        # carry a sentinel ``"(static: <code>)"`` when a fixed code is
+        # being applied to every row in lieu of a real column.
+        cb_col_display = str(bal_ref) if bal_ref else ""
+        if static_pool:
+            pool_col_display = f"(static: {static_pool})"
+        else:
+            pool_col_display = str(pool_ref) if pool_ref else ""
         if not bal_ref or (not pool_ref and not static_pool):
             file_summaries.append({"name": name, "rows": 0, "total": 0.0,
+                                   "current_balance_col": cb_col_display,
+                                   "loan_pool_code_col": pool_col_display,
                                    "error":
                                    "current_balance / loan_pool_code not "
                                    "mapped for this file"})
@@ -256,6 +446,8 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
         df = _load_loan_extract(path, has_header, header_row)
         if df is None or df.empty:
             file_summaries.append({"name": name, "rows": 0, "total": 0.0,
+                                   "current_balance_col": cb_col_display,
+                                   "loan_pool_code_col": pool_col_display,
                                    "error": "Could not read file"})
             continue
         bal_series = _get_col(df, bal_ref, has_header)
@@ -267,25 +459,25 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
             pool_series = _get_col(df, pool_ref, has_header)
         if bal_series is None or pool_series is None:
             file_summaries.append({"name": name, "rows": 0, "total": 0.0,
+                                   "current_balance_col": cb_col_display,
+                                   "loan_pool_code_col": pool_col_display,
                                    "error":
                                    "Required columns not found in file"})
             continue
 
         balances = _clean_balance(bal_series, remove_chars, accounting_negatives)
-        mapped = _map_pool_codes(pool_series, pool_map, split_char, default_pool)
+        mapped = _map_pool_codes(pool_series, pool_map, file_split, default_pool)
         # Treat NaN balance as 0 for grouping.
         balances = balances.fillna(0.0)
 
         df_calc = pd.DataFrame({"pool": mapped, "bal": balances})
         # Identify raw codes that fell through to default_pool so the user
         # can spot missing mapping rows.
-        if split_char:
-            raw_codes = pool_series.astype(str).str.split(split_char).str[0].str.strip()
+        if file_split:
+            raw_codes = pool_series.astype(str).str.split(file_split).str[0].str.strip()
         else:
             raw_codes = pool_series.astype(str).str.strip()
-        raw_codes = raw_codes.apply(
-            lambda x: str(int(float(x))) if x.replace(".", "", 1).isdigit() else x
-        )
+        raw_codes = raw_codes.apply(_normalize_raw_code)
         pmap_keys = {str(k) for k in (pool_map or {})}
         for code, pool_name, bal in zip(raw_codes, mapped, balances):
             b = float(bal or 0.0)
@@ -305,7 +497,19 @@ def loan_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
                 by_pool[pool_name] = by_pool.get(pool_name, 0.0) + v
         total_rows += len(df_calc)
         file_summaries.append({"name": name, "rows": int(len(df_calc)),
-                               "total": file_total, "error": None})
+                               "total": file_total,
+                               "current_balance_col": cb_col_display,
+                               "loan_pool_code_col": pool_col_display,
+                               "error": None})
+
+    # If every candidate file was unreadable (e.g. a script-built config
+    # whose sample paths are absent, or archived-away uploads), fall back to
+    # the imported DB snapshot so the reconciliation still shows real
+    # per-pool loan balances instead of a blank column.
+    if total_rows == 0 and not by_pool and not default_total:
+        db = _loan_balances_from_db(state)
+        if db is not None:
+            return db
 
     # Sort each pool's code breakdown by descending balance.
     by_pool_code_sorted: dict[str, list[tuple[str, float]]] = {
@@ -357,6 +561,7 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
             year_files=files,
             layout=layout,
             label_to_pool=mb.get("pool_map") or {},
+            exclude_labels=mb.get("exclude_labels") or [],
         )
         by_period = result.get("by_period") or {}
         if not by_period:
@@ -408,6 +613,7 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
             monthly_files=files,
             layout=layout,
             label_to_pool=mb.get("pool_map") or {},
+            exclude_labels=mb.get("exclude_labels") or [],
         )
         by_period = result.get("by_period") or {}
         if not by_period:
@@ -487,6 +693,8 @@ def monthly_balances_by_pool(state: dict[str, Any]) -> dict[str, Any]:
         header_row=header_row,
         pool_name_col=pool_name_col,
         label_to_pool=mb.get("pool_map") or {},
+        period=_report_period_cutoff(state) or None,
+        exclude_labels=mb.get("exclude_labels") or [],
     )
 
 
@@ -585,4 +793,546 @@ def compare(state: dict[str, Any]) -> dict[str, Any]:
         "monthly_summary": {
             "raw_rows": monthly.get("raw_rows", []),
         },
+    }
+
+
+def compare_run(cfg: dict[str, Any], snapshot_iso: str,
+                short_name: str | None = None) -> dict[str, Any]:
+    """Per-pool balance comparison for the Run-New-Quarter intercept.
+
+    Reads loan balances from the ``monthly_loan_data`` DB table (the
+    freshly-imported snapshot) and monthly balances via the same
+    ``generate_report.load_monthly_balances`` loader the report engine
+    uses (so the figures shown match what the reports will use).
+
+    Returns the same dict shape as :func:`compare` so the existing
+    Step-14 template patterns translate cleanly.
+    """
+    cu = (cfg.get("credit_union") or "").strip()
+    if not cu or not snapshot_iso:
+        return {"ok": False,
+                "error": "Missing credit_union or snapshot date.",
+                "period": snapshot_iso or "",
+                "monthly_period": "",
+                "rows": [],
+                "totals": {"monthly": 0.0, "loans": 0.0, "diff": 0.0},
+                "loan_summary": {"file_count": 0, "row_count": 0,
+                                 "files": [], "default_total": 0.0,
+                                 "unmapped_codes": []},
+                "monthly_summary": {"raw_rows": []}}
+
+    # ── Loan side: post-import DB snapshot ───────────────────────────
+    try:
+        from sqlalchemy import create_engine, text
+        from cecl_credentials import get_database_url
+        engine = create_engine(get_database_url())
+        df = pd.read_sql(
+            text("SELECT loan_pool, current_balance "
+                 "FROM monthly_loan_data "
+                 "WHERE credit_union=:c AND snapshot_date=:s"),
+            engine,
+            params={"c": cu, "s": snapshot_iso},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False,
+                "error": f"Could not read loans from DB: {exc}",
+                "period": snapshot_iso,
+                "monthly_period": "",
+                "rows": [],
+                "totals": {"monthly": 0.0, "loans": 0.0, "diff": 0.0},
+                "loan_summary": {"file_count": 0, "row_count": 0,
+                                 "files": [], "default_total": 0.0,
+                                 "unmapped_codes": []},
+                "monthly_summary": {"raw_rows": []}}
+
+    if df is None or df.empty:
+        return {"ok": False,
+                "error": (f"No imported loans found for {cu} at "
+                          f"{snapshot_iso}. Import may have failed."),
+                "period": snapshot_iso,
+                "monthly_period": "",
+                "rows": [],
+                "totals": {"monthly": 0.0, "loans": 0.0, "diff": 0.0},
+                "loan_summary": {"file_count": 0, "row_count": 0,
+                                 "files": [], "default_total": 0.0,
+                                 "unmapped_codes": []},
+                "monthly_summary": {"raw_rows": []}}
+
+    loan_by_pool: dict[str, float] = (
+        df.groupby("loan_pool")["current_balance"].sum().to_dict()
+    )
+    # Drop intentional excludes from the comparison surface.
+    for excl in ("Ignore", "Exclude"):
+        loan_by_pool.pop(excl, None)
+    loan_row_count = int(len(df))
+
+    # ── Monthly side: report-engine loader (handles all 4 modes) ────
+    monthly_by_pool: dict[str, float] = {}
+    monthly_period = ""
+    monthly_err: str | None = None
+    # When the CU has no monthly balance by pool/type for the snapshot
+    # month, show zeros for the monthly balance instead of comparing the
+    # current loan extract against a stale prior month.
+    no_monthly_data = False
+    # {pool: [(raw balance-file label, balance), ...]} for the snapshot month.
+    monthly_labels_by_pool: dict[str, list] = {}
+    try:
+        import generate_report  # local import keeps service decoupled
+        mb_df, _alll = generate_report.load_monthly_balances(
+            cfg, with_labels=True)
+        if mb_df is not None and not mb_df.empty \
+                and {"pool", "date", "balance"}.issubset(mb_df.columns):
+            mb_df = mb_df.copy()
+            mb_df["date"] = pd.to_datetime(mb_df["date"], errors="coerce")
+            mb_df = mb_df.dropna(subset=["date"])
+            snap_ts = pd.to_datetime(snapshot_iso)
+            same = mb_df[mb_df["date"].dt.normalize() == snap_ts.normalize()]
+            if same.empty:
+                # No monthly balance by pool/type for the snapshot month.
+                # Do NOT fall back to the most recent prior period —
+                # comparing the current loan extract against a stale month
+                # (e.g. Dec balances vs Mar loans) is misleading. Show zeros
+                # for the monthly balance with no per-pool difference.
+                no_monthly_data = True
+                monthly_period = ""
+                monthly_err = (
+                    "No monthly balance by pool/type for "
+                    f"{snapshot_iso} — showing zeros for the monthly balance "
+                    "(no prior-period comparison)."
+                )
+            else:
+                monthly_period = snapshot_iso
+                monthly_by_pool = (
+                    same.groupby("pool")["balance"].sum().to_dict()
+                )
+                # Per-pool raw balance-file title breakdown (which rows of
+                # the monthly balance file rolled into each pool).
+                if "label" in same.columns:
+                    for _pool, _grp in same.groupby("pool"):
+                        _by_lbl = (
+                            _grp.dropna(subset=["label"])
+                            .groupby("label")["balance"].sum()
+                        )
+                        _rows = [
+                            (str(_l), float(_b))
+                            for _l, _b in _by_lbl.items()
+                            if str(_l).strip()
+                        ]
+                        _rows.sort(key=lambda t: -abs(t[1]))
+                        if _rows:
+                            monthly_labels_by_pool[_pool] = _rows
+        else:
+            monthly_err = (
+                "Monthly balance file did not yield any per-pool data."
+            )
+    except Exception as exc:  # noqa: BLE001
+        monthly_err = f"Monthly balance read failed: {exc}"
+
+    # Restrict the comparison to real loan pools. The Monthly Balance file
+    # is often a full GL balance sheet (especially in ``per_month`` mode):
+    # its non-loan line items (ACH Clearing, ATM Machine, Christmas Clubs,
+    # Accrued Interest, CECL, ...) fall through the balance ``pool_map`` and
+    # would otherwise show up as bogus pools here. Mirror the report
+    # engine's ``load_historical_data`` filter: keep only pools this CU has
+    # configured (``pools`` / ``pool_order`` / ``not_risk_rated`` / the
+    # Monthly-Balance ``pool_map`` targets) or that actually carry imported
+    # loans this snapshot.
+    configured_lc: set[str] = set()
+    for _p in (cfg.get("pools") or []):
+        _n = _p.get("name") if isinstance(_p, dict) else _p
+        if _n:
+            configured_lc.add(str(_n).strip().lower())
+    for _n in (cfg.get("pool_order") or []):
+        if _n:
+            configured_lc.add(str(_n).strip().lower())
+    for _n in (cfg.get("not_risk_rated") or []):
+        if _n:
+            configured_lc.add(str(_n).strip().lower())
+    for _v in ((cfg.get("monthly_balance") or {}).get("pool_map") or {}).values():
+        if _v:
+            configured_lc.add(str(_v).strip().lower())
+    if configured_lc:
+        loan_pools_lc = {str(k).strip().lower() for k in loan_by_pool}
+        dropped = [
+            k for k in monthly_by_pool
+            if str(k).strip().lower() not in configured_lc
+            and str(k).strip().lower() not in loan_pools_lc
+        ]
+        if dropped:
+            monthly_by_pool = {
+                k: v for k, v in monthly_by_pool.items()
+                if k not in set(dropped)
+            }
+            print(f"    Balance check: dropped {len(dropped)} non-loan "
+                  f"balance-sheet line item(s): "
+                  f"{', '.join(sorted(dropped)[:6])}"
+                  f"{'…' if len(dropped) > 6 else ''}")
+
+    # ── Build rows ──────────────────────────────────────────────────
+    # Order pools to match the reports rather than alphabetically. Mirror
+    # generate_report's canonical ordering: pools listed in
+    # ``config['pool_order']`` come first in their declared order, then any
+    # extras alphabetically; within that, risk-rated pools precede
+    # not-risk-rated pools (same as the report sheets).
+    cfg_order = cfg.get("pool_order", []) or []
+    nrr = {str(n).strip() for n in (cfg.get("not_risk_rated", []) or [])}
+    order_idx = {name: i for i, name in enumerate(cfg_order)}
+    fallback = len(cfg_order)
+    pool_names = set(loan_by_pool.keys()) | set(monthly_by_pool.keys())
+    rr_pools = [p for p in pool_names if str(p).strip() not in nrr]
+    nrr_pools = [p for p in pool_names if str(p).strip() in nrr]
+    rr_pools.sort(key=lambda p: (order_idx.get(p, fallback), str(p).lower()))
+    nrr_pools.sort(key=lambda p: (order_idx.get(p, fallback), str(p).lower()))
+    all_pools = rr_pools + nrr_pools
+    rows: list[dict[str, Any]] = []
+    total_m = 0.0
+    total_l = 0.0
+    for pool in all_pools:
+        m_val = monthly_by_pool.get(pool)
+        l_val = loan_by_pool.get(pool)
+        m_f = float(m_val) if m_val is not None else None
+        l_f = float(l_val) if l_val is not None else None
+        if no_monthly_data:
+            # Zeros on the monthly balance; suppress the difference so we do
+            # not present a comparison against a period we do not have.
+            m_f = 0.0
+        diff = None
+        pct = None
+        if not no_monthly_data and m_f is not None and l_f is not None:
+            diff = l_f - m_f
+            if m_f:
+                pct = (diff / m_f) * 100.0
+        rows.append({
+            "pool": pool,
+            "monthly": m_f,
+            "loans": l_f,
+            "diff": diff,
+            "pct": pct,
+            "loan_codes": [],
+            "monthly_labels": [] if no_monthly_data else monthly_labels_by_pool.get(pool, []),
+        })
+        total_m += float(m_f or 0.0)
+        total_l += float(l_f or 0.0)
+
+    # Per-pool per-code breakdown — derived by re-reading the loan
+    # extracts in Raw_Uploads via the same engine used in wizard Step 14.
+    # Used by the run-flow inline pool-mapping editor so users can see
+    # which raw loan codes currently sit in each pool and reassign them
+    # without leaving the Balance Adjustment page.
+    try:
+        adapter_state = _build_state_for_run(cfg, short_name,
+                                             snapshot_iso=snapshot_iso)
+        by_code = loan_balances_by_pool(adapter_state)
+        if by_code.get("ok"):
+            code_map = by_code.get("by_pool_code") or {}
+            for r in rows:
+                r["loan_codes"] = list(code_map.get(r["pool"]) or [])
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "ok": True,
+        "error": monthly_err,
+        "period": snapshot_iso,
+        "monthly_period": monthly_period,
+        "rows": rows,
+        "totals": {
+            "monthly": total_m,
+            "loans": total_l,
+            "diff": 0.0 if no_monthly_data else (total_l - total_m),
+        },
+        "loan_summary": {
+            "file_count": 0,
+            "row_count": loan_row_count,
+            "files": [],
+            "default_total": 0.0,
+            "unmapped_codes": [],
+        },
+        "monthly_summary": {"raw_rows": []},
+    }
+
+
+def _build_state_for_run(cfg: dict[str, Any],
+                         short_name: str | None,
+                         snapshot_iso: str | None = None,
+                         *, include_source_folder: bool = False) -> dict[str, Any]:
+    """Construct a minimal state-like dict suitable for
+    :func:`loan_balances_by_pool` from a runtime YAML ``cfg`` plus the
+    staged ``Raw_Uploads/<short>/`` folder.
+
+    Walks the workspace's ``Raw_Uploads/<short_name>/`` directory and
+    matches each spreadsheet against the configured ``file_pattern``
+    (per-extract first, then the top-level fallback). The resulting
+    ``sample_uploads.loan_data_files`` list mirrors the wizard's shape
+    so the existing per-code aggregation works without modification.
+
+    When ``snapshot_iso`` is provided, each candidate file's filename is
+    further filtered via :func:`import_data.extract_snapshot_date` so
+    only files belonging to the requested snapshot contribute to the
+    per-code breakdown. This prevents per-code totals from being inflated
+    by historical snapshots that linger in ``Archive/<short>/`` after
+    prior quarters' imports. Files whose date can't be parsed are
+    INCLUDED (fallback: single-period CUs or undated filenames).
+    """
+    from cecl_ui.services import config_service  # local: avoid cycles
+    raw_dir = None
+    archive_dir = None
+    if short_name:
+        try:
+            from flask import current_app
+            ws = current_app.config["WORKSPACE_ROOT"]
+            raw_dir = config_service.raw_uploads_dir(ws) / short_name
+            # Phase 9.35f: also scan Archive/<short>/ so the per-code
+            # breakdown still works AFTER import has archived the files.
+            from pathlib import Path
+            archive_dir = Path(ws) / "Archive" / short_name
+        except Exception:  # noqa: BLE001 — best-effort outside Flask
+            raw_dir = None
+            archive_dir = None
+
+    # Opt-in: also scan the CU's client source folder (``loan_source_folder``).
+    # Some CUs' loan extracts live only there (e.g. Vizo IDLR period folders),
+    # never in Raw_Uploads — so without this the impaired verification has no
+    # AIRES data to match against and every row degrades to "Not Reported".
+    # Off by default so the balance-check per-code path is unchanged; the
+    # snapshot-date filename filter below scopes it to the requested period.
+    source_dir = None
+    if include_source_folder:
+        from pathlib import Path as _SrcPath
+        _src = str(cfg.get("loan_source_folder") or "").strip()
+        if _src:
+            try:
+                _sp = _SrcPath(_src)
+                if _sp.is_dir():
+                    source_dir = _sp
+            except Exception:  # noqa: BLE001
+                source_dir = None
+
+    loan_files: list[dict[str, Any]] = []
+    # Compile patterns once.
+    per_extract: list[tuple[re.Pattern, dict]] = []
+    for ex in (cfg.get("loan_data_extracts") or []):
+        pat = (ex or {}).get("file_pattern") or ""
+        if not pat:
+            continue
+        try:
+            per_extract.append((re.compile(pat), ex or {}))
+        except re.error:
+            continue
+    top_pat = cfg.get("file_pattern") or ""
+    try:
+        top_rx = re.compile(top_pat) if top_pat else None
+    except re.error:
+        top_rx = None
+
+    allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+    seen_names: set[str] = set()
+
+    # Snapshot filter setup. ``extract_snapshot_date`` needs ``date_pattern``
+    # in the config; absence falls back to filename hints inside the func.
+    snap_filter_active = bool(snapshot_iso)
+    _extract_date = None
+    if snap_filter_active:
+        try:
+            from import_data import extract_snapshot_date as _extract_date
+        except Exception:  # noqa: BLE001 — outside Flask / missing deps
+            _extract_date = None
+            snap_filter_active = False
+    # extract_snapshot_date requires a `date_pattern`; synthesize a
+    # liberal default when the YAML doesn't carry one so the function's
+    # name-based fallbacks (month names, MMDDYYYY, etc.) still fire.
+    snap_cfg = dict(cfg)
+    snap_cfg.setdefault("date_pattern", r"(\d{4})[-_](\d{2})")
+
+    def _norm(name: str) -> str:
+        # Normalize underscore/space + case so the Phase 9.35 auto-restore
+        # copies (which secure_filename'd spaces into underscores) don't
+        # double-count next to the original filenames.
+        return re.sub(r"[\s_]+", " ", name).strip().lower()
+
+    def _collect_from(dir_path) -> None:
+        if not dir_path or not dir_path.is_dir():
+            return
+        # rglob handles Archive's nested-per-extract subdirs cleanly
+        # and is a no-op extra cost on flat Raw_Uploads layouts.
+        for entry in dir_path.rglob("*"):
+            if not entry.is_file() or entry.name.startswith("~$"):
+                continue
+            if entry.suffix.lower() not in allowed:
+                continue
+            key = _norm(entry.name)
+            if key in seen_names:
+                continue
+            matched_ex: dict | None = None
+            for rx, ex in per_extract:
+                if rx.search(entry.name):
+                    matched_ex = ex
+                    break
+            if matched_ex is None and top_rx is not None and \
+                    not top_rx.search(entry.name):
+                continue
+            # Phase 9.40: skip files that belong to a DIFFERENT snapshot
+            # so per-code breakdowns reflect only the requested period.
+            # Undated filenames (extract returns None) are kept so
+            # single-period CUs still get per-code data.
+            if snap_filter_active and _extract_date is not None:
+                try:
+                    file_snap = _extract_date(entry.name, snap_cfg)
+                except Exception:  # noqa: BLE001
+                    file_snap = None
+                if file_snap and file_snap != snapshot_iso:
+                    continue
+            ex_src = matched_ex or {}
+            file_entry: dict[str, Any] = {
+                "name": entry.name,
+                "path": str(entry),
+            }
+            if "column_mappings" in ex_src:
+                file_entry["column_mappings"] = ex_src.get(
+                    "column_mappings") or {}
+            if "has_header" in ex_src:
+                file_entry["has_header"] = ex_src.get("has_header")
+            if "header_row" in ex_src:
+                file_entry["header_row"] = ex_src.get("header_row")
+            if "pool_code_split" in ex_src:
+                file_entry["pool_code_split"] = ex_src.get(
+                    "pool_code_split") or ""
+            # Phase 9.24c parity — per-extract member_account override
+            # (e.g. CUMA Mortgage vs Symitar ceclXX shape). Needed so
+            # impaired_parser._build_loan_index can build the correct
+            # member-suffix key per file.
+            if "member_account" in ex_src:
+                file_entry["member_account"] = ex_src.get(
+                    "member_account") or {}
+            seen_names.add(key)
+            loan_files.append(file_entry)
+
+    # Raw_Uploads first so any duplicate name in Archive is skipped.
+    _collect_from(raw_dir)
+    _collect_from(archive_dir)
+    # Client source folder last (only when opted in); Raw_Uploads/Archive
+    # copies win on name collision via ``seen_names``.
+    _collect_from(source_dir)
+
+    # ── Column-signature supplement ──────────────────────────────────
+    # When a CU renames its loan extracts so the filename patterns no
+    # longer match (e.g. "June 2026 ceclcc1.xlsx" -> "CECLCC1 6-30-26.xls"),
+    # the strict pass above silently drops them and the per-code breakdown
+    # comes up empty (or partial — only the extract types that still match,
+    # like a CUMA file, survive). Identify loan extracts by CONTENT instead:
+    # a spreadsheet qualifies when its header row carries the columns one of
+    # the configured extracts (or the top-level mapping) needs —
+    # member_number + current_balance + loan_pool_code — and its filename
+    # resolves to the requested snapshot (or carries no date). Non-loan
+    # files (balance sheets, impaired, recoveries, credit pulls) lack that
+    # column signature and are naturally excluded. Runs as a supplement so
+    # it fills in only the extract types the strict pass missed.
+    import pandas as _pd
+
+    _sig_candidates: list[dict] = []
+    for ex in (cfg.get("loan_data_extracts") or []):
+        if (ex or {}).get("column_mappings"):
+            _sig_candidates.append(ex)
+    if cfg.get("column_mappings"):
+        _sig_candidates.append({
+            "column_mappings": cfg.get("column_mappings") or {},
+            "has_header": cfg.get("has_header", True),
+            "member_account": cfg.get("member_account") or {},
+            "pool_code_split": cfg.get("pool_code_split") or "",
+        })
+
+    def _required_present(cols_lc: set[str], cm: dict) -> bool:
+        for field in ("member_number", "current_balance", "loan_pool_code"):
+            name = cm.get(field)
+            # Positional (integer) mappings can't be verified by header
+            # name; treat their presence as satisfied so headerless
+            # extracts still qualify.
+            if isinstance(name, int):
+                continue
+            if not name or str(name).strip().lower() not in cols_lc:
+                return False
+        return True
+
+    def _sig_collect(dir_path) -> None:
+        if not dir_path or not dir_path.is_dir() or not _sig_candidates:
+            return
+        for entry in dir_path.rglob("*"):
+            if not entry.is_file() or entry.name.startswith("~$"):
+                continue
+            if entry.suffix.lower() not in allowed:
+                continue
+            key = _norm(entry.name)
+            if key in seen_names:
+                continue
+            # Cheap filename-based snapshot filter BEFORE opening the file.
+            if snap_filter_active and _extract_date is not None:
+                try:
+                    file_snap = _extract_date(entry.name, snap_cfg)
+                except Exception:  # noqa: BLE001
+                    file_snap = None
+                if file_snap and file_snap != snapshot_iso:
+                    continue
+            matched_ex = None
+            matched_hr = None
+            for hr_try in (0, 1):
+                try:
+                    if entry.suffix.lower() == ".csv":
+                        cols = _pd.read_csv(
+                            entry, header=hr_try, nrows=0).columns
+                    else:
+                        cols = _pd.read_excel(
+                            entry, header=hr_try, nrows=0).columns
+                except Exception:  # noqa: BLE001
+                    continue
+                cols_lc = {str(c).strip().lower() for c in cols}
+                for exc in _sig_candidates:
+                    if _required_present(cols_lc,
+                                         exc.get("column_mappings") or {}):
+                        matched_ex = exc
+                        matched_hr = hr_try
+                        break
+                if matched_ex is not None:
+                    break
+            if matched_ex is None:
+                continue
+            fe: dict[str, Any] = {
+                "name": entry.name,
+                "path": str(entry),
+                "column_mappings": matched_ex.get("column_mappings") or {},
+            }
+            if matched_ex.get("has_header") is not None:
+                fe["has_header"] = matched_ex.get("has_header")
+            if matched_ex.get("header_row"):
+                fe["header_row"] = matched_ex.get("header_row")
+            elif matched_hr:
+                fe["header_row"] = matched_hr + 1
+            if "pool_code_split" in matched_ex:
+                fe["pool_code_split"] = matched_ex.get("pool_code_split") or ""
+            if matched_ex.get("member_account"):
+                fe["member_account"] = matched_ex.get("member_account") or {}
+            seen_names.add(key)
+            loan_files.append(fe)
+
+    _sig_collect(raw_dir)
+    _sig_collect(archive_dir)
+
+    return {
+        "column_mappings": cfg.get("column_mappings") or {},
+        "has_header": bool(cfg.get("has_header", True)),
+        "pool_map": cfg.get("pool_map") or {},
+        "pool_code_split": cfg.get("pool_code_split") or "",
+        "default_pool": cfg.get("default_pool") or "Other/Uncategorized",
+        "balance_remove_chars": cfg.get("balance_remove_chars") or [],
+        "accounting_negatives": bool(cfg.get("accounting_negatives", True)),
+        # Phase 9.37b — the run-time impaired verification page relies on
+        # these to (a) classify credit_grade correctly instead of falling
+        # back to "Not Reported" for every row, and (b) build the correct
+        # member-suffix key so loan-extract enrichment actually matches.
+        # Without them, impaired_parser._build_loan_index / _grade_for
+        # silently degrade to the empty-grades and default fixed_suffix
+        # paths, producing 100% unmatched rows with credit_grade blank.
+        "credit_grades": cfg.get("credit_grades") or [],
+        "no_score_label": cfg.get("no_score_label") or "Not Reported",
+        "member_account": cfg.get("member_account") or {},
+        "sample_uploads": {"loan_data_files": loan_files},
     }

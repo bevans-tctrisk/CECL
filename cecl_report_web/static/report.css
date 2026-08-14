@@ -1,0 +1,260 @@
+/* CECL browser report — print stylesheet.
+   Goal: match the openpyxl output's typography and layout closely, and
+   print cleanly to PDF via headless Chromium.
+
+   Fonts: the Excel reports use Calibri. Calibri is present on Windows.
+   For a future Linux server, install "Carlito" (a metric-compatible,
+   open substitute) so pagination/line-breaks stay identical. The stack
+   below falls back Calibri -> Carlito -> generic sans. */
+
+/* Page size, orientation, and margins are driven by the Chromium pdf()
+   call (format + landscape + margin) so wide tabs can go landscape.
+   Declaring `size` here would override that flag, so we don't. */
+@page {
+  margin: 0;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: "Calibri", "Carlito", "Segoe UI", Arial, sans-serif;
+  color: #000;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+/* One printed page. Each report tab becomes a .page that starts on a
+   fresh sheet. */
+.page {
+  page-break-after: always;
+  break-after: page;
+}
+.page:last-child {
+  page-break-after: auto;
+  break-after: auto;
+}
+
+/* ---- Cover page (mirrors sheet_cover_vizo: centered, 2 logos) ---- */
+.cover-page {
+  text-align: center;
+  padding: 0.15in 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 9.5in;
+}
+.cover-logo-top { width: 1.85in; height: auto; margin: 0.3in 0 0; }
+.cover-title {
+  font-size: 26pt;
+  font-weight: 400;
+  margin: 0.5in 0 0;
+}
+.cover-subtitle {
+  font-size: 18pt;
+  font-weight: 700;
+  margin: 0.12in 0 0;
+}
+.cover-cu {
+  font-size: 26pt;
+  font-weight: 700;
+  margin: 0.5in 0 0;
+}
+.cover-period {
+  font-size: 14pt;
+  font-weight: 700;
+  margin: 0.12in 0 0;
+}
+.cover-paragraph {
+  font-size: 10pt;
+  text-align: left;
+  max-width: 6.7in;
+  margin: 0.75in auto 0;
+  white-space: pre-line;
+  line-height: 1.32;
+}
+.cover-foot-spacer { flex: 1 1 auto; min-height: 0.6in; }
+.cover-logo-bottom { width: 2.4in; height: auto; margin: 0 0 0.06in; }
+.cover-footer { font-size: 8pt; color: #000; }
+
+/* ---- Impr Deter (Executive Summary numbers) ---- */
+.impr-deter { font-size: 12pt; }
+
+.rpt-header { text-align: center; margin-bottom: 0.25in; }
+.rpt-cu { font-size: 14pt; font-weight: 700; }
+.rpt-subhead { font-size: 12pt; font-weight: 700; }
+
+/* CECL Adjustment box: teal-bordered block, label left / value right. */
+.cecl-box {
+  border-collapse: collapse;
+  border: 2px solid #0D4D5E;
+  margin: 0.12in auto 0.28in;   /* centered on the page like the reference */
+  width: 6.0in;
+}
+.cecl-title {
+  caption-side: top;
+  text-align: left;
+  font-size: 13pt;
+  padding: 3pt 8pt 1pt;
+}
+.cecl-box td { padding: 1.5pt 10pt; font-size: 12pt; }
+.cecl-label { text-align: left; }
+.cecl-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Improved/Deteriorated migration tables (Excel renders these red). */
+.mig-table {
+  border-collapse: collapse;
+  color: #FF0000;
+  margin: 0.15in 0 0.15in 0.9in;
+}
+.mig-table th, .mig-table td {
+  padding: 1pt 14pt 1pt 0;
+  font-weight: normal;
+}
+.mig-table .l { text-align: left; padding-right: 24pt; }
+.mig-table .r { text-align: right; font-variant-numeric: tabular-nums; }
+.by-pool { margin-left: 3.3in; }   /* sits at Excel col F */
+
+/* ---- Risk Change migration matrices ---- */
+.risk-change { font-size: 11pt; }
+
+.rc-matrix {
+  border-collapse: collapse;
+  margin: 0.15in auto 0.3in auto;
+  table-layout: fixed;
+}
+.rc-matrix th, .rc-matrix td {
+  border: 0.5px solid #ffffff;
+  padding: 3pt 6pt;
+  white-space: nowrap;
+}
+/* Header cells: dark teal, white, bold, centered (matches #0D4D5E). */
+.rc-matrix .hd {
+  background: #0D4D5E;
+  color: #ffffff;
+  font-weight: 700;
+  text-align: center;
+}
+.rc-matrix .hd.rowlabel { text-align: left; }
+.rc-matrix .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  border: 0.5px solid #d9d9d9;
+}
+/* Migration states read straight from the workbook fills. */
+.rc-matrix .improved     { background: #829901; color: #ffffff; }
+.rc-matrix .deteriorated { background: #873A3A; color: #ffffff; }
+.rc-matrix .total.b { font-weight: 700; }
+
+.rc-summary {
+  border-collapse: collapse;
+  margin: 0.1in auto 0.2in auto;
+}
+.rc-summary .hd {
+  background: #0D4D5E; color: #fff; font-weight: 700;
+  text-align: left; padding: 3pt 8pt;
+}
+.rc-summary .num {
+  text-align: right; font-variant-numeric: tabular-nums; padding: 3pt 8pt;
+}
+
+/* ---- ACL Env by Pool (allowance calculation) ---- */
+.acl-env { font-size: 11pt; }
+.rpt-left { text-align: left; }
+
+.acl-table {
+  border-collapse: collapse;
+  margin: 0.2in 0 0.3in 0;
+  width: 100%;
+}
+.acl-table th, .acl-table td {
+  border: none;
+  padding: 2.5pt 6pt;
+  white-space: nowrap;
+}
+.acl-table .hd {
+  background: #0D4D5E;
+  color: #ffffff;
+  font-weight: 700;
+  text-align: center;
+  vertical-align: bottom;
+}
+.acl-table .l { text-align: left; }
+.acl-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.acl-table .b { font-weight: 700; }
+.acl-table .pooled-total td { border-top: 1.5px solid #000; }
+.acl-table .indent { padding-left: 18pt; }
+.acl-table .pool-header td { padding-top: 5pt; font-size: 12pt; }
+.acl-table .grade-row td { color: #333; }
+.acl-table .pool-total td { padding-top: 3pt; }
+
+.acl-impaired {
+  border-collapse: collapse;
+  margin: 0.15in 0;
+  min-width: 4.2in;
+}
+.acl-impaired td { padding: 2pt 10pt 2pt 0; }
+.acl-impaired .section {
+  text-align: left; font-weight: 700; padding-bottom: 3pt;
+}
+.acl-impaired .l { text-align: left; padding-right: 40pt; }
+.acl-impaired .num {
+  text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.acl-impaired .b { font-weight: 700; }
+
+/* ---- Generic faithful grid (Env Factor, Hist Bal, CO-Recov-DQ, ...) ---- */
+.grid-page { font-size: 11pt; }
+.grid {
+  border-collapse: collapse;
+  width: 100%;
+  table-layout: auto;
+}
+.grid td {
+  border: none;
+  padding: 2pt 8pt;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.grid .a-left { text-align: left; }
+.grid .a-center { text-align: center; }
+.grid .a-right { text-align: right; font-variant-numeric: tabular-nums; }
+.grid .b { font-weight: 700; }
+.grid .i { font-style: italic; }
+/* Wrapped cells: honor embedded newlines and wrap long paragraphs. */
+.grid .wrap {
+  white-space: pre-line;
+  max-width: 7in;
+  vertical-align: top;
+}
+
+/* ---- Charts (inline SVG, 2-up grid) ---- */
+.charts-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2in;
+  margin-top: 0.25in;
+  justify-content: flex-start;
+}
+.chart-cell { flex: 0 0 auto; }
+.chart-cell svg.chart { display: block; }
+
+/* Chart-centric pages (e.g. Impr Deter): 2x2 grid, charts fill the width. */
+.charts-grid.impr-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.1in 0.2in;
+  margin-top: 0.15in;
+}
+.impr-charts .chart-cell { width: 100%; }
+.impr-charts svg.chart { width: 100%; height: auto; }
+
+
+
+
+

@@ -15,6 +15,14 @@
       <ul style="margin:6px 0 0 18px;">
         {% for w in warnings %}<li>{{ w }}</li>{% endfor %}
       </ul>
+      {% if summary.unnamed_pool_codes %}
+        <p style="margin:8px 0 0 0;">
+          <a class="btn btn-secondary"
+             href="{{ url_for('setup.step4_pools') }}#unmapped-row">
+            Jump to unmapped code &rarr;
+          </a>
+        </p>
+      {% endif %}
     </div>
   {% endif %}
 

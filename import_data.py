@@ -76,6 +76,11 @@ def extract_snapshot_date(source_text, config):
             year = int(year_token)
         except (TypeError, ValueError):
             return None
+        # Normalize 2-digit years (e.g. "25" -> 2025) so month-name
+        # filenames like "Aires December 25.v2.xlsx" resolve correctly.
+        # Without this a token of "25" yields year 25 AD and a bogus date.
+        if year < 100:
+            year += 2000
         last_day = calendar.monthrange(year, month)[1]
         return date(year, month, last_day).isoformat()
 
@@ -96,6 +101,19 @@ def extract_snapshot_date(source_text, config):
         )
         if year_first:
             return _from_month_name(year_first.group(1), year_first.group(2))
+        # Month-name + 2-digit year (e.g. "December 25", "Mar 26" from
+        # "Aires December 25.v2.xlsx"). Only attempted when NO 4-digit
+        # year appears anywhere in the name — that guard avoids reading
+        # the day out of a "Month DD YYYY" filename as a 2-digit year.
+        # ``_from_month_name`` normalizes the 2-digit year to 20xx.
+        if not re.search(r"20\d{2}", text):
+            mon_yy = re.search(
+                r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)"
+                r"[a-z]*[-_ \.]+(\d{2})(?!\d)",
+                text,
+            )
+            if mon_yy:
+                return _from_month_name(mon_yy.group(2), mon_yy.group(1))
         # Fallback: "DDMonYY" / "DDMonYYYY" smushed-together filenames like
         # "30JUN25" or "01Jan2026" (no separators between day/month/year).
         # The day is captured but ignored — we still snap to month-end below.
@@ -128,6 +146,9 @@ def extract_snapshot_date(source_text, config):
             month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
             year += 2000 if year < 100 else 0
             return date(year, month, day).isoformat()
+        elif date_fmt == 'MMDDYYYY':
+            month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return date(year, month, day).isoformat()
         elif date_fmt == 'MMYY':
             month, year = int(match.group(1)), int(match.group(2))
             year += 2000 if year < 100 else 0
@@ -140,6 +161,16 @@ def extract_snapshot_date(source_text, config):
         elif date_fmt == 'YYYYMMDD':
             year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
             return date(year, month, day).isoformat()
+        elif date_fmt == 'YYYYQ':
+            year, quarter = int(match.group(1)), int(match.group(2))
+            month = quarter * 3
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
+        elif date_fmt == 'QYYYY':
+            quarter, year = int(match.group(1)), int(match.group(2))
+            month = quarter * 3
+            last_day = calendar.monthrange(year, month)[1]
+            return date(year, month, last_day).isoformat()
         else:
             year, month = int(match.group(1)), int(match.group(2))
             last_day = calendar.monthrange(year, month)[1]
@@ -167,13 +198,24 @@ def extract_snapshot_date(source_text, config):
 # so the heuristic doesn't grab e.g. "0331" out of "03312026" as a year.
 _FALLBACK_DATE_LAYOUTS: list[tuple[str, str]] = [
     # (regex, kind) — kind tells the loop how to read the groups.
-    (r"(20\d{2})[-_./ ](\d{2})[-_./ ](\d{2})", "YMD"),
+    (r"(20\d{2})[-_./ ](\d{1,2})[-_./ ](\d{1,2})(?!\d)", "YMD"),
     (r"(20\d{2})(\d{2})(\d{2})",               "YMD"),
-    (r"(\d{2})[-_./ ](\d{2})[-_./ ](20\d{2})", "MDY"),
+    (r"(?<!\d)(\d{1,2})[-_./ ](\d{1,2})[-_./ ](20\d{2})", "MDY"),
     (r"(\d{2})(\d{2})(20\d{2})",               "MDY"),
-    (r"(20\d{2})[-_./ ](\d{2})(?!\d)",         "YM"),
+    # Month-Day-2digit-year (e.g. "6-30-26", "12-31-25"). Placed after the
+    # 4-digit-year forms so a full year always wins. YY -> 2000+YY, bounded
+    # to a plausible window so it doesn't grab unrelated number triples.
+    # Separators exclude spaces so a trailing code digit + spaced date
+    # (e.g. "CECLCC1 6-30-26") isn't misread as "1 6-30".
+    (r"(?<!\d)(\d{1,2})[-_./](\d{1,2})[-_./](\d{2})(?!\d)", "MDYY"),
+    (r"(20\d{2})[-_./ ](\d{1,2})(?!\d)",       "YM"),
     (r"(20\d{2})(\d{2})(?!\d)",                "YM"),
-    (r"(\d{2})[-_./ ](20\d{2})",               "MY"),
+    (r"(?<!\d)(\d{1,2})[-_./ ](20\d{2})",      "MY"),
+    # Quarter-end forms: "2025Q4", "2026-Q1", "2026_Q1".
+    # Q1->Mar 31, Q2->Jun 30, Q3->Sep 30, Q4->Dec 31.
+    (r"(20\d{2})[-_ ]?[Qq]([1-4])(?!\d)",       "YQ"),
+    # "Q4 2025" / "Q1-2026" / "Q1_2026".
+    (r"(?<![A-Za-z])[Qq]([1-4])[-_ ]?(20\d{2})(?!\d)", "QY"),
     # Two-digit-year fallback: anchored to 19-30 to keep ambiguity low.
     # Used for AIRES-style filenames like "25-12 AIRES LOANS v2.xlsx"
     # where the wizard's auto-derived date_pattern (which expects a
@@ -195,6 +237,14 @@ def _try_common_date_layouts(text: str) -> str | None:
             if kind == "MDY":
                 mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 return date(y, mo, d).isoformat()
+            if kind == "MDYY":
+                mo, d, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                # Bound the 2-digit year to a plausible window and validate
+                # month/day so a random "a-b-cc" triple isn't misread.
+                if not (1 <= mo <= 12) or not (1 <= d <= 31) \
+                        or yy < 19 or yy > 40:
+                    continue
+                return date(2000 + yy, mo, d).isoformat()
             if kind == "YM":
                 y, mo = int(m.group(1)), int(m.group(2))
                 last = calendar.monthrange(y, mo)[1]
@@ -213,9 +263,60 @@ def _try_common_date_layouts(text: str) -> str | None:
                 y = 2000 + yy
                 last = calendar.monthrange(y, mo)[1]
                 return date(y, mo, last).isoformat()
+            if kind == "YQ":
+                y, q = int(m.group(1)), int(m.group(2))
+                mo = q * 3
+                last = calendar.monthrange(y, mo)[1]
+                return date(y, mo, last).isoformat()
+            if kind == "QY":
+                q, y = int(m.group(1)), int(m.group(2))
+                mo = q * 3
+                last = calendar.monthrange(y, mo)[1]
+                return date(y, mo, last).isoformat()
         except (ValueError, calendar.IllegalMonthError):
             continue
     return None
+
+
+def _compile_file_patterns(value, *, label=""):
+    """Compile a YAML ``file_pattern`` value into a list of regex objects.
+
+    Accepts either a single regex string (legacy single-pattern form) or a
+    list of regex strings (new multi-pattern form, first-match-wins). Empty
+    or ``None`` returns an empty list. Invalid regexes are warned and
+    skipped so a typo in one pattern doesn't blow up the whole import.
+
+    The multi-pattern form lets a single ``loan_data_extracts`` entry match
+    files whose names changed across years (e.g. anonymized old-style
+    ``Aires Loan <date> Credit Union B.xlsx`` alongside modern
+    ``<acct> - Nova Aires Loan <date>.xlsx``). Same shape semantics as a
+    single regex — order in the list is preserved for diagnostics.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        items = [v for v in value if isinstance(v, str) and v]
+    else:
+        return []
+    out = []
+    for s in items:
+        try:
+            out.append(re.compile(s, re.IGNORECASE))
+        except re.error as exc:
+            tag = f" ({label})" if label else ""
+            print(f"  WARNING: invalid file_pattern {s!r}{tag}: {exc}; skipping.")
+    return out
+
+
+def _patterns_match_any(patterns, *texts):
+    """Return True if any compiled pattern matches any of the texts."""
+    for p in patterns:
+        for t in texts:
+            if t and p.search(t):
+                return True
+    return False
 
 
 def clean_balance(series, balance_format):
@@ -228,6 +329,19 @@ def clean_balance(series, balance_format):
     return pd.to_numeric(s, errors='coerce')
 
 
+# pandas' default ``na_values`` treats the bare string "NA" as NaN. Several
+# credit unions use "NA" as a real loan-type code (New Auto), so reading with
+# the defaults silently turns every New Auto loan into a blank code. This list
+# is pandas' default NaN-token set with "NA" removed, so ONLY the literal
+# "NA" changes behaviour (it is preserved as a string); every other token
+# ('', 'N/A', 'NaN', 'NULL', ...) keeps its normal NaN handling.
+_NA_VALUES_KEEP_LITERAL = [
+    '', '#N/A', '#N/A N/A', '#NA', '-1.#IND', '-1.#QNAN', '-NaN', '-nan',
+    '1.#IND', '1.#QNAN', '<NA>', 'N/A', 'NULL', 'NaN', 'None', 'n/a', 'nan',
+    'null',
+]
+
+
 def map_pool_codes(series, config):
     """Map raw loan pool codes to pool names using config."""
     split_char = config.get('pool_code_split')
@@ -235,10 +349,24 @@ def map_pool_codes(series, config):
         raw = series.astype(str).str.split(split_char).str[0].str.strip()
     else:
         raw = series.astype(str).str.strip()
-    # Normalize float strings like "85.0" to "85" for numeric codes
-    raw = raw.apply(lambda x: str(int(float(x))) if x.replace('.', '', 1).isdigit() else x)
+    # Normalize float strings like "85.0" to "85" for numeric codes. Guard with
+    # isinstance(str): a string-dtype column can still carry float NaN entries
+    # (blank cells), and float NaN has no ``.replace`` — leave those untouched
+    # so they fall through to ``default_pool`` below instead of crashing.
+    raw = raw.apply(
+        lambda x: str(int(float(x)))
+        if isinstance(x, str) and x.replace('.', '', 1).isdigit()
+        else x
+    )
     pool_map = {str(k): v for k, v in config['pool_map'].items()}
     default = config.get('default_pool', 'Other/Uncategorized')
+    # Normalize the legacy 'Ignore' sentinel to the canonical 'Exclude' so
+    # downstream report filters (generate_report._apply_excluded_pools) drop
+    # these rows uniformly. Future re-imports will write 'Exclude' to the DB
+    # and old 'Ignore'-tagged rows are also filtered at report time.
+    pool_map = {k: ('Exclude' if v == 'Ignore' else v) for k, v in pool_map.items()}
+    if default == 'Ignore':
+        default = 'Exclude'
     return raw.map(pool_map).fillna(default)
 
 
@@ -313,7 +441,25 @@ def load_credit_pull_scores(config):
                     member_col = cp_config.get('member_column', 'Member Number')
                     score_col = cp_config.get('score_column', 'FICO')
                     df = pd.read_excel(fpath)
-                    df.columns = [str(c).strip() for c in df.columns]
+                    # Normalise headers to match the wizard-saved column
+                    # name shape (collapse wrap-text CR/LF inside header
+                    # cells to a single space; rewrite blank/'nan'/
+                    # 'Unnamed: N' to col_<LETTER>). Same shape that
+                    # ``cecl_ui/services/sample_parser._clean_header``
+                    # produces, so a credit-pull file with a wrap-text
+                    # ``Credit\nScore`` header still resolves against the
+                    # YAML's ``score_column: Credit Score`` mapping.
+                    _ucp_rx = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$",
+                                          re.IGNORECASE)
+                    _ncols = []
+                    for _i, _c in enumerate(df.columns):
+                        _s = re.sub(r"\s+", " ", str(_c)).strip() if _c is not None else ""
+                        _low = _s.lower()
+                        if (not _s) or _low == "nan" or _ucp_rx.match(_s):
+                            _ncols.append(f"col_{_excel_idx_to_letter(_i)}")
+                        else:
+                            _ncols.append(_s)
+                    df.columns = _ncols
                     if member_col in df.columns and score_col in df.columns:
                         # Strip the same suffix the Aires file uses so the
                         # member-number key matches what import_file builds.
@@ -351,12 +497,22 @@ def load_credit_pull_scores(config):
                                 except (ValueError, TypeError):
                                     pass
                         print(f"    Credit pull file: {fname} ({len(scores)} scores loaded)")
-                    if pull_as_of is None:
-                        try:
-                            pull_as_of = pd.Timestamp(os.path.getmtime(fpath), unit='s')
-                        except (OSError, ValueError):
-                            pass
-                    break  # use first matching file
+                        if pull_as_of is None:
+                            try:
+                                pull_as_of = pd.Timestamp(os.path.getmtime(fpath), unit='s')
+                            except (OSError, ValueError):
+                                pass
+                        break  # headers matched + scores loaded; stop here
+                    else:
+                        # File matched the regex but its headers don't carry the
+                        # configured member/score columns. Common when a shared
+                        # temp/sample folder holds files for multiple CUs with
+                        # divergent header conventions (Account # vs Account
+                        # Number, FICO vs Credit Score, etc.). Skip this file
+                        # and let the loop try the next match.
+                        print(f"    Credit pull file {fname}: headers do not contain "
+                              f"'{member_col}' and/or '{score_col}' — skipping.")
+                        continue
 
     # 2. Also check credit pull tabs in existing CECL report to fill gaps
     # (older credit pulls may cover members not in the latest standalone file)
@@ -527,7 +683,14 @@ def derive_member_account(df, config, has_header):
     if mode == 'split' and col_map.get('loan_suffix'):
         suffix_raw = _clean_id_series(_col('loan_suffix'))
         # Pad suffix to 3 chars by default (match historical convention).
-        pad_len = int(ma.get('suffix_length') or 3)
+        # Honour explicit suffix_length=0 (caller wants the suffix used
+        # verbatim with no zero-pad). Plain ``or 3`` would silently flip
+        # 0 back to 3 because 0 is falsy in Python.
+        _sl_raw = ma.get('suffix_length')
+        try:
+            pad_len = int(_sl_raw) if _sl_raw is not None else 3
+        except (TypeError, ValueError):
+            pad_len = 3
         suffix_padded = suffix_raw.str.zfill(pad_len) if pad_len > 0 else suffix_raw
         full = member_raw + suffix_padded
         return member_raw, full
@@ -595,6 +758,40 @@ def _load_previous_fico(cu_name, current_snapshot):
     return scores
 
 
+def _load_previous_original_fico(cu_name, current_snapshot):
+    """Load original_fico_score from the most recent previous snapshot, keyed by
+    account number (str). Used by the opt-in "original score method" so a loan's
+    origination score is carried forward when the current extract carries only a
+    single (current) bureau-score column.
+    """
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT MAX(snapshot_date) FROM monthly_loan_data "
+                 "WHERE credit_union = :cu AND snapshot_date < :snap"),
+            {"cu": cu_name, "snap": current_snapshot}
+        ).fetchone()
+    prev_date = row[0] if row and row[0] else None
+    if not prev_date:
+        return {}
+    prev_df = pd.read_sql(
+        text("SELECT member_number, original_fico_score FROM monthly_loan_data "
+             "WHERE credit_union = :cu AND snapshot_date = :snap"),
+        engine, params={"cu": cu_name, "snap": str(prev_date)}
+    )
+    if prev_df.empty:
+        return {}
+    scores = {}
+    for _, r in prev_df.iterrows():
+        acct = str(r['member_number']).strip()
+        try:
+            fico = int(r['original_fico_score'])
+        except (TypeError, ValueError):
+            continue
+        if fico > 0:
+            scores[acct] = fico
+    return scores
+
+
 def _excel_letter_to_index(letter: str) -> int:
     """'A' -> 0, 'Z' -> 25, 'AA' -> 26, etc. Raises ValueError on bad input."""
     s = str(letter).strip().upper()
@@ -604,6 +801,20 @@ def _excel_letter_to_index(letter: str) -> int:
     for ch in s:
         n = n * 26 + (ord(ch) - ord('A') + 1)
     return n - 1
+
+
+def _excel_idx_to_letter(idx: int) -> str:
+    """0 -> 'A', 25 -> 'Z', 26 -> 'AA', etc. Inverse of _excel_letter_to_index."""
+    if idx < 0:
+        return ""
+    s = ""
+    n = idx
+    while True:
+        s = chr(ord("A") + (n % 26)) + s
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return s
 
 
 def _normalize_col_map_for_no_header(col_map):
@@ -635,9 +846,248 @@ def _normalize_col_map_for_no_header(col_map):
     return out
 
 
+def _detect_text_encoding(file_path):
+    """Detect a delimited-text file's encoding from its byte-order mark.
+
+    Returns an encoding string for ``open`` / ``pd.read_csv`` (``utf-16``,
+    ``utf-8-sig``) or ``None`` to use the default. DEXA / core-system report
+    exports are frequently UTF-16 (LE) with a BOM, which a plain UTF-8 read
+    rejects with ``0xff at position 0``.
+    """
+    try:
+        with open(file_path, 'rb') as fh:
+            head = fh.read(3)
+    except OSError:
+        return None
+    if head[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        return 'utf-16'
+    if head[:3] == b'\xef\xbb\xbf':
+        return 'utf-8-sig'
+    return None
+
+
+def _sniff_delimiter(file_path):
+    """Guess the field delimiter of a delimited-text data file from its
+    first non-empty line. Prefers pipe/tab/semicolon over comma so
+    TCT-style ``|``-delimited ``.txt`` exports (e.g. ``TCT.EXPORT_YYYYMM``)
+    and UTF-16 tab-delimited DEXA ``.csv`` exports parse into columns
+    correctly. Returns ``','`` when no stronger candidate is present."""
+    enc = _detect_text_encoding(file_path) or 'latin-1'
+    try:
+        with open(file_path, 'r', encoding=enc, errors='replace') as fh:
+            for line in fh:
+                if line.strip():
+                    counts = {d: line.count(d) for d in ('|', '\t', ';', ',')}
+                    best = max(counts, key=counts.get)
+                    return best if counts[best] > 0 else ','
+    except OSError:
+        pass
+    return ','
+
+
+def _read_tabular(file_path, ext, header, config=None, **read_kw):
+    """Read a loan/data file into a DataFrame, honouring a configured or
+    sniffed field delimiter for delimited-text (``.txt``/``.tsv``/``.csv``)
+    files and falling back to Excel otherwise.
+
+    Behaviour for ``.csv``/``.xlsx`` is unchanged unless an explicit
+    ``field_delimiter`` (or legacy ``delimiter``) is set in the config."""
+    delim = None
+    if config:
+        delim = config.get('field_delimiter') or config.get('delimiter')
+    if delim or ext in ('.csv', '.txt', '.tsv'):
+        enc = _detect_text_encoding(file_path)
+        if not delim:
+            if ext == '.tsv':
+                delim = '\t'
+            else:  # .csv / .txt / unknown: sniff so UTF-16 tab-delimited
+                # DEXA exports parse (a normal comma CSV still sniffs to ',').
+                delim = _sniff_delimiter(file_path)
+        if enc and 'encoding' not in read_kw:
+            read_kw = {**read_kw, 'encoding': enc}
+        return pd.read_csv(file_path, header=header, sep=delim,
+                           engine='python', **read_kw)
+    return pd.read_excel(file_path, header=header, **read_kw)
+
+
+_ORIG_AWARE_MON = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                   'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12}
+
+
+def _pull_sheet_date(sheet_name):
+    """Parse a WARM credit-pull tab name (e.g. 'Dec-25 Credit Pull') to a
+    month-end Timestamp, or None."""
+    import calendar
+    m = re.match(r'^([A-Za-z]{3})-(\d{2})', str(sheet_name).strip())
+    if not m:
+        return None
+    mon = _ORIG_AWARE_MON.get(m.group(1).lower())
+    if not mon:
+        return None
+    yr = 2000 + int(m.group(2))
+    return pd.Timestamp(yr, mon, calendar.monthrange(yr, mon)[1])
+
+
+def _load_dated_credit_pulls(config):
+    """Load ALL credit-pull tabs (each with its as-of date) from the WARM file
+    referenced by ``credit_pull.fallback_report_folder``. Returns
+    ``[(pull_date: Timestamp, {member_int: score})]`` sorted newest-first.
+
+    Used only by the origination-aware scoring path — unlike
+    ``load_credit_pull_scores`` (which merges every pull into one dict) this
+    keeps the per-pull dates so we can pick the pull that best matches each
+    loan's origination date.
+    """
+    import glob
+    cp = config.get('credit_pull') or {}
+    folder = cp.get('fallback_report_folder') or cp.get('source_folder') or ''
+    out = []
+    if not folder:
+        return out
+    folder = resolve_path(folder)
+    if not os.path.isdir(folder):
+        return out
+    warms = [f for f in glob.glob(os.path.join(folder, '*.xls*'))
+             if 'warm' in os.path.basename(f).lower()
+             and not os.path.basename(f).startswith('~$')
+             and 'dnu' not in os.path.basename(f).lower()]
+    if not warms:
+        return out
+    # Honor the configured fallback_report_pattern (same as load_credit_pull_scores)
+    # so the dated pulls come from the snapshot-period WARM, not merely the
+    # newest file in the folder (a later-period WARM would leak future pulls).
+    report_pattern = cp.get('fallback_report_pattern')
+    if report_pattern:
+        pat = re.compile(report_pattern, re.IGNORECASE)
+        matched = [f for f in warms if pat.search(os.path.basename(f))]
+        if matched:
+            warms = matched
+    warm = max(warms, key=os.path.getmtime)
+    try:
+        xl = pd.ExcelFile(warm)
+    except Exception:  # noqa: BLE001
+        return out
+    for sheet in xl.sheet_names:
+        if 'credit pull' not in sheet.lower():
+            continue
+        ts = _pull_sheet_date(sheet)
+        if ts is None:
+            continue
+        try:
+            sdf = pd.read_excel(xl, sheet)
+        except Exception:  # noqa: BLE001
+            continue
+        cols = {str(c).strip().lower(): c for c in sdf.columns}
+        mcol = cols.get('member number') or (sdf.columns[0] if len(sdf.columns) else None)
+        scol = (cols.get('fico') or cols.get('score')
+                or (sdf.columns[1] if len(sdf.columns) > 1 else None))
+        if mcol is None or scol is None:
+            continue
+        d = {}
+        for m, s in zip(sdf[mcol], sdf[scol]):
+            if pd.notna(m) and pd.notna(s):
+                try:
+                    mi = int(float(m))
+                    sv = int(float(s))
+                except (ValueError, TypeError):
+                    continue
+                if sv > 0:
+                    d[mi] = sv
+        if d:
+            out.append((ts, d))
+    out.sort(key=lambda x: x[0], reverse=True)
+    return out
+
+
+def _origination_aware_scores(member_numbers, aires_orig, open_dates,
+                              dated_pulls, chain_older=False):
+    """Compute origination-aware original & current FICO per the analyst spec.
+
+    ORIGINAL: the AIRES score, EXCEPT when a pull dated *before* the loan's
+      origination date covers the member -> use that most-recent pre-origination
+      pull score (best estimate of the score at origination).
+    CURRENT: the most-recent pull score, EXCEPT when the member has taken out a
+      loan *after* the most-recent pull -> every one of that member's loans
+      takes the AIRES origination score of that newest loan (fresher than the
+      bureau pull). Members absent from the newest pull (and with no post-pull
+      loan) fall back to their AIRES/original score (no movement) unless
+      ``chain_older`` is set, which then uses the most-recent older pull that
+      covers them.
+
+    Returns ``(original_fico, current_fico)`` as int Series.
+    """
+    idx = member_numbers.index
+    orig = pd.to_numeric(aires_orig, errors='coerce').fillna(0).astype(int)
+    if not dated_pulls:
+        return orig, orig.copy()
+    newest_ts, newest_scores = dated_pulls[0]
+    mem = member_numbers.astype('int64')
+    od = pd.to_datetime(open_dates, errors='coerce')
+
+    tmp = pd.DataFrame({'member': mem.values, 'open': od.values,
+                        'orig': orig.values}, index=idx)
+    valid = tmp[(tmp['open'].notna()) & (tmp['orig'] > 0)]
+    newest_orig = {}
+    if not valid.empty:
+        imax = valid.groupby('member')['open'].idxmax()
+        newest_orig = valid.loc[imax].set_index('member')['orig'].to_dict()
+    post = tmp[(tmp['open'].notna()) & (tmp['open'] > newest_ts)]
+    members_post = set(post['member'].unique())
+
+    def pull_before(member, o):
+        if pd.isna(o):
+            return None
+        for ts, scores in dated_pulls:  # newest first
+            if ts < o and member in scores:
+                return scores[member]
+        return None
+
+    def latest_for(member):
+        for _ts, scores in dated_pulls:
+            if member in scores:
+                return scores[member]
+        return None
+
+    new_orig = orig.copy()
+    new_curr = pd.Series(0, index=idx, dtype='int64')
+    for i in idx:
+        m = int(mem.at[i])
+        o = od.at[i]
+        a = int(orig.at[i])
+        pb = pull_before(m, o)
+        new_orig.at[i] = pb if pb is not None else a
+        if m in members_post:
+            no = newest_orig.get(m)
+            new_curr.at[i] = int(no) if no is not None else a
+        elif m in newest_scores:
+            new_curr.at[i] = newest_scores[m]
+        elif chain_older:
+            lf = latest_for(m)
+            new_curr.at[i] = int(lf) if lf is not None else int(new_orig.at[i])
+        else:
+            new_curr.at[i] = int(new_orig.at[i])
+    return new_orig.astype(int), new_curr.astype(int)
+
+
 def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
-                warm_acct_scores=None, pull_as_of=None):
-    """Import a single file using the client config. Returns count of imported rows."""
+                warm_acct_scores=None, pull_as_of=None,
+                wiped_snapshots=None):
+    """Import a single file using the client config. Returns count of imported rows.
+
+    ``wiped_snapshots`` (optional ``set[str]``) controls the pre-insert
+    DELETE strategy. When non-None (full-folder imports from
+    ``process_client``), the FIRST file for any given ``snapshot_date``
+    does ONE wholesale ``DELETE WHERE (credit_union, snapshot_date)`` and
+    records the snapshot in the set; subsequent files for the same
+    snapshot just APPEND. This is the correct behavior for multi-extract
+    CUs where two or more files contribute to the same snapshot AND may
+    produce overlapping ``loan_pool`` values (e.g. Destinations CU's
+    ``ceclce`` + ``cecloe`` both producing ``All Other Unsecured Loans/LOC``
+    rows for codes 10/11 vs 34). When None (specific-file CLI re-import
+    via ``--file=X.xlsx``), falls back to the legacy per-pool delete so
+    re-running a single file does not nuke other extracts' rows for the
+    same snapshot.
+    """
     cu_name = config['credit_union']
     col_map = config['column_mappings']
     has_header = config.get('has_header', True)
@@ -658,25 +1108,92 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
         except (TypeError, ValueError):
             hr_cfg = 0
         pd_header = hr_cfg - 1 if hr_cfg > 1 else 0
-        if ext == '.csv':
-            df = pd.read_csv(file_path, header=pd_header)
-        else:
-            df = pd.read_excel(file_path, header=pd_header)
-        df.columns = [str(c).strip() for c in df.columns]
+        df = _read_tabular(file_path, ext, pd_header, config,
+                           keep_default_na=False,
+                           na_values=_NA_VALUES_KEEP_LITERAL)
+        # Normalise header cells to match what the wizard's sample_parser
+        # emits: collapse internal whitespace (wrap-text Excel cells often
+        # contain CR/LF inside a single header cell), and replace any
+        # blank / 'nan' / pandas 'Unnamed: N' placeholder with the
+        # ``col_<LETTER>`` form so the user's saved column_mappings —
+        # which may reference e.g. ``col_H`` for an unlabelled column —
+        # resolves to the right pandas column.
+        _unnamed_rx_runtime = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$",
+                                         re.IGNORECASE)
+        _normed_cols = []
+        for _i, _c in enumerate(df.columns):
+            _s = re.sub(r"\s+", " ", str(_c)).strip() if _c is not None else ""
+            _low = _s.lower()
+            if (not _s) or _low == "nan" or _unnamed_rx_runtime.match(_s):
+                _normed_cols.append(f"col_{_excel_idx_to_letter(_i)}")
+            else:
+                _normed_cols.append(_s)
+        df.columns = _normed_cols
 
         required = ['member_number', 'current_balance']
         if not static_pool_code:
             required.append('loan_pool_code')
+        missing = [
+            f for f in required
+            if not col_map.get(f) or col_map.get(f) not in df.columns
+        ]
+        if missing:
+            # Header-row auto-detection. The configured header_row didn't
+            # surface the required columns — common when a CU changes an
+            # export's layout between periods (e.g. AIRES cardholder files
+            # that moved their header from row 1 to row 4). Scan the first
+            # rows for the one that actually carries the mapped column
+            # names and re-read with it, so a stale header_row no longer
+            # silently drops a whole file (which had been dropping every
+            # credit-card loan for Central Keystone's June extract).
+            wanted = {
+                re.sub(r"\s+", " ", str(v)).strip().lower()
+                for k, v in col_map.items()
+                if k in ('member_number', 'current_balance', 'loan_pool_code')
+                and isinstance(v, str) and v.strip()
+            }
+            if wanted:
+                try:
+                    probe = _read_tabular(file_path, ext, None, config,
+                                          nrows=15, dtype=str)
+                except Exception:  # noqa: BLE001
+                    probe = None
+                best_i, best_hits = None, 0
+                if probe is not None:
+                    for _i in range(len(probe)):
+                        cells = {
+                            re.sub(r"\s+", " ", str(v)).strip().lower()
+                            for v in probe.iloc[_i].tolist()
+                            if v is not None and str(v).strip()
+                        }
+                        hits = len(wanted & cells)
+                        if hits > best_hits:
+                            best_hits, best_i = hits, _i
+                if (best_i is not None and best_i != pd_header
+                        and best_hits >= min(2, len(wanted))):
+                    df = _read_tabular(file_path, ext, best_i, config)
+                    _normed_cols = []
+                    for _i2, _c in enumerate(df.columns):
+                        _s = (re.sub(r"\s+", " ", str(_c)).strip()
+                              if _c is not None else "")
+                        _low = _s.lower()
+                        if (not _s) or _low == "nan" \
+                                or _unnamed_rx_runtime.match(_s):
+                            _normed_cols.append(
+                                f"col_{_excel_idx_to_letter(_i2)}")
+                        else:
+                            _normed_cols.append(_s)
+                    df.columns = _normed_cols
+                    print(f"    Auto-detected header on row {best_i + 1} "
+                          f"(configured header_row={hr_cfg} did not match "
+                          f"columns {missing}).")
         for field in required:
             src_col = col_map.get(field)
             if not src_col or src_col not in df.columns:
                 raise ValueError(f"Required column '{field}' mapped to '{src_col}' not found. "
                                  f"Available: {list(df.columns)[:20]}")
     else:
-        if ext == '.csv':
-            df = pd.read_csv(file_path, header=None)
-        else:
-            df = pd.read_excel(file_path, header=None)
+        df = _read_tabular(file_path, ext, None, config)
 
         # Wizard stores mapping values as "col_A"/"col_B" strings; the
         # importer needs 0-based integer positions when reading without
@@ -696,6 +1213,35 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
                 raise ValueError(f"Required column '{field}' mapped to position {pos!r} "
                                  f"but file has only {len(df.columns)} columns")
 
+    # Optional per-extract row filter. Keep only rows whose value in
+    # ``row_filter.column`` is in ``include`` (or drop those matching
+    # ``exclude``). Applied after header resolution so the column resolves
+    # by its normalized header name. Used by participation remittance files
+    # where only Active / Non-Accrual loans belong on the CECL book —
+    # Closed/Chargeoff rows carry residual Investor UPB that would otherwise
+    # inflate the pool balance.
+    _rf = config.get('row_filter')
+    if has_header and isinstance(_rf, dict) and _rf.get('column'):
+        _rf_want = re.sub(r"\s+", " ", str(_rf['column'])).strip().lower()
+        _rf_lookup = {
+            re.sub(r"\s+", " ", str(c)).strip().lower(): c for c in df.columns
+        }
+        _rf_col = _rf_lookup.get(_rf_want)
+        if _rf_col is None:
+            print(f"    [warn] row_filter column {_rf['column']!r} not found "
+                  f"— filter skipped")
+        else:
+            _rf_vals = df[_rf_col].astype(str).str.strip().str.lower()
+            _rf_before = len(df)
+            if _rf.get('include'):
+                _rf_inc = {str(x).strip().lower() for x in _rf['include']}
+                df = df[_rf_vals.isin(_rf_inc)].reset_index(drop=True)
+            elif _rf.get('exclude'):
+                _rf_exc = {str(x).strip().lower() for x in _rf['exclude']}
+                df = df[~_rf_vals.isin(_rf_exc)].reset_index(drop=True)
+            print(f"    row_filter [{_rf_col}]: kept {len(df)} of "
+                  f"{_rf_before} row(s)")
+
     # Build the output DataFrame — access by name or position index
     def col(field):
         if field == 'loan_pool_code' and static_pool_code:
@@ -711,6 +1257,38 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
     else:
         original_fico = pd.Series([0] * len(df), index=df.index, dtype=int)
 
+    # Optional: current FICO read directly from the loan-data extract.
+    # When the wizard's column-mapping step assigns ``current_fico_score``
+    # to a column in the extract, those values are the authoritative
+    # current scores and take priority over WARM/credit-pull lookups.
+    # EXCEPTION: when ``current_fico_score`` and ``original_fico_score``
+    # both map to the SAME source column, that column holds only the
+    # origination score (the wizard auto-suggest landed on a single
+    # ``Credit Score`` column for both fields). Treating it as the
+    # current score would force original==current and silently disable
+    # the credit-pull join. In that case, leave current FICO unmapped
+    # from the extract and let the priority chain fall through to the
+    # credit-pull / WARM / previous-snapshot sources.
+    extract_current_fico: pd.Series | None = None
+    cur_col = col_map.get('current_fico_score') or ''
+    orig_col = col_map.get('original_fico_score') or ''
+    same_col = bool(cur_col) and bool(orig_col) and \
+        str(cur_col).strip().lower() == str(orig_col).strip().lower()
+    if (col_map.get('current_fico_score') or 'current_fico_score' in col_map) \
+            and not same_col:
+        try:
+            extract_current_fico = (
+                pd.to_numeric(col('current_fico_score'), errors='coerce')
+                .fillna(0)
+                .astype(int)
+            )
+        except KeyError:
+            extract_current_fico = None
+    elif same_col:
+        print("    Note: current_fico_score and original_fico_score map to "
+              "the same column — falling through to credit-pull/WARM for "
+              "current scores.")
+
     # Extract member-only & full-account identifiers honoring the wizard's
     # member/account format selection (fixed-suffix / delimiter / split).
     member_only_str, full_account_str = derive_member_account(df, config, has_header)
@@ -718,6 +1296,31 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
     raw_acct_str = full_account_str          # alias used downstream
     # member_numbers is used as a join key against credit_pull_scores (int keys).
     member_numbers = pd.to_numeric(member_only_str, errors='coerce').fillna(0).astype(int)
+
+    # Optional: join the credit pull on a dedicated loan-side key (e.g. SSN)
+    # instead of the member number. Some cores deliver the credit pull keyed
+    # by SSN while loans key on account/member; the WARM joins them via the
+    # loan extract's SSN column. When credit_pull.loan_join_column names a
+    # column present on this extract, build an integer join series from it
+    # (digits only) and use it for the credit-pull lookup; otherwise fall
+    # back to the member number (unchanged behavior).
+    pull_join_keys = None
+    _pj_col_name = (config.get('credit_pull') or {}).get('loan_join_column')
+    if _pj_col_name and has_header:
+        _pj_want = re.sub(r"\s+", " ", str(_pj_col_name)).strip().lower()
+        _pj_lookup = {re.sub(r"\s+", " ", str(c)).strip().lower(): c
+                      for c in df.columns}
+        _pj_col = _pj_lookup.get(_pj_want)
+        if _pj_col is not None:
+            pull_join_keys = pd.to_numeric(
+                df[_pj_col].astype(str).str.replace(r"\D", "", regex=True),
+                errors='coerce').fillna(0).astype('int64')
+            print(f"    Credit pull join key: {_pj_col} (SSN-style), "
+                  f"{int((pull_join_keys > 0).sum())} loan(s) keyed")
+        else:
+            print(f"    [warn] credit_pull.loan_join_column {_pj_col_name!r} "
+                  f"not found on this extract — using member number")
+    pull_join = pull_join_keys if pull_join_keys is not None else member_numbers
 
     # ----------------------------------------------------------------------
     # Original-FICO baseline fallback (wizard's "Original Score Baseline"
@@ -812,13 +1415,46 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
                     )
 
     # Current FICO priority:
+    #   0. Extract column mapped to ``current_fico_score`` (when present)
     #   1. WARM "All Loans" per-loan scores (authoritative source matching WARM's final scores)
     #   2. Credit pull (member-level) for loans not in WARM
     #   3. Previous snapshot per-loan carry-forward
     #   4. Original FICO
     # raw_acct_str is set above (alias of full_account_str)
 
-    if warm_acct_scores:
+    if extract_current_fico is not None:
+        # Extract column wins. Treat 0/blank as missing and fall back to
+        # WARM/credit-pull/previous-snapshot/original in that order so a
+        # CU whose extract has current FICO on most-but-not-all loans
+        # still benefits from the other sources for the gaps.
+        current_fico = extract_current_fico.where(extract_current_fico > 0)
+        ext_matched = int(current_fico.notna().sum())
+        unmatched = int(current_fico.isna().sum())
+
+        if unmatched > 0 and warm_acct_scores:
+            warm_mapped = raw_acct_str.map(warm_acct_scores)
+            current_fico = current_fico.fillna(warm_mapped)
+            unmatched = int(current_fico.isna().sum())
+
+        cp_filled = 0
+        if unmatched > 0 and credit_pull_scores:
+            cp_mapped = pull_join.map(credit_pull_scores)
+            before = int(current_fico.notna().sum())
+            current_fico = current_fico.fillna(cp_mapped)
+            cp_filled = int(current_fico.notna().sum()) - before
+            unmatched = int(current_fico.isna().sum())
+
+        parts = [f"Extract current-FICO matched: {ext_matched}"]
+        if cp_filled > 0:
+            parts.append(f"credit pull: {cp_filled}")
+        if unmatched > 0:
+            parts.append(f"fallback to original: {unmatched}")
+        print(f"    {', '.join(parts)}")
+
+        # Final fallback to original score
+        current_fico = current_fico.fillna(original_fico).astype(int)
+
+    elif warm_acct_scores:
         # Primary: WARM per-loan scores (exactly matches WARM's computed current scores)
         current_fico = raw_acct_str.map(warm_acct_scores)
         warm_matched = current_fico.notna().sum()
@@ -827,7 +1463,7 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
         # Secondary: credit pull (member-level) for loans not in WARM
         cp_filled = 0
         if unmatched > 0 and credit_pull_scores:
-            cp_mapped = member_numbers.map(credit_pull_scores)
+            cp_mapped = pull_join.map(credit_pull_scores)
             current_fico = current_fico.fillna(cp_mapped)
             cp_filled = current_fico.notna().sum() - warm_matched
             unmatched = current_fico.isna().sum()
@@ -843,7 +1479,7 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
         current_fico = current_fico.fillna(original_fico).astype(int)
 
     elif credit_pull_scores:
-        current_fico = member_numbers.map(credit_pull_scores)
+        current_fico = pull_join.map(credit_pull_scores)
         matched = current_fico.notna().sum()
         unmatched = current_fico.isna().sum()
 
@@ -882,7 +1518,7 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
     # block is a no-op (the bureau scores already loaded above stand).
     # ----------------------------------------------------------------------
     cp_cfg = config.get('credit_pull') or {}
-    if cp_cfg.get('prefer_original_for_new_loans') and pull_as_of is not None:
+    if cp_cfg.get('prefer_original_for_new_loans'):
         open_date_col = (config.get('column_mappings') or {}).get('open_date')
         if open_date_col is not None and (
             (has_header and open_date_col in df.columns)
@@ -893,38 +1529,124 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
                 df[open_date_col] if has_header else df.iloc[:, open_date_col],
                 errors='coerce',
             )
-            newer_mask = open_date_series.notna() & (open_date_series > pd.Timestamp(pull_as_of))
-            if newer_mask.any():
-                # Per-member: pick the original score from the most-recently-opened
-                # loan and apply it to every loan that member has. This matches
-                # the user's intent that all of a member's loans share one
-                # current score derived from their freshest origination data.
-                tmp = pd.DataFrame({
-                    'member': member_numbers,
-                    'open_date': open_date_series,
-                    'orig_fico': original_fico,
-                })
-                # Only consider loans with a positive original score; zeros
-                # represent missing data and shouldn't override real scores.
-                tmp_valid = tmp[tmp['orig_fico'] > 0]
-                if not tmp_valid.empty:
-                    idx_max = tmp_valid.groupby('member')['open_date'].idxmax()
-                    member_to_latest = (
-                        tmp_valid.loc[idx_max].set_index('member')['orig_fico']
+            # Per-member "most recent loans" method: for each member, take the
+            # credit score from their most-recently-opened loan (non-zero) and
+            # apply it as the current score to every loan that member has, so
+            # credit migration can be shown without a separate bureau pull.
+            #
+            # Scope depends on whether a real credit pull is configured:
+            #   * pull configured  -> only override loans opened AFTER the pull
+            #     (their origination score is fresher than the bureau-wide pull).
+            #   * NO pull configured -> derive the current score for EVERY loan
+            #     from the member's most-recent origination score. This is the
+            #     analyst's manual "build a credit pull from the AIRES file"
+            #     process, now automatic.
+            if pull_as_of is not None:
+                scope_mask = open_date_series.notna() & (
+                    open_date_series > pd.Timestamp(pull_as_of))
+                scope_label = f"newer than {pd.Timestamp(pull_as_of).date()}"
+            else:
+                scope_mask = pd.Series(True, index=df.index)
+                scope_label = "all loans (no credit pull)"
+            # Per-member: pick the original score from the most-recently-opened
+            # loan and apply it to every loan that member has.
+            tmp = pd.DataFrame({
+                'member': member_numbers,
+                'open_date': open_date_series,
+                'orig_fico': original_fico,
+            })
+            # Only consider loans with a positive original score and a real
+            # open date; zeros/blanks represent missing data and shouldn't
+            # override real scores or drive the "most recent" comparison.
+            tmp_valid = tmp[(tmp['orig_fico'] > 0) & tmp['open_date'].notna()]
+            if not tmp_valid.empty:
+                idx_max = tmp_valid.groupby('member')['open_date'].idxmax()
+                member_to_latest = (
+                    tmp_valid.loc[idx_max].set_index('member')['orig_fico']
+                )
+                replacement = member_numbers.map(member_to_latest)
+                apply_mask = scope_mask & replacement.notna()
+                if apply_mask.any():
+                    current_fico = current_fico.where(
+                        ~apply_mask, replacement.astype('Int64')
                     )
-                    replacement = member_numbers.map(member_to_latest)
-                    apply_mask = newer_mask & replacement.notna()
-                    if apply_mask.any():
-                        current_fico = current_fico.where(
-                            ~apply_mask, replacement.astype('Int64')
-                        )
-                        # Coerce back to int after the masked update.
-                        current_fico = current_fico.fillna(0).astype(int)
-                        print(
-                            f"    Original-score fallback: {int(apply_mask.sum())} "
-                            f"loans newer than {pd.Timestamp(pull_as_of).date()} "
-                            f"now use member's most-recent original score"
-                        )
+                    # Coerce back to int after the masked update.
+                    current_fico = current_fico.fillna(0).astype(int)
+                    print(
+                        f"    Original-score fallback: {int(apply_mask.sum())} "
+                        f"loan(s) [{scope_label}] now use member's "
+                        f"most-recent original score"
+                    )
+        elif cp_cfg.get('prefer_original_for_new_loans'):
+            print("    Original-score fallback: open_date column not mapped — "
+                  "cannot derive most-recent-loan scores.")
+
+    # ── "Original score method" (opt-in, e.g. Credit Union of Richmond) ──
+    # When a post-conversion extract carries only ONE bureau-score column
+    # (mapped to both original and current), the credit-migration report would
+    # otherwise show original == current for every loan (no movement). With
+    # ``original_fico_from_prior_snapshot`` set, treat the extract score as the
+    # CURRENT score and carry each loan's ORIGINAL (origination) score forward
+    # from its most-recent prior snapshot. Loans with no prior snapshot (new) or
+    # no current score keep original == current so no spurious movement appears.
+    if config.get('original_fico_from_prior_snapshot'):
+        try:
+            file_score = pd.to_numeric(
+                col('current_fico_score'), errors='coerce').fillna(0).astype(int)
+        except KeyError:
+            file_score = current_fico
+        prev_orig = _load_previous_original_fico(cu_name, snapshot_date)
+        if prev_orig:
+            carried = raw_acct_str.map(prev_orig)
+            # Only carry an origination score when we also have a current score
+            # to compare it against.
+            carried = carried.where(file_score > 0)
+            n_carried = int(carried.notna().sum())
+            n_scored = int((file_score > 0).sum())
+            original_fico = carried.fillna(file_score).astype(int)
+            current_fico = file_score
+            print(f"    Original-score method: current = extract score; original "
+                  f"carried from prior snapshot for {n_carried} loan(s); "
+                  f"{n_scored - n_carried} scored loan(s) had no prior snapshot "
+                  f"(original = current).")
+        else:
+            current_fico = file_score
+            original_fico = file_score
+            print("    Original-score method: no prior snapshot found — "
+                  "original = current for this (first) period.")
+
+    # ── Origination-aware scoring (opt-in via credit_pull.origination_aware) ──
+    # Analyst methodology for WARM CUs with dated credit-pull history:
+    #   * ORIGINAL = AIRES score, unless a pull dated before the loan's
+    #     origination date covers the member (then that pre-origination pull).
+    #   * CURRENT = most-recent pull score, unless the member took out a loan
+    #     after the most-recent pull (then every one of that member's loans
+    #     uses the newest loan's AIRES origination score).
+    # Requires open_date mapped + dated pulls reachable via the WARM
+    # (credit_pull.fallback_report_folder). Skips gracefully otherwise.
+    if cp_cfg.get('origination_aware'):
+        od_col = (config.get('column_mappings') or {}).get('open_date')
+        dated_pulls = _load_dated_credit_pulls(config)
+        if dated_pulls and od_col is not None:
+            try:
+                oa_open_dates = pd.to_datetime(col('open_date'), errors='coerce')
+            except KeyError:
+                oa_open_dates = pd.Series(pd.NaT, index=df.index)
+            oa_orig, oa_curr = _origination_aware_scores(
+                member_numbers, original_fico, oa_open_dates, dated_pulls,
+                chain_older=bool(cp_cfg.get('current_chain_older_pulls')))
+            moved = int((oa_orig != oa_curr).sum())
+            original_fico = oa_orig
+            current_fico = oa_curr
+            pull_dates = ", ".join(ts.date().isoformat() for ts, _ in dated_pulls)
+            print(f"    Origination-aware scoring: {len(dated_pulls)} dated pull(s) "
+                  f"[{pull_dates}]; {moved} of {len(oa_orig)} loan(s) show "
+                  f"original != current")
+        elif od_col is None:
+            print("    Origination-aware scoring skipped: open_date not mapped.")
+        else:
+            print("    Origination-aware scoring skipped: no dated credit pulls "
+                  "found (check credit_pull.fallback_report_folder).")
 
     clean_data = pd.DataFrame({
         'credit_union': cu_name,
@@ -938,6 +1660,44 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
         'loan_pool': map_pool_codes(col('loan_pool_code'), config),
     })
 
+    # ── Charge-off exclusion ──
+    # Some cores leave charged-off loans in the extract under their original
+    # (active) loan-type code, carrying the written-off amount in a dedicated
+    # "charge off amount" column even though the GL / balance sheet has already
+    # removed them. When ``chargeoff_exclude_column`` is set (a header name, or
+    # a 0-based column index for headerless files), any row with a non-zero
+    # value there is routed to the ``Exclude`` pool so it drops out of the
+    # reserve population and the loan totals reconcile to the balance sheet.
+    _co_ref = config.get('chargeoff_exclude_column')
+    if _co_ref is not None and _co_ref != '':
+        try:
+            _co_series = df[_co_ref] if has_header else df.iloc[:, int(_co_ref)]
+            _co_mask = pd.to_numeric(_co_series, errors='coerce').fillna(0) != 0
+            _n_co = int(_co_mask.sum())
+            if _n_co:
+                clean_data.loc[_co_mask, 'loan_pool'] = 'Exclude'
+                print(f"    Charge-off exclusion: {_n_co} loan(s) with a non-zero "
+                      f"'{_co_ref}' routed to Exclude (already charged off).")
+        except (KeyError, IndexError, ValueError) as _co_exc:
+            print(f"    WARNING: chargeoff_exclude_column {_co_ref!r} not usable: "
+                  f"{_co_exc}")
+
+    # report engine routes this through ``cecl_engine.assign_business_risk_grade``
+    # when the loan's pool is flagged ``brr: true`` in the CU's YAML.
+    # Stored as text so analyst-defined rating labels (e.g. "Pass",
+    # "Special Mention") survive intact alongside numeric ratings.
+    if col_map.get('business_risk_rating') or 'business_risk_rating' in col_map:
+        try:
+            brr_series = col('business_risk_rating').astype(str).str.strip()
+            brr_series = brr_series.where(
+                ~brr_series.isin(('', 'nan', 'NaN', 'None')), None
+            )
+            clean_data['business_risk_rating'] = brr_series
+        except KeyError:
+            clean_data['business_risk_rating'] = None
+    else:
+        clean_data['business_risk_rating'] = None
+
     # When original FICO is 0 but current is known, treat as unchanged (WARM convention)
     mask = (clean_data['original_fico_score'] == 0) & (clean_data['current_fico_score'] > 0)
     if mask.any():
@@ -945,39 +1705,96 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
         print(f"    Original FICO gap-fill: {mask.sum()} loans set original = current")
 
     clean_data = clean_data.dropna(subset=['current_balance'])
-    clean_data = clean_data[clean_data['current_balance'] > 0]
+    if config.get('include_negative_balances'):
+        # Opt-in (e.g. Credit Union of Richmond post core-conversion): keep
+        # credit (negative) balances so pool totals tie to the CU's GL /
+        # balancing file, which carries them. Still drop exact-zero
+        # (paid-off) rows — they add no balance and only inflate counts.
+        clean_data = clean_data[clean_data['current_balance'] != 0]
+    else:
+        clean_data = clean_data[clean_data['current_balance'] > 0]
 
     if len(clean_data) == 0:
         return 0
 
     with engine.begin() as conn:
-        # Scope the pre-insert delete to only the pools represented in this
-        # file. With multi-file imports (e.g. AIRES extract + a separate
-        # VISA/credit-card extract for the same snapshot), an unconditional
-        # delete by (cu, snapshot_date) would have the second file wipe out
-        # the first file's rows. Deleting only the pools we're about to
-        # re-insert keeps each file's pools refreshable independently.
-        pools_in_file = sorted({str(p) for p in clean_data['loan_pool'].dropna().unique()})
-        if pools_in_file:
-            conn.execute(
-                text(
-                    "DELETE FROM monthly_loan_data "
-                    "WHERE credit_union = :cu "
-                    "AND snapshot_date = :sd "
-                    "AND loan_pool = ANY(:pools)"
-                ),
-                {"cu": cu_name, "sd": snapshot_date, "pools": pools_in_file},
-            )
+        # Make sure the optional ``business_risk_rating`` column exists on
+        # the table. The schema was originally created implicitly by
+        # ``to_sql(if_exists='append')`` on the first import; adding the
+        # column here as an idempotent ALTER lets pre-existing CECL
+        # databases pick up BRR support without a manual migration step.
+        # Postgres ``ADD COLUMN IF NOT EXISTS`` is a no-op when present.
+        try:
+            conn.execute(text(
+                "ALTER TABLE monthly_loan_data "
+                "ADD COLUMN IF NOT EXISTS business_risk_rating TEXT"
+            ))
+        except Exception as alter_err:  # pragma: no cover - safety net
+            # If the dialect doesn't speak IF NOT EXISTS (rare; e.g.
+            # SQLite < 3.35) we'd rather log + drop the BRR column from
+            # the DataFrame than block the whole import.
+            print(f"    [warn] could not ensure business_risk_rating column: {alter_err}")
+            if 'business_risk_rating' in clean_data.columns:
+                clean_data = clean_data.drop(columns=['business_risk_rating'])
+
+        # Two delete strategies, picked by the ``wiped_snapshots``
+        # parameter (controlled by ``process_client``):
+        #
+        #   (a) Full-folder import (``wiped_snapshots`` is a set): the
+        #       FIRST file for a snapshot does ONE wholesale
+        #       ``DELETE WHERE (cu, snap)`` and records the snapshot;
+        #       subsequent files for the same snapshot just APPEND. This
+        #       is the correct behavior for multi-extract CUs where two
+        #       files for the same snapshot may produce overlapping
+        #       ``loan_pool`` values (e.g. Destinations ``ceclce`` and
+        #       ``cecloe`` both producing ``All Other Unsecured Loans/LOC``
+        #       rows). The previous per-pool delete had the second file
+        #       silently wipe the first file's rows for overlapping pools.
+        #
+        #   (b) Specific-file re-import (``wiped_snapshots`` is None,
+        #       e.g. ``--file=X.xlsx``): fall back to the per-pool delete
+        #       so re-running a single file does not nuke other extracts'
+        #       rows for the same snapshot.
+        if wiped_snapshots is not None:
+            snap_key = str(snapshot_date)
+            if snap_key not in wiped_snapshots:
+                conn.execute(
+                    text(
+                        "DELETE FROM monthly_loan_data "
+                        "WHERE credit_union = :cu "
+                        "AND snapshot_date = :sd"
+                    ),
+                    {"cu": cu_name, "sd": snapshot_date},
+                )
+                wiped_snapshots.add(snap_key)
+        else:
+            pools_in_file = sorted({str(p) for p in clean_data['loan_pool'].dropna().unique()})
+            if pools_in_file:
+                conn.execute(
+                    text(
+                        "DELETE FROM monthly_loan_data "
+                        "WHERE credit_union = :cu "
+                        "AND snapshot_date = :sd "
+                        "AND loan_pool = ANY(:pools)"
+                    ),
+                    {"cu": cu_name, "sd": snapshot_date, "pools": pools_in_file},
+                )
         clean_data.to_sql('monthly_loan_data', conn, if_exists='append', index=False)
 
     return len(clean_data)
 
 
-def process_client(client_name, specific_file=None):
+def process_client(client_name, specific_file=None, scan_folder_override=None):
     """Process all matching files for a client."""
     config = load_client_config(client_name)
     cu_name = config['credit_union']
-    file_pattern_re = re.compile(config['file_pattern'], re.IGNORECASE)
+    # ``file_pattern`` accepts either a single regex string (legacy) or a
+    # list of regex strings (multi-pattern, first-match-wins). Empty list
+    # means no top-level catch-all is enforced — only per-extract patterns
+    # decide which files to import.
+    top_pattern_res = _compile_file_patterns(
+        config.get('file_pattern'), label='top-level',
+    )
 
     # Per-file loan-data extracts (wizard "Column Mappings" step). When
     # present, each entry overrides ``column_mappings`` / ``member_account``
@@ -985,33 +1802,55 @@ def process_client(client_name, specific_file=None):
     # matches the extract's own ``file_pattern``. Falls back to the
     # top-level mapping when no per-file pattern matches.
     extracts_raw = config.get('loan_data_extracts') or []
-    extracts: list[tuple[re.Pattern, dict]] = []
+    extracts: list[tuple[list[re.Pattern], dict]] = []
     for e in extracts_raw:
-        pat = (e or {}).get('file_pattern') or ''
-        if not pat:
-            continue
-        try:
-            extracts.append((re.compile(pat, re.IGNORECASE), e))
-        except re.error as exc:
-            print(f"  WARNING: loan_data_extracts entry {e.get('label','?')!r} "
-                  f"has invalid file_pattern {pat!r}: {exc}. Skipping.")
+        label = (e or {}).get('label', '?')
+        pats = _compile_file_patterns(
+            (e or {}).get('file_pattern'), label=label,
+        )
+        if pats:
+            extracts.append((pats, e))
 
-    # Optional custom loan source folder (absolute or relative), useful for external client folders.
-    configured_loan_folder = config.get('loan_file_folder')
-    if configured_loan_folder:
-        scan_folder = resolve_path(configured_loan_folder)
+    # Explicit scan-folder override (e.g. the "re-import a single period"
+    # action stages just that period's files into a temp folder and imports
+    # ONLY them). Takes precedence over config and is never archived.
+    if scan_folder_override:
+        scan_folder = str(scan_folder_override)
         if not os.path.isdir(scan_folder):
-            raise FileNotFoundError(f"Loan file folder not found: {scan_folder}")
+            raise FileNotFoundError(
+                f"Scan folder override not found: {scan_folder}")
+        recursive_scan = True
+        scanning_external_source = False
     else:
-        # Look in per-client subfolder first, then fallback to main Raw_Uploads
-        client_upload = os.path.join(UPLOAD_FOLDER, client_name)
-        if os.path.isdir(client_upload):
-            scan_folder = client_upload
+        # Optional custom loan source folder (absolute or relative), useful for external client folders.
+        configured_loan_folder = config.get('loan_file_folder')
+        if configured_loan_folder:
+            scan_folder = resolve_path(configured_loan_folder)
+            if not os.path.isdir(scan_folder):
+                raise FileNotFoundError(f"Loan file folder not found: {scan_folder}")
+            scanning_external_source = True
         else:
-            scan_folder = UPLOAD_FOLDER
+            # Look in per-client subfolder first, then fallback to main Raw_Uploads
+            client_upload = os.path.join(UPLOAD_FOLDER, client_name)
+            if os.path.isdir(client_upload):
+                scan_folder = client_upload
+            else:
+                scan_folder = UPLOAD_FOLDER
+            scanning_external_source = False
 
-    recursive_scan = bool(config.get('loan_file_recursive', False))
-    archive_imported = bool(config.get('archive_imported_files', True))
+        recursive_scan = bool(config.get('loan_file_recursive', False))
+    _archive_flag = config.get('archive_imported_files')
+    archive_imported = True if _archive_flag is None else bool(_archive_flag)
+    if scan_folder_override:
+        # Never sweep an ad-hoc override scan into the Archive.
+        archive_imported = False
+    if scanning_external_source and _archive_flag is None:
+        # Files read in-place from a client-owned source folder
+        # (``loan_file_folder``) must NOT be moved out of it — archiving is
+        # only meant for the staged Raw_Uploads area. Moving a client's own
+        # files is destructive and breaks on-demand per-period re-imports.
+        # A CU can still opt in explicitly via ``archive_imported_files: true``.
+        archive_imported = False
 
     client_archive = None
     if archive_imported:
@@ -1043,6 +1882,16 @@ def process_client(client_name, specific_file=None):
     files_to_process.sort(key=lambda x: os.path.relpath(os.path.join(x[0], x[1]), scan_folder).lower())
 
     files_processed = 0
+    # Per-snapshot wholesale-wipe tracker (see ``import_file`` for full
+    # rationale). On full-folder imports this is an empty set we mutate
+    # as each new snapshot is encountered; the first file for a given
+    # snapshot wipes everything for (cu, snap) then APPENDs, and
+    # subsequent files for the same snapshot just APPEND so multiple
+    # extracts contributing overlapping ``loan_pool`` values all survive.
+    # On specific-file imports (``--file=X.xlsx``) we pass ``None`` to
+    # preserve the legacy per-pool delete semantics so re-running a
+    # single file does not nuke other extracts' rows for the same snap.
+    wiped_snapshots: set[str] | None = None if specific_file else set()
     for root, filename in files_to_process:
         file_path = os.path.join(root, filename)
         if not os.path.isfile(file_path):
@@ -1059,8 +1908,8 @@ def process_client(client_name, specific_file=None):
         # back to the top-level mapping for back-compat.
         per_file_cfg = config
         matched_extract = None
-        for pat, extract in extracts:
-            if pat.search(filename) or pat.search(relative_file):
+        for pats, extract in extracts:
+            if _patterns_match_any(pats, filename, relative_file):
                 matched_extract = extract
                 break
         if matched_extract is not None:
@@ -1090,6 +1939,50 @@ def process_client(client_name, specific_file=None):
                     )
                 except (TypeError, ValueError):
                     per_file_cfg['header_row'] = 0
+            # Phase 9.22: per-extract ``pool_code_split`` override. When
+            # present on the matched extract (including ``""`` meaning
+            # "no split"), it wins over the CU-level value. CUMA-style
+            # mortgage files ship loan codes like ``15/15 ARM`` where
+            # ``/`` is part of the code; without an explicit per-file
+            # ``""`` here, ``map_pool_codes`` would truncate to ``15`` and
+            # route to the default pool (typically ``Ignore``), silently
+            # excluding those loans from the report.
+            if 'pool_code_split' in matched_extract:
+                per_file_cfg['pool_code_split'] = (
+                    matched_extract.get('pool_code_split') or ''
+                )
+            # Per-extract ``pool_map`` override. Some CUs ship a second loan
+            # extract whose loan-type codes use a *different* numbering scheme
+            # that collides with the CU-level codes (e.g. code ``10`` means
+            # one pool in the legacy AIRES file and another in a newer "v2"
+            # export). When present, the extract's map fully replaces the
+            # CU-level ``pool_map`` for that file so the schemes stay isolated.
+            if matched_extract.get('pool_map'):
+                per_file_cfg['pool_map'] = dict(matched_extract.get('pool_map'))
+            # Per-extract charge-off exclusion column (name or index). Routes
+            # rows with a non-zero charge-off amount to the Exclude pool.
+            if matched_extract.get('chargeoff_exclude_column') not in (None, ''):
+                per_file_cfg['chargeoff_exclude_column'] = (
+                    matched_extract.get('chargeoff_exclude_column')
+                )
+            # Per-extract row filter (keep ``include`` / drop ``exclude`` rows
+            # by a column value). Used by participation remittance files to
+            # keep only Active / Non-Accrual loans on the CECL book.
+            if matched_extract.get('row_filter') not in (None, ''):
+                per_file_cfg['row_filter'] = matched_extract.get('row_filter')
+            # Per-extract credit-pull join column override. The CU-level
+            # ``credit_pull.loan_join_column`` (e.g. SSN) may be right for the
+            # primary loan extract but wrong for a secondary extract whose
+            # scores come from a different source (e.g. a credit-card file the
+            # analyst scores separately). Setting ``credit_pull_join_column``
+            # on the extract overrides it; an empty value disables the join for
+            # that file so it falls back to member/WARM/previous-snapshot.
+            if 'credit_pull_join_column' in matched_extract:
+                _cp_over = dict(per_file_cfg.get('credit_pull') or {})
+                _cp_over['loan_join_column'] = (
+                    matched_extract.get('credit_pull_join_column') or None
+                )
+                per_file_cfg['credit_pull'] = _cp_over
             label_txt = matched_extract.get('label') or '(unlabeled)'
             print(f"    Using extract mapping: {label_txt}")
         elif extracts:
@@ -1098,13 +1991,14 @@ def process_client(client_name, specific_file=None):
             # file matched that we'd still be here. Skip with a warning
             # rather than risk mis-mapping with the first extract's
             # columns.
-            if not file_pattern_re.search(filename):
+            if not _patterns_match_any(top_pattern_res, filename, relative_file):
                 continue
             print(f"    WARNING: {filename} matched top-level file_pattern but "
                   "no loan_data_extracts entry. Using top-level mapping as "
                   "fallback.")
 
-        if not file_pattern_re.search(filename) and matched_extract is None:
+        if (not _patterns_match_any(top_pattern_res, filename, relative_file)
+                and matched_extract is None):
             continue
 
         print(f"\n  File: {relative_file}")
@@ -1115,11 +2009,67 @@ def process_client(client_name, specific_file=None):
             # Fallback: allow a filename regex to match a dated folder segment in recursive paths.
             snapshot_date = extract_snapshot_date(relative_file, config)
         if not snapshot_date:
+            # Final fallback: filename has no parseable date but the config
+            # has an explicit ``report_period``. Two cases handled:
+            #   (a) filename mentions the report_period's own month — use
+            #       that month-end (e.g. ``December Loan File - Upload``
+            #       against ``report_period: 2025-12``).
+            #   (b) filename mentions ANY month name (Jan-Dec) — use that
+            #       month with the report_period's YEAR. Covers monthly
+            #       drops within a quarterly run (e.g. ``February Loan
+            #       File Upload`` and ``March Loan File Upload`` staged
+            #       alongside the Jan file when running ``2026-03``).
+            # The report_period month is preferred if present, falling
+            # through to the first other month name otherwise.
+            rp = str(config.get('report_period') or '').strip()
+            rp_match = re.match(r'^(20\d{2})-(0[1-9]|1[0-2])$', rp)
+            if rp_match:
+                rp_year = int(rp_match.group(1))
+                rp_month = int(rp_match.group(2))
+                src_lower = str(date_source).lower()
+                candidate_month: int | None = None
+                rp_names = (
+                    calendar.month_name[rp_month].lower(),
+                    calendar.month_abbr[rp_month].lower(),
+                )
+                if any(name and re.search(rf'(?<![a-z]){name}(?![a-z])', src_lower)
+                       for name in rp_names if name):
+                    candidate_month = rp_month
+                else:
+                    for m in range(1, 13):
+                        if m == rp_month:
+                            continue
+                        names = (
+                            calendar.month_name[m].lower(),
+                            calendar.month_abbr[m].lower(),
+                        )
+                        if any(name and re.search(rf'(?<![a-z]){name}(?![a-z])', src_lower)
+                               for name in names if name):
+                            candidate_month = m
+                            break
+                if candidate_month is not None:
+                    last_day = calendar.monthrange(rp_year, candidate_month)[1]
+                    snapshot_date = date(rp_year, candidate_month, last_day).isoformat()
+                    matched_name = calendar.month_name[candidate_month].lower()
+                    print(f"    Fallback: matched month name '{matched_name}' to "
+                          f"report_period year {rp_year} -> {snapshot_date}")
+                else:
+                    # (c) The filename carries no date and no month name at
+                    # all (e.g. "CECLOE.xls"). An undated snapshot file in
+                    # the current upload belongs to the period being run, so
+                    # stamp it to the report_period month-end. Gated on
+                    # report_period being set, and only reached after every
+                    # date-parsing attempt above has failed.
+                    last_day = calendar.monthrange(rp_year, rp_month)[1]
+                    snapshot_date = date(rp_year, rp_month, last_day).isoformat()
+                    print(f"    Fallback: no date in filename; using "
+                          f"report_period -> {snapshot_date}")
+        if not snapshot_date:
             print(f"    SKIPPED: Could not extract date from filename")
             continue
 
         try:
-            count = import_file(file_path, per_file_cfg, snapshot_date, credit_pull_scores, warm_acct_scores, pull_as_of)
+            count = import_file(file_path, per_file_cfg, snapshot_date, credit_pull_scores, warm_acct_scores, pull_as_of, wiped_snapshots=wiped_snapshots)
             if count > 0:
                 if archive_imported and client_archive:
                     archive_target = os.path.join(client_archive, relative_file)

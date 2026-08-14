@@ -57,6 +57,52 @@ def _find_sheet(wb) -> str | None:
     return None
 
 
+def _impaired_sheet_candidates(wb) -> list[str]:
+    """All worksheets that look like an impaired-loans data sheet.
+
+    CUs frequently keep the canonical blank `` Impaired Loans ASC
+    310-10`` tab AND a period-prefixed working copy (e.g. `` 26-6
+    Impaired Loans ASC 310-10``) that holds the quarter's actual rows.
+    Return every matching sheet so ``parse_file`` can prefer the one
+    with data.
+    """
+    hits: list[str] = []
+    for s in wb.sheetnames:
+        low = s.lower()
+        if "impaired" in low and "310" in low:
+            hits.append(s)
+    return hits
+
+
+def _count_data_rows(ws) -> int:
+    """Count non-blank data-entry rows (col A) from the data start row."""
+    count = 0
+    for r in range(_DATA_START_ROW, _DATA_END_ROW + 1):
+        if ws.cell(row=r, column=1).value in (None, ""):
+            break
+        count += 1
+    return count
+
+
+def _select_data_sheet(wb) -> str | None:
+    """Pick the impaired sheet that actually holds the quarter's rows.
+
+    Prefer the matching sheet with the most data-entry rows so a
+    period-prefixed working tab wins over a leftover blank template
+    tab. Falls back to ``_find_sheet`` when no candidate has data.
+    """
+    best: str | None = None
+    best_rows = 0
+    for name in _impaired_sheet_candidates(wb):
+        n = _count_data_rows(wb[name])
+        if n > best_rows:
+            best_rows = n
+            best = name
+    if best is not None:
+        return best
+    return _find_sheet(wb)
+
+
 def _coerce_num(value: Any) -> float:
     if value in (None, ""):
         return 0.0
@@ -103,7 +149,7 @@ def parse_file(path: str | Path) -> dict[str, Any]:
         out["error"] = f"Failed to open workbook: {exc}"
         return out
 
-    sheet = _find_sheet(wb)
+    sheet = _select_data_sheet(wb)
     if not sheet:
         out["error"] = (
             f"Could not find ' Impaired Loans ASC 310-10' sheet. "
@@ -218,7 +264,18 @@ def apply_impaired_rows(
         ws.cell(row=r, column=9).value = row.get("allowance_provided") or None
         ws.cell(row=r, column=10).value = row.get("notes") or None
         applied += 1
-    wb.save(p)
+    try:
+        wb.save(p)
+    except PermissionError as exc:
+        result["error"] = (
+            f"Permission denied saving {p.name}. The workbook is likely "
+            f"open in Excel or locked by a sync client (Egnyte / OneDrive). "
+            f"Close it everywhere and re-run. (details: {exc})"
+        )
+        return result
+    except OSError as exc:
+        result["error"] = f"Failed to save workbook {p.name}: {exc}"
+        return result
     result["ok"] = True
     result["applied"] = applied
     result["cleared"] = cleared

@@ -143,6 +143,13 @@ ES_RANGES = [
 ]
 DIST_FACTORS = [10.52, 22.93, 45.15, 116.10, 141.17, 152.04, 160.21]
 
+# Per-report override of the distribution-factor table. When a client config
+# supplies ``distribution_factors`` (percentages, one per grade position), it
+# is installed here at the start of ``compose_tct`` so every ``_dist_factor``
+# call uses the CU's own factors. ``None`` -> fall back to the standard
+# hardcoded TCT table above (existing behaviour for all other clients).
+_ACTIVE_DIST_FACTORS = None
+
 CHART_COLORS = [
     '4472C4', 'ED7D31', 'A5A5A5', 'FFC000', '5B9BD5', '70AD47',
     '264478', '9B57A0', '636363', '255E91', 'BF8F00',
@@ -159,6 +166,47 @@ def _all_grades(grades, no_score):
     hidden = [h for h in HIDDEN_GRADES if h.replace('Hide-', '') not in visible]
     n_hidden = max(0, len(HIDDEN_GRADES) - (len(grades) - 5))
     return [g['label'] for g in grades] + hidden[:n_hidden] + [no_score]
+
+
+def _brr_grade_labels(config, no_score):
+    """Return ordered Business Risk Rating labels (with no_score appended).
+
+    When the CU has no ``business_risk_ratings`` configured, returns
+    ``None`` so callers can fall through to the FICO-grade list.
+    """
+    rows = config.get('business_risk_ratings') or []
+    out: list[str] = []
+    seen: set[str] = set()
+    for r in rows:
+        lbl = str((r or {}).get('label') or '').strip()
+        if not lbl:
+            continue
+        key = lbl.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(lbl)
+    if not out:
+        return None
+    if no_score not in out:
+        out.append(no_score)
+    return out
+
+
+def _brr_pools_set(config):
+    """Set of pool names (lower-cased) flagged ``brr: true`` in config."""
+    return {
+        str((p or {}).get('name', '')).strip().lower()
+        for p in (config.get('pools') or [])
+        if (p or {}).get('brr') and (p or {}).get('name')
+    }
+
+
+def _is_brr_pool(pool, brr_pool_lcs):
+    """``True`` when ``pool`` is in the pre-built lower-cased BRR pool set."""
+    if not brr_pool_lcs:
+        return False
+    return str(pool or '').strip().lower() in brr_pool_lcs
 
 
 def _is_hidden(grade_label):
@@ -199,7 +247,8 @@ def _score(value, ranges):
 
 
 def _dist_factor(idx):
-    return DIST_FACTORS[min(idx, len(DIST_FACTORS) - 1)] / 100.0
+    facs = _ACTIVE_DIST_FACTORS if _ACTIVE_DIST_FACTORS else DIST_FACTORS
+    return facs[min(idx, len(facs) - 1)] / 100.0
 
 
 def _pool_life_loss(pools, hist):
@@ -212,7 +261,8 @@ def _pool_life_loss(pools, hist):
     for pool in pools:
         rates = []
         for y in years:
-            net = co.get(y, {}).get(pool, 0) - rc.get(y, {}).get(pool, 0)
+            net = abs(co.get(y, {}).get(pool, 0) or 0) \
+                  - abs(rc.get(y, {}).get(pool, 0) or 0)
             avg = ab.get(y, {}).get(pool, 0)
             if avg > 0:
                 rates.append(net / avg)
@@ -316,13 +366,10 @@ def _resolve_mgmt_adj_grade(pool, grade_label, grade_idx, no_score_label,
     """Resolve the per-(pool, grade) management adjustment.
 
     Precedence (highest first):
-      1. ``prior_mgmt_adj_map[pool][grade_label]`` — preserves the
-         value from the prior period's report so historical reports
-         remain stable.
-      2. Manual overlay typed on wizard Step 16
+      1. Manual overlay typed on wizard Step 16
          (``mgmt_adj_by_pool[pool]``) multiplied by the per-grade
          distribution factor.
-      3. Admin firm-wide default multiplied by the distribution
+      2. Admin firm-wide default multiplied by the distribution
          factor — applied **only** when ALL of the following hold,
          matching the Migration model's behaviour:
            a. ``pool_use_default[pool]`` is True (user opted in on
@@ -332,6 +379,14 @@ def _resolve_mgmt_adj_grade(pool, grade_label, grade_idx, no_score_label,
               (``base_rate == 0`` — i.e. there is no historical loss
               data to drive the rate, so the firm-wide default fills
               the gap).
+      3. ``prior_mgmt_adj_map[pool][grade_label]`` — the prior
+         period's report value, used as a carry-forward fallback
+         **only** when the current period has no established
+         adjustment (no manual overlay and no opted-in default). This
+         keeps historical reports stable for untouched pools while
+         letting a current-period wizard change (or the Management
+         Adjustment Worksheet's prepopulated value) take effect
+         immediately.
       4. ``0.0`` otherwise.
 
     A pool-level value (manual or default) gets distributed across
@@ -339,9 +394,6 @@ def _resolve_mgmt_adj_grade(pool, grade_label, grade_idx, no_score_label,
     overlay path has always used, so the default and manual paths
     behave identically per the user's spec.
     """
-    pm = prior_mgmt_adj_map.get(pool, {}) if prior_mgmt_adj_map else {}
-    if grade_label in pm:
-        return pm[grade_label]
     dist = (_dist_factor(len(DIST_FACTORS) - 1)
             if grade_label == no_score_label
             else _dist_factor(grade_idx))
@@ -352,6 +404,11 @@ def _resolve_mgmt_adj_grade(pool, grade_label, grade_idx, no_score_label,
             and admin_default
             and (base_rate is None or float(base_rate or 0) == 0)):
         return float(admin_default) * dist
+    # Carry-forward fallback: prior period's per-grade value applies only
+    # when the current period has no established adjustment above.
+    pm = prior_mgmt_adj_map.get(pool, {}) if prior_mgmt_adj_map else {}
+    if grade_label in pm:
+        return pm[grade_label]
     return 0.0
 
 
@@ -372,6 +429,35 @@ def _resolve_mgmt_adj_total(pool, pool_use_default, mgmt_adj_by_pool,
             and (base_rate is None or float(base_rate or 0) == 0)):
         return float(admin_default)
     return 0.0
+
+
+def _other_allowance_considerations(config):
+    """Return the list of optional Other Allowance Considerations.
+
+    Each entry is normalised to ``{'title': str, 'balance': float,
+    'percentage': float, 'amount': float}``. ``amount`` is recomputed
+    from balance * percentage when missing/stale so we never trust a
+    stale cached value. Empty list when none are configured.
+    """
+    raw = config.get('other_allowance_considerations') or []
+    out = []
+    for r in raw:
+        try:
+            bal = float(r.get('balance') or 0)
+            pct = float(r.get('percentage') or 0)
+        except (TypeError, ValueError):
+            continue
+        amt_raw = r.get('amount')
+        try:
+            amt = float(amt_raw) if amt_raw is not None else round(bal * pct / 100.0, 2)
+        except (TypeError, ValueError):
+            amt = round(bal * pct / 100.0, 2)
+        title = (str(r.get('title') or '').strip()) or '(untitled)'
+        out.append({
+            'title': title, 'balance': bal,
+            'percentage': pct, 'amount': amt,
+        })
+    return out
 
 
 def _snap_display(snap):
@@ -1887,11 +1973,23 @@ def _sheet_hist_balance_charts(wb, cu, snap, df, grades, config, hist):
 def _sheet_pool_risk_change(wb, cu, snap, pool_df, pool_name, pool_idx, grades, config, hist):
     """One landscape sheet per pool with dollar/percent matrix + charts."""
     no_score = config.get('no_score_label', 'Not Reported')
-    all_gl = _all_grades(grades, no_score)
-    gl = [g for g in all_gl if not _is_hidden(g)]
-    matrix = risk_change_matrix(pool_df, grades, no_score)
+    # BRR detection: when this pool is flagged business-risk-rated, replace
+    # the FICO grade list with the analyst-defined BRR labels so the matrix
+    # rows/columns reflect the rating bands rather than credit-score bands.
+    _brr_labels_full = _brr_grade_labels(config, no_score)
+    _brr_pool_lcs = _brr_pools_set(config) if _brr_labels_full else set()
+    _is_brr = _is_brr_pool(pool_name, _brr_pool_lcs) if _brr_labels_full else False
+    if _is_brr:
+        all_gl = list(_brr_labels_full)
+        gl = [g for g in all_gl if not _is_hidden(g)]
+        matrix = risk_change_matrix(pool_df, grades, no_score, labels=all_gl)
+        grade_rngs = {}
+    else:
+        all_gl = _all_grades(grades, no_score)
+        gl = [g for g in all_gl if not _is_hidden(g)]
+        matrix = risk_change_matrix(pool_df, grades, no_score)
+        grade_rngs = _grade_ranges(grades, no_score)
     pool_total = pool_df['current_balance'].sum()
-    grade_rngs = _grade_ranges(grades, no_score)
     n_grades = len(gl)
     gt_col = 3 + n_grades  # Grand Total column
     last_col_letter = chr(ord('C') + n_grades)
@@ -2675,6 +2773,13 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     admin_default_mgmt_adj = _load_admin_default_mgmt_adj()
     gl = _all_grades(grades, no_score)
     visible_gl = [g for g in gl if not _is_hidden(g)]
+    # Business Risk Rating support: pools flagged ``brr: true`` in config
+    # render with BRR labels (Pass / Special Mention / Substandard / ...)
+    # instead of the firm-wide FICO grades. ``brr_labels`` is None when
+    # the CU has no BRR configuration → every pool falls through to the
+    # FICO ``visible_gl`` list (legacy behavior).
+    brr_labels = _brr_grade_labels(config, no_score)
+    brr_pool_lcs = _brr_pools_set(config) if brr_labels else set()
 
     # WARM-sourced ACL data
     _imp = hist.get('impaired', {}) if hist else {}
@@ -2745,7 +2850,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             for y in years:
                 if y < pe:
                     continue
-                total_net += co_data.get(y, {}).get(pool, 0) - rc_data.get(y, {}).get(pool, 0)
+                total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
+                             - abs(rc_data.get(y, {}).get(pool, 0) or 0)
         life_loss[pool] = total_net / avg_tot if avg_tot > 0 else 0
 
     # DQ variance per pool
@@ -2772,6 +2878,54 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     acl_impaired = _imp.get('acl_impaired', {})
     acl_summary = _imp.get('acl_summary', {})
     spec_id_by_pool = _imp.get('spec_id_by_pool', {})
+
+    # Pools whose allowance is an analyst-set *specific reserve* that the
+    # firm-wide model cannot reproduce (e.g. commercial loans allowanced
+    # per-loan from a matrix-rating schedule). For these, use the WARM
+    # workbook's already-computed allowance-before-environmental and its
+    # environmental factor instead of the FICO/loss-rate calculation.
+    # Opt-in via config ``warm_allowance_pools`` (empty -> no change).
+    warm_allow_pools = {
+        str(p).strip().lower()
+        for p in (config.get('warm_allowance_pools') or [])
+        if str(p).strip()
+    }
+
+    # Pools that fall back to the config grade ``reserve_rate`` (times the
+    # grade's distribution factor) when they have no historical loss
+    # experience — matching the WARM "Default Loss Rate" behaviour for
+    # secured pools that rarely charge off (e.g. Real Estate). Opt-in via
+    # ``reserve_rate_fallback_pools`` so fully-secured pools that carry no
+    # reserve (e.g. Share Secured) are unaffected.
+    _rr_fallback_pools = {
+        str(p).strip().lower()
+        for p in (config.get('reserve_rate_fallback_pools') or [])
+        if str(p).strip()
+    }
+    _reserve_by_grade = {
+        str(gr.get('label')): float(gr.get('reserve_rate') or 0)
+        for gr in (grades or [])
+    }
+    # Per-(pool, grade) ACL base loss-rate override. When the firm-wide
+    # loss-rate model can't reproduce a pool's exact per-grade base rate
+    # (e.g. a BRR-graded commercial pool whose WARM rates are computed on
+    # the Rating 1-10 scale rather than the FICO ``DIST_FACTORS`` curve),
+    # ``base_loss_rate_by_pool_grade: {pool: {grade_label: rate}}`` in the
+    # YAML pins the base rate for those grades verbatim. Highest precedence
+    # over the computed rate and the reserve-rate fallback. Keyed
+    # case-insensitively on the pool name.
+    _base_rate_ovr = {}
+    for _p, _gm in (config.get('base_loss_rate_by_pool_grade') or {}).items():
+        if not isinstance(_gm, dict):
+            continue
+        _clean = {}
+        for _g, _v in _gm.items():
+            try:
+                _clean[str(_g).strip()] = float(_v)
+            except (TypeError, ValueError):
+                continue
+        if _clean:
+            _base_rate_ovr[str(_p).strip().lower()] = _clean
     risk_rated_flags = _imp.get('risk_rated', {})
     prior_mgmt_adj = _imp.get('prior_mgmt_adj', {})
     prior_env_factor = _imp.get('prior_env_factor', {})
@@ -2814,8 +2968,18 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     r += 1
 
     grand_allowance = 0
+    # Per-pool effective ACL loss rate (total allowance / calc balance),
+    # captured per pool so unfunded-commitment OAC rows can apply the same
+    # rate the homogeneous-pool ACL calc applies to the pool.
+    pool_eff_rate = {}
     grand_allow_before = 0
     grand_env_allow = 0
+    # Sum of the per-pool Total balances / specific-IDs actually rendered
+    # below (both risk-rated and non-risk-rated pools). Used for the
+    # Pooled Totals line so it always reconciles to what's shown on this
+    # tab, including the loan pools that aren't broken out by grade.
+    grand_balance = 0
+    grand_spec_id = 0
     pool_starts = []
     _bal_detail = _imp.get('pool_bal_detail', {})
 
@@ -2849,21 +3013,28 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
 
         is_rr = risk_rated_flags.get(pool, has_db_data) if risk_rated_flags else (pool not in nrr)
 
-        # Compute env factor
-        if has_db_data:
-            if is_rr:
-                _, _, ncc_pct = _ncc(pdf, grades, config)
-            else:
-                ncc_pct = 0.0
-            dq_v = dq_var.get(pool, 0)
-            ncc_score = _env_score(ncc_pct * 100, _ncc_r)
-            dq_score = _env_score(dq_v * 100, _dq_r)
-            es_score = _env_score(econ_stress, _es_r)
-            env_factor_calc = (ncc_score + dq_score + es_score) / 100.0
+        # Env factor must match the value rendered on the "Env Factor by
+        # Pool" tab. That sheet computes per-pool env_f and stashes it in
+        # env_results — use it as the single source of truth so the two
+        # tabs never disagree. Fall back to a local recompute (and then
+        # to prior_env_factor) only if the Env Factor sheet skipped this
+        # pool for some reason.
+        if pool in env_results:
+            env_factor = env_results[pool]
         else:
-            env_factor_calc = 0
-        # Use prior report's env factor if available; otherwise computed
-        env_factor = prior_env_factor.get(pool, env_factor_calc)
+            if has_db_data:
+                if is_rr:
+                    _, _, ncc_pct = _ncc(pdf, grades, config)
+                else:
+                    ncc_pct = 0.0
+                dq_v = dq_var.get(pool, 0)
+                ncc_score = _env_score(ncc_pct * 100, _ncc_r)
+                dq_score = _env_score(dq_v * 100, _dq_r)
+                es_score = _env_score(econ_stress, _es_r)
+                env_factor_calc = (ncc_score + dq_score + es_score) / 100.0
+            else:
+                env_factor_calc = 0
+            env_factor = prior_env_factor.get(pool, env_factor_calc)
 
         pool_ll = life_loss.get(pool, 0)
 
@@ -2875,8 +3046,24 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
 
         if is_rr:
             # ── Risk-rated pool: show per-grade detail ──
+            # BRR-flagged pools render their analyst-defined rating
+            # labels (Pass/Special Mention/...); non-BRR pools render
+            # the firm-wide FICO grades. ``df['current_grade']`` was
+            # already populated by ``cecl_engine.calculate_cecl`` with
+            # the BRR label for BRR pool loans, so per-grade balance
+            # aggregation falls out naturally below.
+            pool_grade_labels = (
+                brr_labels if _is_brr_pool(pool, brr_pool_lcs)
+                else visible_gl
+            )
             pool_allow_before = 0
-            for gi, g in enumerate(visible_gl):
+            # Track per-grade sums so BRR pools can derive the Total row
+            # from the rendered per-grade values. The _bal_detail Total
+            # is built around FICO grades and would only reflect the
+            # Not Reported portion for a BRR pool.
+            pool_grade_balance_sum = 0
+            pool_grade_spec_id_sum = 0
+            for gi, g in enumerate(pool_grade_labels):
                 fnt = _tct_grade_font(g)
 
                 wg = warm_grades.get(g, {})
@@ -2896,6 +3083,12 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                     # column M on the Display Hist Bal tab — even if zero.
                     dist = _dist_factor(len(DIST_FACTORS) - 1) if g == no_score else _dist_factor(gi)
                     base_rate = max(0, pool_ll * dist)
+                    if (_pool_lc in _rr_fallback_pools
+                            and base_rate == 0 and pool_ll <= 0):
+                        base_rate = _reserve_by_grade.get(g, 0) * dist
+                    _bro = _base_rate_ovr.get(_pool_lc)
+                    if _bro and g in _bro:
+                        base_rate = _bro[g]
                     # Mgmt adj is resolved from wizard config (Step 16
                     # overlay + per-pool 'Use Default' checkbox + Admin
                     # firm-wide default). The WARM workbook's baked-in
@@ -2925,6 +3118,12 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                     # column M on the Display Hist Bal tab — even if zero.
                     dist = _dist_factor(len(DIST_FACTORS) - 1) if g == no_score else _dist_factor(gi)
                     base_rate = max(0, pool_ll * dist)
+                    if (_pool_lc in _rr_fallback_pools
+                            and base_rate == 0 and pool_ll <= 0):
+                        base_rate = _reserve_by_grade.get(g, 0) * dist
+                    _bro = _base_rate_ovr.get(_pool_lc)
+                    if _bro and g in _bro:
+                        base_rate = _bro[g]
                     mgmt_adj = _resolve_mgmt_adj_grade(
                         pool, g, gi, no_score,
                         pool_use_default, mgmt_adj_by_pool,
@@ -2956,26 +3155,51 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                 for ci in range(1, nhdr + 1):
                     ws.cell(row=r, column=ci).border = THIN
                 r += 1
+                pool_grade_balance_sum += balance or 0
+                pool_grade_spec_id_sum += specific_id or 0
 
             # Pool total row
+            _is_brr = _is_brr_pool(pool, brr_pool_lcs)
             _ptd = _bal_detail.get(pool, {}).get('Total', {})
-            if _ptd and _ptd.get('balance_sheet_total'):
+            if _is_brr:
+                # BRR pools: use the sum of per-grade balances we just
+                # rendered. _bal_detail's Total is keyed off FICO grades
+                # and would only capture the unmapped (Not Reported)
+                # portion of the BRR pool.
+                total_balance = pool_grade_balance_sum
+            elif _ptd and _ptd.get('balance_sheet_total'):
                 total_balance = _ptd['balance_sheet_total']
             elif warm_total:
                 total_balance = warm_total.get('balance', pool_total)
             else:
                 total_balance = pool_total
             pool_allow_before_out = pool_allow_before
+            if _pool_lc in warm_allow_pools and warm_total:
+                pool_allow_before_out = warm_total.get(
+                    'allow_before', pool_allow_before_out)
+                _wf = warm_total.get('env_factor')
+                if _wf is not None:
+                    env_factor = _wf
             env_allow = pool_allow_before_out * env_factor
             total_allow = pool_allow_before_out + env_allow
             grand_allowance += total_allow
             grand_allow_before += pool_allow_before_out
             grand_env_allow += env_allow
 
-            total_spec_id = warm_total.get('spec_id', 0) if warm_total else 0
-            if total_spec_id == 0 and pool in spec_id_by_pool:
-                total_spec_id = sum(spec_id_by_pool[pool].values())
+            if _is_brr:
+                # Mirror the Total balance fix: prefer the per-grade
+                # spec_id sum so the BRR pool's Total row stays
+                # internally consistent.
+                total_spec_id = pool_grade_spec_id_sum
+            else:
+                total_spec_id = warm_total.get('spec_id', 0) if warm_total else 0
+                if total_spec_id == 0 and pool in spec_id_by_pool:
+                    total_spec_id = sum(spec_id_by_pool[pool].values())
             total_calc_bal = total_balance - total_spec_id
+            grand_balance += total_balance or 0
+            grand_spec_id += total_spec_id or 0
+            pool_eff_rate[pool] = (total_allow / total_calc_bal) \
+                if total_calc_bal else 0
 
             ws.cell(row=r, column=1, value="Total").font = FNT_A12B
             ws.cell(row=r, column=2, value=total_balance).number_format = ACCT
@@ -3007,6 +3231,14 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                 nrr_spec_id = sum(spec_id_by_pool[pool].values())
             nrr_calc_bal = nrr_balance - nrr_spec_id
             nrr_base_rate = warm_total.get('base_rate', 0)
+            # Config override: pin the WARM's blended base loss rate for a
+            # balance-only NRR pool (overdraft / participations) via
+            # ``base_loss_rate_by_pool_grade: {pool: {Total: rate}}``. The
+            # firm-wide model can't re-derive these without the same CO
+            # history, so the WARM value is authoritative.
+            _bro_nrr = _base_rate_ovr.get(_pool_lc)
+            if _bro_nrr and 'Total' in _bro_nrr:
+                nrr_base_rate = _bro_nrr['Total']
             # NRR pool mgmt adj: same resolver as RR pools but pool-level
             # (no per-grade distribution since NRR pools have no grades).
             # Admin default only applied when nrr_base_rate==0.
@@ -3019,11 +3251,25 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             # Recompute allow_before so it reflects the resolver's
             # mgmt_adj instead of the WARM workbook's baked-in value.
             nrr_allow_before = nrr_calc_bal * nrr_factor
+            if _pool_lc in warm_allow_pools and warm_total:
+                # Specific-reserve pool: use the WARM's computed allowance
+                # (and its environmental factor) directly.
+                nrr_allow_before = warm_total.get('allow_before', nrr_allow_before)
+                _wf = warm_total.get('env_factor')
+                if _wf is not None:
+                    env_factor = _wf
+                if nrr_calc_bal:
+                    nrr_base_rate = nrr_allow_before / nrr_calc_bal
+                    nrr_factor = nrr_base_rate
             nrr_env_allow = nrr_allow_before * env_factor
             nrr_total_allow = nrr_allow_before + nrr_env_allow
             grand_allowance += nrr_total_allow
             grand_allow_before += nrr_allow_before
             grand_env_allow += nrr_env_allow
+            grand_balance += nrr_balance or 0
+            grand_spec_id += nrr_spec_id or 0
+            pool_eff_rate[pool] = (nrr_total_allow / nrr_calc_bal) \
+                if nrr_calc_bal else 0
 
             ws.cell(row=r, column=1, value="Total").font = FNT_A12B
             ws.cell(row=r, column=2, value=nrr_balance).number_format = ACCT
@@ -3051,10 +3297,17 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             r += 2
 
     # Grand totals
-    pooled_balance = acl_summary.get('pooled_balance', df['current_balance'].sum())
+    # Pooled balance / specific-ID are the SUM of the per-pool Total rows
+    # rendered above (risk-rated AND non-risk-rated), so the Pooled Totals
+    # line always reconciles to what's shown on this tab — including the
+    # loan pools that aren't broken out by grade. A prior report's
+    # acl_summary['pooled_balance'] silently dropped those NRR pools.
+    pooled_balance = grand_balance if grand_balance else \
+        acl_summary.get('pooled_balance', df['current_balance'].sum())
     pooled_total_allow = grand_allowance
 
-    pooled_spec_id = acl_summary.get('pooled_spec_id', 0)
+    pooled_spec_id = grand_spec_id if grand_balance else \
+        acl_summary.get('pooled_spec_id', 0)
     if pooled_spec_id == 0 and spec_id_by_pool:
         pooled_spec_id = sum(sum(g.values()) for g in spec_id_by_pool.values())
     pooled_calc_bal = pooled_balance - pooled_spec_id
@@ -3076,16 +3329,42 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     r += 2
     ws.cell(row=r, column=1, value="Impaired Loans").font = FNT_A12B
     ws.cell(row=r, column=10, value="Allowance").font = FNT_A12B
-    for lbl in ["Delinquent Loans", "Known Losses", "Repossessions",
-                "Foreclosed Real Estate", "Deceased", "Bankruptcy"]:
+    # Show the credit union's ACTUAL impairment categories with their
+    # provision amounts. Most CUs use the standard TCT names (Delinquent
+    # Loans / Known Losses / ...), but some (e.g. Erie) categorise by their
+    # own codes (DQ / DQ90 / REPO / BK / BKNOTDQ). When the loaded
+    # categories are all standard, keep the fixed 6-row layout (so absent
+    # categories still render as zero); otherwise render the CU's own
+    # categories so the per-type breakout matches the source report.
+    _default_imp_labels = ["Delinquent Loans", "Known Losses", "Repossessions",
+                           "Foreclosed Real Estate", "Deceased", "Bankruptcy"]
+    _std_imp = {lbl.lower() for lbl in _default_imp_labels}
+    _imp_keys = [k for k in acl_impaired.keys()
+                 if not str(k).upper().startswith('HIDE')]
+    if _imp_keys and not all(str(k).strip().lower() in _std_imp
+                             for k in _imp_keys):
+        imp_labels = _imp_keys
+    else:
+        imp_labels = _default_imp_labels
+    for lbl in imp_labels:
         imp_val = acl_impaired.get(lbl, 0)
-        if lbl.upper().startswith('HIDE'):
+        if str(lbl).upper().startswith('HIDE'):
             continue
         r += 1
         ws.cell(row=r, column=1, value=lbl).font = FNT_A12
         ws.cell(row=r, column=11, value=imp_val).number_format = ACCT
     total_spec_allow = acl_summary.get('total_spec_allow', sum(acl_impaired.values()))
-    total_allow_needed = pooled_total_allow + total_spec_allow
+    # Expand Unfunded-Commitment OAC templates into per-pool rows using each
+    # pool's effective ACL rate (mutates config in place so downstream
+    # summaries read the same resolved rows).
+    try:
+        import generate_report as _gr
+        _gr._expand_unfunded_commitment_oac(config, pool_eff_rate, snap)
+    except Exception as _e:  # noqa: BLE001
+        print(f"  OAC unfunded expansion skipped: {_e}")
+    oac_rows = _other_allowance_considerations(config)
+    oac_total = sum(o['amount'] for o in oac_rows)
+    total_allow_needed = pooled_total_allow + total_spec_allow + oac_total
     acl_bal = acl_summary.get('acl_balance', config.get('acl_balance', 0))
     adjustment = total_allow_needed - acl_bal
 
@@ -3093,6 +3372,19 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     ws.cell(row=r, column=1, value="Total Specifically Identified Allowance").font = FNT_A12B
     ws.cell(row=r, column=11, value=total_spec_allow).number_format = ACCT
     ws.cell(row=r, column=11).font = FNT_A12B
+    if oac_rows:
+        r += 2
+        ws.cell(row=r, column=1, value="Other Allowance Considerations").font = FNT_A12B
+        ws.cell(row=r, column=10, value="Allowance").font = FNT_A12B
+        for o in oac_rows:
+            r += 1
+            ws.cell(row=r, column=1, value=o['title']).font = FNT_A12
+            ws.cell(row=r, column=11, value=o['amount']).number_format = ACCT
+        r += 1
+        ws.cell(row=r, column=1,
+                value="Total Other Allowance Considerations").font = FNT_A12B
+        ws.cell(row=r, column=11, value=oac_total).number_format = ACCT
+        ws.cell(row=r, column=11).font = FNT_A12B
     r += 1
     ws.cell(row=r, column=1, value="Total Allowance Needed").font = FNT_A12B
     ws.cell(row=r, column=11, value=total_allow_needed).number_format = ACCT
@@ -3524,6 +3816,13 @@ def _sheet_display_hist_bal(wb, cu, snap, df, grades, config, hist):
     no_score = config.get('no_score_label', 'Not Reported')
     gl = [g for g in _all_grades(grades, no_score) if not _is_hidden(g)]
 
+    # BRR support: pools flagged with brr=True use analyst-defined
+    # business-risk-rating labels (e.g. Pass / Special Mention / ...)
+    # instead of FICO grades for their per-grade rendering. Pre-compute
+    # the BRR label list and pool set once.
+    brr_labels = _brr_grade_labels(config, no_score)
+    brr_pool_lcs = _brr_pools_set(config) if brr_labels else set()
+
     # Use WARM pool order (same as ACL tab), fallback to config sort.
     # Include pools known to WARM (hist_bal_data / pool_bal_detail) even
     # if they have no DB rows so NRR pools render alongside RR pools.
@@ -3624,7 +3923,8 @@ def _sheet_display_hist_bal(wb, cu, snap, df, grades, config, hist):
             for y in years:
                 if y < pe:
                     continue
-                total_net += co_data.get(y, {}).get(pool, 0) - rc_data.get(y, {}).get(pool, 0)
+                total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
+                             - abs(rc_data.get(y, {}).get(pool, 0) or 0)
         pool_life_rates[pool] = total_net / avg_tot if avg_tot > 0 else 0
 
     # ── Title block ──
@@ -3717,7 +4017,13 @@ def _sheet_display_hist_bal(wb, cu, snap, df, grades, config, hist):
             continue
 
         # Risk-rated: per-grade rows
-        for gi, g in enumerate(gl):
+        # BRR-flagged pools render BRR labels (Highest-Excellent / Good /
+        # Acceptable / ...); non-BRR pools use the firm-wide FICO list.
+        pool_grade_labels = (
+            brr_labels if (brr_labels and _is_brr_pool(pool, brr_pool_lcs))
+            else gl
+        )
+        for gi, g in enumerate(pool_grade_labels):
             r += 1
             fnt = FNT_A12
             g_df = pdf[pdf['current_grade'] == g]
@@ -3904,15 +4210,25 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
         if year != earliest_year:
             return yearly_data.get(year, {}).get(pool, 0)
         partial = 0
-        has_monthly = False
+        has_window_monthly = False
         for m in range(earliest_month, 13):
             v = monthly_data.get((year, m), {}).get(pool, 0)
             if v:
-                has_monthly = True
+                has_window_monthly = True
             partial += v
-        if has_monthly:
+        # Whether the pool has ANY monthly detail for this year — including
+        # months BEFORE the window. When it does, the monthly series fully
+        # accounts for the annual total, so the windowed sum is authoritative
+        # (possibly 0 when all of the year's activity fell before
+        # earliest_month). Prorating in that case would fabricate in-window
+        # charge-offs from activity that is actually OUTSIDE the window.
+        has_any_monthly = has_window_monthly or any(
+            monthly_data.get((year, m), {}).get(pool, 0)
+            for m in range(1, earliest_month)
+        )
+        if has_any_monthly:
             full_year = yearly_data.get(year, {}).get(pool, 0)
-            if full_year and (full_year > 0) != (partial > 0):
+            if full_year and partial and (full_year > 0) != (partial > 0):
                 partial = -partial
             return partial
         full = yearly_data.get(year, {}).get(pool, 0)
@@ -3971,6 +4287,9 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
             else:
                 val = _windowed_year_val(hist.get('co_monthly', {}),
                                          co_data, pool, y, earliest, earliest_mo)
+            # Always display charge-offs as positive losses regardless
+            # of how the source CU signs them.
+            val = abs(val or 0)
             ws.cell(row=r, column=2 + yi, value=val).number_format = ACCT_FMT
             ws.cell(row=r, column=2 + yi).font = FNT_A10B
             acl_total += val
@@ -4007,6 +4326,8 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
             else:
                 val = _windowed_year_val(hist.get('rc_monthly', {}),
                                          rc_data, pool, y, earliest, earliest_mo)
+            # Always display recoveries as positive regardless of sign.
+            val = abs(val or 0)
             ws.cell(row=r, column=2 + yi, value=val).number_format = ACCT_FMT
             ws.cell(row=r, column=2 + yi).font = FNT_A10B
             acl_total += val
@@ -4041,13 +4362,14 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
                                             pool, y, earliest, earliest_mo)
                 rc_val = _windowed_year_val(warm_rc_monthly, warm_rc,
                                             pool, y, earliest, earliest_mo)
-                net = co_val - rc_val
+                # Net = |CO| - |Recov| regardless of source sign.
+                net = abs(co_val or 0) - abs(rc_val or 0)
             else:
                 co_val = _windowed_year_val(hist.get('co_monthly', {}),
                                             co_data, pool, y, earliest, earliest_mo)
                 rc_val = _windowed_year_val(hist.get('rc_monthly', {}),
                                             rc_data, pool, y, earliest, earliest_mo)
-                net = co_val - rc_val
+                net = abs(co_val or 0) - abs(rc_val or 0)
             ws.cell(row=r, column=2 + yi, value=net).number_format = ACCT_FMT
             ws.cell(row=r, column=2 + yi).font = FNT_A10B
             acl_total += net
@@ -4136,6 +4458,12 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
     ws = wb.create_sheet("> Detail_HIst Balances")
     no_score = config.get('no_score_label', 'Not Reported')
     all_gl = [g for g in _all_grades(grades, no_score) if not _is_hidden(g)]
+
+    # BRR support: pools flagged with brr=True render their analyst-defined
+    # business-risk-rating labels under a 'Current Risk Rating' header
+    # instead of the FICO grade list.
+    brr_labels = _brr_grade_labels(config, no_score)
+    brr_pool_lcs = _brr_pools_set(config) if brr_labels else set()
 
     # 8pt Arial fonts for compact layout
     F8B = Font(name='Arial', bold=True, size=8)
@@ -4280,7 +4608,13 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
             continue
 
         # ── Risk-rated pool: full grade breakdown ──
-        ws.cell(row=r, column=1, value="Current Grade").font = F8B
+        # BRR pools render under 'Current Risk Rating' header with BRR
+        # labels; non-BRR pools use 'Current Grade' with FICO labels.
+        _is_brr = bool(brr_labels) and _is_brr_pool(pool, brr_pool_lcs)
+        pool_grade_labels = brr_labels if _is_brr else all_gl
+        header_label = "Current Risk Rating" if _is_brr else "Current Grade"
+
+        ws.cell(row=r, column=1, value=header_label).font = F8B
         for di, dt in enumerate(pdates):
             c = ws.cell(row=r, column=DATE_COL_START + di, value=dt)
             c.number_format = 'mmm\\-yy'
@@ -4295,7 +4629,7 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
         r += 1
 
         grade_start = r
-        for gi, g in enumerate(all_gl):
+        for gi, g in enumerate(pool_grade_labels):
             fnt = _grade_font8(g)
             ws.cell(row=r, column=1, value=g).font = fnt
             row_fill = ALT_FILL if gi % 2 == 0 else None
@@ -4322,10 +4656,10 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
         ws.cell(row=grade_start, column=warm_col, value=pool_acl_val).font = F8
         ws.cell(row=grade_start, column=warm_col).alignment = Alignment(
             horizontal='center', vertical='center')
-        if len(all_gl) > 0:
+        if len(pool_grade_labels) > 0:
             ws.merge_cells(
                 start_row=grade_start, start_column=warm_col,
-                end_row=grade_start + len(all_gl), end_column=warm_col)
+                end_row=grade_start + len(pool_grade_labels), end_column=warm_col)
 
         ws.cell(row=r, column=1, value="Total").font = F8B
         ws.cell(row=r, column=1).fill = TOT_FILL
@@ -4587,7 +4921,8 @@ def _sheet_detail_co_hist(wb, cu, snap, config, hist):
         rc_pools = rc_monthly.get(ym, {})
         all_pool_keys = set(list(co_pools.keys()) + list(rc_pools.keys()))
         for p in all_pool_keys:
-            net_monthly[ym][p] = co_pools.get(p, 0) - rc_pools.get(p, 0)
+            net_monthly[ym][p] = abs(co_pools.get(p, 0) or 0) \
+                                 - abs(rc_pools.get(p, 0) or 0)
 
     r, _, _ = _write_section(
         ws, r, "Net Loss", net_monthly, pools,
@@ -4621,6 +4956,17 @@ def compose_tct(client, snap, df, config, grades, hist=None):
     no_score = config.get('no_score_label', 'Not Reported')
     pools = _sort_pools(df['loan_pool'].unique(), config)
 
+    # Install any CU-specific distribution-factor table for this report run
+    # (percentages, one per grade position). Absent/invalid -> standard table.
+    global _ACTIVE_DIST_FACTORS
+    _cfg_df = config.get('distribution_factors')
+    if isinstance(_cfg_df, (list, tuple)) and _cfg_df:
+        try:
+            _ACTIVE_DIST_FACTORS = [float(x) for x in _cfg_df]
+        except (TypeError, ValueError):
+            _ACTIVE_DIST_FACTORS = None
+    else:
+        _ACTIVE_DIST_FACTORS = None
     # Use WARM pool order when available; keep any pools missing from WARM
     # (e.g. non-risk-rated pools) appended at the end.
     _imp = (hist or {}).get('impaired', {})
@@ -4687,6 +5033,13 @@ def compose_tct(client, snap, df, config, grades, hist=None):
 
     # Grade Ranges & Loan Codes
     _sheet_grade_config(wb, grades, config)
+
+    # Change Analysis (period-over-period) — always last.
+    try:
+        from change_analysis import append_change_analysis
+        append_change_analysis(wb, cu, snap, config, "TCT_Model")
+    except Exception as _ce:  # noqa: BLE001
+        print(f"  Change Analysis sheet skipped: {_ce}")
 
     safe_cu = cu.replace(' ', '_').replace('/', '-')
     fname = f"{snap}_CECL_Migration_{safe_cu}_TCT_Model.xlsx"

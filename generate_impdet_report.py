@@ -24,8 +24,15 @@ from openpyxl.styles import (
 from openpyxl.utils import get_column_letter
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from cecl_engine import assign_credit_grade, build_grade_order
-from import_data import derive_member_account, _normalize_col_map_for_no_header
+from cecl_engine import (
+    assign_credit_grade,
+    assign_business_risk_grade,
+    build_grade_order,
+)
+from import_data import (
+    derive_member_account, _normalize_col_map_for_no_header, _excel_idx_to_letter,
+    extract_snapshot_date,
+)
 
 load_dotenv()
 # Honour CECL_WORKSPACE_ROOT so the data root can be decoupled from the
@@ -67,6 +74,35 @@ def load_config(client):
     path = os.path.join(CFG_DIR, f'{client}.yaml')
     with open(path, 'r', encoding='utf-8') as f:
         cfg = yaml.safe_load(f)
+    # Normalize the 'Ignore' sentinel to the canonical 'Exclude' so downstream
+    # filters drop these rows uniformly. Mirrors generate_report.load_config.
+    pm = cfg.get('pool_map') or {}
+    if any(v == 'Ignore' for v in pm.values()):
+        cfg['pool_map'] = {
+            k: ('Exclude' if v == 'Ignore' else v) for k, v in pm.items()
+        }
+    if cfg.get('default_pool') == 'Ignore':
+        cfg['default_pool'] = 'Exclude'
+    # Strip pools literally named 'Ignore' or 'Exclude' from the registries so
+    # pool enumerators don't render an empty bucket.
+    _SENTINELS = {'ignore', 'exclude'}
+    pools_list = cfg.get('pools')
+    if isinstance(pools_list, list):
+        cfg['pools'] = [
+            p for p in pools_list
+            if not (
+                (isinstance(p, dict)
+                 and str(p.get('name', '')).strip().lower() in _SENTINELS)
+                or (isinstance(p, str) and p.strip().lower() in _SENTINELS)
+            )
+        ]
+    for _key in ('risk_rated', 'not_risk_rated', 'pool_order'):
+        _val = cfg.get(_key)
+        if isinstance(_val, list):
+            cfg[_key] = [
+                p for p in _val
+                if not (isinstance(p, str) and p.strip().lower() in _SENTINELS)
+            ]
     excl = set((cfg.get('excluded_pools') or []))
     if excl:
         pm = cfg.get('pool_map') or {}
@@ -85,8 +121,15 @@ def load_loans(cu, snap, config=None):
     )
     if df is None or df.empty or 'loan_pool' not in df.columns:
         return df
+    # Older databases may predate the Business Risk Rating column.
+    if 'business_risk_rating' not in df.columns:
+        df['business_risk_rating'] = None
     excl = set((config.get('excluded_pools') or [])) if config else set()
+    # 'Exclude' is the canonical sentinel; 'Ignore' is the legacy synonym
+    # written to monthly_loan_data when default_pool='Ignore' was active at
+    # import time. Drop both.
     excl.add('Exclude')
+    excl.add('Ignore')
     mask = df['loan_pool'].isin(excl)
     if mask.any():
         df = df.loc[~mask].copy()
@@ -106,6 +149,44 @@ def snap_display(snap):
     """Format '2025-12-31' → '12/31/2025'."""
     d = datetime.strptime(snap, '%Y-%m-%d')
     return d.strftime('%m/%d/%Y')
+
+
+def _apply_brr_overrides(df, config, no_score):
+    """In-place BRR override of ``original_grade``/``current_grade``.
+
+    Loans whose pool is flagged ``brr: true`` in the CU config are
+    re-graded from their stored ``business_risk_rating`` value through
+    :func:`assign_business_risk_grade`. Without active BRR config, this
+    is a no-op so non-BRR CUs are unaffected. The Improved/Deteriorated
+    report keeps a single rating per BRR loan (the wizard only captures
+    one BRR snapshot), so current_grade == original_grade → ``ncc_status``
+    naturally falls through to "Unchanged" for those rows.
+    """
+    if df is None or df.empty:
+        return df
+    if 'loan_pool' not in df.columns:
+        return df
+    brr_pools = {
+        (p or {}).get('name') for p in (config.get('pools') or [])
+        if (p or {}).get('brr') and (p or {}).get('name')
+    }
+    brr_rules = config.get('business_risk_ratings') or []
+    if not brr_pools or not brr_rules:
+        return df
+    mask = df['loan_pool'].isin(brr_pools)
+    if not mask.any():
+        return df
+    brr_col = (
+        df['business_risk_rating']
+        if 'business_risk_rating' in df.columns
+        else pd.Series([None] * len(df), index=df.index)
+    )
+    brr_labels = brr_col[mask].apply(
+        lambda v: assign_business_risk_grade(v, brr_rules, no_score)
+    )
+    df.loc[mask, 'original_grade'] = brr_labels
+    df.loc[mask, 'current_grade'] = brr_labels
+    return df
 
 
 def loan_ncc_status(orig_grade, cur_grade, grade_labels, n_top=3, no_score='Not Reported'):
@@ -753,14 +834,40 @@ _EXTRACT_FIELDS = [
 ]
 
 
-def _resolve_extract_path(file_pattern, search_dirs):
-    """Find the first file in any search_dir whose name matches file_pattern."""
+def _resolve_extract_path(file_pattern, search_dirs, snap=None, config=None):
+    """Find a file in any search_dir whose name matches file_pattern.
+
+    ``file_pattern`` accepts either a single regex string or a list of regex
+    strings (multi-pattern, first-match-wins). Empty/None returns ``None``.
+    Invalid regexes are skipped.
+
+    When ``snap`` is given, prefer the matching file whose filename date
+    resolves to the same year-month as the report snapshot. Several months of
+    the same extract (e.g. ``Aires Loans Dec 2025`` and ``Aires Loans Jun
+    2026``) commonly live side-by-side in the import Archive, so a plain
+    first-match would enrich a June report with December loan detail and
+    leave every loan opened since December unmatched. If no filename resolves
+    to the snapshot month, fall back to the first match (preserves behavior
+    for extracts that ship only one dated file, e.g. an annual Visa export).
+    """
     if not file_pattern:
         return None
-    try:
-        rx = re.compile(file_pattern)
-    except re.error:
+    if isinstance(file_pattern, str):
+        raw_patterns = [file_pattern]
+    elif isinstance(file_pattern, (list, tuple)):
+        raw_patterns = [p for p in file_pattern if isinstance(p, str) and p]
+    else:
         return None
+    compiled = []
+    for p in raw_patterns:
+        try:
+            compiled.append(re.compile(p))
+        except re.error:
+            continue
+    if not compiled:
+        return None
+
+    matches: list[str] = []
     for sdir in search_dirs:
         if not sdir or not os.path.isdir(sdir):
             continue
@@ -768,9 +875,31 @@ def _resolve_extract_path(file_pattern, search_dirs):
             for f in files:
                 if f.startswith('~$') or f.upper().startswith('DNU'):
                     continue
-                if rx.search(f):
-                    return os.path.join(root, f)
-    return None
+                if any(rx.search(f) for rx in compiled):
+                    matches.append(os.path.join(root, f))
+    if not matches:
+        return None
+
+    snap_ym = str(snap)[:7] if snap else ''
+    if snap_ym:
+        dated: list[tuple[str, str]] = []  # (iso_date, path)
+        for path in matches:
+            try:
+                iso = extract_snapshot_date(os.path.basename(path), config or {})
+            except Exception:  # noqa: BLE001
+                iso = None
+            if iso and str(iso)[:7] == snap_ym:
+                return path  # exact report-month file wins
+            if iso:
+                dated.append((str(iso), path))
+        # No exact report-month file: prefer the most recent dated file that
+        # is not AFTER the snapshot (closest prior period), so a June report
+        # falls back to May detail rather than an arbitrary or newer file.
+        prior = sorted((iso, p) for iso, p in dated if iso[:7] <= snap_ym)
+        if prior:
+            return prior[-1][1]
+    # No snapshot-month match (or no snap requested): first match wins.
+    return matches[0]
 
 
 def _split_suffix_for_row(member_only, full_account, ma_cfg, raw_suffix):
@@ -800,7 +929,7 @@ def _split_suffix_for_row(member_only, full_account, ma_cfg, raw_suffix):
     return ''
 
 
-def _load_extract_enrichment(config, workspace_root):
+def _load_extract_enrichment(config, workspace_root, snap=None):
     """Read configured loan extract files to populate the All Loans tab
     fields that don't live in monthly_loan_data (loan_type, open_date,
     interest_rate, days_delinquent, original_loan_amount,
@@ -858,11 +987,12 @@ def _load_extract_enrichment(config, workspace_root):
         col_map = dict(ex.get('column_mappings') or {})
         if not col_map:
             continue
-        path = _resolve_extract_path(ex.get('file_pattern'), search_dirs)
+        path = _resolve_extract_path(ex.get('file_pattern'), search_dirs, snap, config)
         if not path:
             tried = ", ".join(search_dirs) if search_dirs else "(no directories)"
             print(f"    Extract '{ex.get('label')}' not found in: {tried}; skipping enrichment.")
             continue
+        print(f"    Extract '{ex.get('label')}': using {os.path.basename(path)}")
         has_header = ex.get('has_header', True)
         try:
             hr_cfg = int(ex.get('header_row') or 0)
@@ -876,7 +1006,22 @@ def _load_extract_enrichment(config, workspace_root):
                     df = pd.read_csv(path, header=pd_header)
                 else:
                     df = pd.read_excel(path, header=pd_header)
-                df.columns = [str(c).strip() for c in df.columns]
+                # Mirror import_data's header normalisation: collapse
+                # internal whitespace (wrap-text headers often have CR/LF
+                # inside a single cell) and rewrite blank / 'nan' /
+                # pandas 'Unnamed: N' placeholders to ``col_<LETTER>`` so
+                # the wizard-saved column_mappings resolve correctly.
+                _unnamed_rx = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$",
+                                          re.IGNORECASE)
+                _normed = []
+                for _i, _c in enumerate(df.columns):
+                    _s = re.sub(r"\s+", " ", str(_c)).strip() if _c is not None else ""
+                    _low = _s.lower()
+                    if (not _s) or _low == "nan" or _unnamed_rx.match(_s):
+                        _normed.append(f"col_{_excel_idx_to_letter(_i)}")
+                    else:
+                        _normed.append(_s)
+                df.columns = _normed
             else:
                 if ext_lc == '.csv':
                     df = pd.read_csv(path, header=None)
@@ -917,6 +1062,7 @@ def _load_extract_enrichment(config, workspace_root):
             'days_delinquent':        'days_delinquent',
             'original_loan_amount':   'original_loan_amount',
             'total_available_credit': 'total_available_credit',
+            'current_balance':        'current_balance',
         }
         # Pre-resolve column series once per field
         field_series = {}
@@ -1000,6 +1146,8 @@ def generate_report(client, snap=None):
         df['current_grade'] = df['current_fico_score'].apply(
             lambda s: assign_credit_grade(int(s) if pd.notna(s) else 0, grades, no_score)
         )
+        # Business Risk Rating override for flagged pools.
+        _apply_brr_overrides(df, config, no_score)
 
         # Per-loan NCC status using our top_grades_double_drop logic
         not_risk_rated = set(config.get('not_risk_rated', []))
@@ -1038,6 +1186,8 @@ def generate_report(client, snap=None):
         df['current_grade'] = df['current_fico_score'].apply(
             lambda s: assign_credit_grade(s, grades, no_score)
         )
+        # Business Risk Rating override for flagged pools.
+        _apply_brr_overrides(df, config, no_score)
 
         # Per-loan NCC status
         not_risk_rated = set(config.get('not_risk_rated', []))
@@ -1062,7 +1212,34 @@ def generate_report(client, snap=None):
         # All Loans tab has Member#/Suffix split + Loan Type / Open Date /
         # Interest Rate / Days Delinquent / Original Loan Amount / Credit
         # Limit even without a WARM workbook on disk.
-        enrich = _load_extract_enrichment(config, BASE)
+        enrich = _load_extract_enrichment(config, BASE, snap)
+
+        # Safety net: the All Loans detail columns (Loan Type / Open Date /
+        # Interest Rate / Days Delinquent / Original Loan Amount / Suffix)
+        # are joined from the loan extract by account number. If the chosen
+        # extract is stale — e.g. its file_pattern is pinned to an older
+        # month and never matches the report-period file — a large share of
+        # loans won't match and their detail cells come out blank. Surface
+        # the coverage and warn loudly so this is caught before the report
+        # ships, for every CU.
+        if enrich:
+            _keys = set(enrich.keys())
+            _acct = df['member_number'].astype(str).str.strip()
+            _total = len(df)
+            _matched = int(_acct.isin(_keys).sum())
+            _missing = _total - _matched
+            _pct = (_missing / _total * 100.0) if _total else 0.0
+            print(f"  Extract enrichment coverage: {_matched}/{_total} loans matched"
+                  f" ({_missing} unmatched, {_pct:.1f}% blank detail)")
+            if _total and _pct >= 5.0:
+                print(
+                    f"  *** WARNING: {_missing} of {_total} loans ({_pct:.1f}%) matched no"
+                    f" loan-extract row, so their All Loans detail columns (Loan Type /"
+                    f" Open Date / Rate / Days Delinquent / Original Amount / Suffix) will"
+                    f" be BLANK. This usually means a loan_data_extracts file_pattern did"
+                    f" not match the {snap} file (e.g. it is pinned to an older month) and"
+                    f" a stale extract was used — check the 'using <file>' lines above."
+                )
 
         def _enr_get(acct, field, default=None):
             row = enrich.get(str(acct).strip()) if enrich else None

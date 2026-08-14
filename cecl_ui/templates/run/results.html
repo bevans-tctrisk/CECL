@@ -23,6 +23,13 @@
     </ul>
   {% endif %}
 
+  {% if hybrid_notes %}
+    <h3>Hybrid schema router</h3>
+    <ul class="report-list">
+      {% for n in hybrid_notes %}<li class="muted"><code>{{ n }}</code></li>{% endfor %}
+    </ul>
+  {% endif %}
+
   {% if not outputs and not errors %}
     <p class="muted">No reports were generated.</p>
   {% endif %}

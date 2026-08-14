@@ -12,6 +12,15 @@
     <a class="btn btn-secondary" href="{{ url_for('run.edit_pool_map', short_name=short_name) }}">
       Edit Loan Code Mapping
     </a>
+    <a class="btn btn-secondary" href="{{ url_for('run.balance_compare', short_name=short_name) }}">
+      Loan Comparison by Pool
+    </a>
+    <a class="btn btn-secondary" href="{{ url_for('run.upload_impaired_form', short_name=short_name) }}">
+      Upload Impaired Loans Report
+    </a>
+    <a class="btn btn-secondary" href="{{ url_for('run.oac_overrides', short_name=short_name) }}">
+      Other Allowance Considerations
+    </a>
   </p>
 </div>
 
@@ -49,6 +58,106 @@
   <form method="post" action="{{ url_for('run.import_data', short_name=short_name) }}">
     <button class="btn btn-secondary" type="submit">Run Importer</button>
   </form>
+
+  <div style="margin-top:14px; padding-top:12px; border-top:1px solid #eee;">
+    <strong>Re-import a previous period</strong>
+    <p class="help" style="margin:4px 0 8px;">
+      For outlier cases only. Pulls just that month&rsquo;s loan files from the
+      credit union&rsquo;s source folder, re-imports only that snapshot
+      (replacing it), and cleans up &mdash; the current period stays untouched.
+      For a normal older-period report you don&rsquo;t need this: just pick the
+      snapshot date under <em>Generate reports</em>.
+    </p>
+    <form method="post" action="{{ url_for('run.reimport_period', short_name=short_name) }}"
+          style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <input type="text" name="period" placeholder="YYYY-MM (e.g. 2025-06)"
+             pattern="\d{4}-\d{2}(-\d{2})?" required style="width:180px;">
+      <button class="btn btn-secondary" type="submit">Re-import period</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Set ACL (allowance) balance</h3>
+  <p class="muted">
+    Override the month-end ACL balance directly &mdash; no re-import or wizard needed.
+    Saved to <code>acl.history</code> in the config and applied on the next report run.
+  </p>
+  <form method="post" action="{{ url_for('run.set_acl', short_name=short_name) }}"
+        style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+    <label>Month-end
+      {% if snapshots %}
+        <select name="acl_month">
+          {% for s in snapshots %}
+            <option value="{{ s }}" {% if s == report_period_end %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <input type="text" name="acl_month" placeholder="YYYY-MM or YYYY-MM-DD"
+               value="{{ report_period_end or '' }}">
+      {% endif %}
+    </label>
+    <label>New ACL balance
+      <input type="text" name="acl_balance" placeholder="e.g. 232825.00"
+             value="{% if report_period_end and acl_history.get(report_period_end) is not none %}{{ '%.2f'|format(acl_history.get(report_period_end)) }}{% endif %}">
+    </label>
+    <button class="btn btn-primary" type="submit">Save ACL Balance</button>
+  </form>
+
+  {% if acl_history %}
+    <h4 style="margin-top:18px;">Current ACL balances by month-end:</h4>
+    <ul style="list-style:none; padding-left:0;">
+      {% for d, v in acl_history.items() | sort %}
+        <li style="margin:2px 0;">
+          <code>{{ d }}</code> &mdash; ${{ '{:,.2f}'.format(v|float) }}
+          {% if d == report_period_end %}<span class="muted">(current period)</span>{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Edit economic data (environmental factors)</h3>
+  <p class="muted">
+    These figures feed the environmental-factor (Q-factor) overlay applied on
+    top of the WARM baseline. Saved to <code>economic_data</code> in the config
+    and applied on the next report run. Leave a field blank to keep its current
+    value.
+  </p>
+  <form method="post" action="{{ url_for('run.set_economic', short_name=short_name) }}"
+        style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+    <label>State
+      <input type="text" name="state"
+             value="{{ economic_data.get('state', '') }}">
+    </label>
+    <label>County
+      <input type="text" name="county"
+             value="{{ economic_data.get('county', '') }}">
+    </label>
+    <label>Unemployment rate (decimal)
+      <input type="number" step="0.001" min="0" max="1" name="unemployment_rate"
+             value="{{ economic_data.get('unemployment_rate', '') }}">
+    </label>
+    <label>Population
+      <input type="number" min="0" name="population"
+             value="{{ economic_data.get('population', '') }}">
+    </label>
+    <label>Bankruptcies (count)
+      <input type="number" min="0" name="bankruptcies"
+             value="{{ economic_data.get('bankruptcies', '') }}">
+    </label>
+    <label>Foreclosures (count)
+      <input type="number" min="0" name="foreclosures"
+             value="{{ economic_data.get('foreclosures', '') }}">
+    </label>
+    <button class="btn btn-primary" type="submit">Save Economic Data</button>
+  </form>
+  <p class="help" style="margin-top:8px;">
+    Unemployment rate is a decimal (e.g. <code>0.031</code> = 3.1%). For full
+    state/county auto-fetch from BLS / Census / U.S. Courts, use the setup
+    wizard's Economic Data step.
+  </p>
 </div>
 
 <div class="card">
@@ -74,11 +183,50 @@
       Vizo Supplemental Report</label>
     <label><input type="checkbox" name="impdet" {% if cfg.reports and cfg.reports.impdet %}checked{% endif %}>
       Improved / Deteriorated Loans Report</label>
+    <label><input type="checkbox" name="mgmt_adj_napkin"
+        {% if cfg.reports is not defined or cfg.reports.get('mgmt_adj_napkin', True) %}checked{% endif %}>
+      Management Adjustment Worksheet</label>
 
     <div class="btn-row">
       <a class="btn btn-secondary" href="{{ url_for('run.select_cu') }}">&larr; CU list</a>
       <button class="btn btn-success" type="submit">Generate Selected Reports</button>
     </div>
   </form>
+</div>
+
+<div class="card">
+  <h3>Preview report in browser <span class="muted">(beta)</span></h3>
+  <p class="help">Open the generated Vizo report as a web page, or download a
+    print-ready PDF. Generate the report first, then pick its snapshot.</p>
+  {% if snapshots %}
+  <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end;">
+    <label>Snapshot
+      <select id="pv-snap">
+        {% for s in snapshots %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Report
+      <select id="pv-type">
+        <option value="vizo">Vizo Model</option>
+        <option value="supp">Vizo Supplemental</option>
+      </select>
+    </label>
+  </div>
+  <div class="btn-row">
+    <button type="button" class="btn btn-secondary" onclick="openReportWeb('')">Preview in browser</button>
+    <button type="button" class="btn btn-primary" onclick="openReportWeb('/pdf')">Download PDF</button>
+  </div>
+  <script>
+    function openReportWeb(suffix) {
+      var snap = document.getElementById('pv-snap').value;
+      var type = document.getElementById('pv-type').value;
+      var base = "{{ url_for('report_web.preview', short_name=short_name, snapshot='__SNAP__') }}";
+      var url = base.replace('__SNAP__', encodeURIComponent(snap)) + suffix + '?type=' + type;
+      window.open(url, '_blank');
+    }
+  </script>
+  {% else %}
+  <span class="help">No snapshots yet &mdash; run the importer and generate a report first.</span>
+  {% endif %}
 </div>
 {% endblock %}

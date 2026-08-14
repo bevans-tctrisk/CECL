@@ -31,6 +31,13 @@
       do not appear in any totals, charts, or per-pool sheets.
       Leave ACL Months blank to use whatever is detected from the WARM file
       or carried forward from the prior TCT report.
+      <strong>Mgmt Adj (%)</strong> is an optional per-pool overlay added on
+      top of that pool's base loss rate (positive increases the allowance,
+      negative decreases it) &mdash; the same value set on the setup wizard's
+      Mgmt Adjustments step. Leave blank or <code>0</code> for no adjustment.
+      Check <strong>Use Default Mgmt Adj</strong> to apply the industry
+      default management adjustment for that pool (the same option as the
+      setup wizard's Mgmt Adjustments step).
     </p>
     {% if not rows %}
       <p><em>No pools found yet. Run an import first so we know which pools exist.</em></p>
@@ -48,6 +55,8 @@
           <th style="padding:6px 8px;">Pool</th>
           <th style="padding:6px 8px;">Risk Rated</th>
           <th style="padding:6px 8px;">ACL Months</th>
+          <th style="padding:6px 8px; text-align:center;" title="Apply the industry default management adjustment to this pool (same as the setup wizard's Mgmt Adjustments step)">Use Default Mgmt Adj</th>
+          <th style="padding:6px 8px;">Mgmt Adj (%)</th>
         </tr>
       </thead>
       <tbody id="pools-tbody">
@@ -76,6 +85,19 @@
             <input type="number" name="acl_{{ loop.index0 }}" class="acl-input"
                    value="{{ r.acl_months }}" min="0" max="240"
                    style="width:90px;" placeholder="(auto)">
+          </td>
+          <td style="padding:4px 8px; text-align:center;">
+            <input type="checkbox" name="usedef_{{ loop.index0 }}" class="usedef-input"
+                   {% if r.use_default %}checked{% endif %}
+                   title="Use the industry default management adjustment for this pool">
+          </td>
+          <td style="padding:4px 8px;">
+            <span style="display:inline-flex; align-items:center; gap:4px;">
+              <input type="number" name="madj_{{ loop.index0 }}" class="madj-input"
+                     step="any" value="{{ r.mgmt_adj_pct }}"
+                     style="width:90px;" placeholder="0">
+              <span class="muted">%</span>
+            </span>
           </td>
         </tr>
         {% endfor %}
@@ -117,9 +139,13 @@
     rows.forEach((tr, i) => {
       const sel = tr.querySelector('select.rr-select');
       const acl = tr.querySelector('input.acl-input');
+      const madj = tr.querySelector('input.madj-input');
+      const usedef = tr.querySelector('input.usedef-input');
       const num = tr.querySelector('span.row-num');
       if (sel) sel.name = 'rr_' + i;
       if (acl) acl.name = 'acl_' + i;
+      if (madj) madj.name = 'madj_' + i;
+      if (usedef) usedef.name = 'usedef_' + i;
       if (num) num.textContent = (i + 1).toString();
     });
   }

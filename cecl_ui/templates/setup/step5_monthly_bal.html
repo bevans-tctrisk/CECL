@@ -2,8 +2,17 @@
 {% block title %}Monthly Balance File{% endblock %}
 {% block content %}
 {% include "setup/_stepper.html" %}
+{% from "setup/_files_used_panel.html" import files_used_panel %}
 
 {% set source = mb.source or 'single' %}
+
+{% if files_used %}
+{{ files_used_panel(files_used,
+   "This is the month-end balance source the report will use. When the credit
+    union supplies balance files they&rsquo;re listed below; when balances are
+    derived from the imported loan extracts, the origin is described so you can
+    still validate the numbers.") }}
+{% endif %}
 
 <div class="card">
   <h2>Monthly Balance File</h2>
@@ -154,7 +163,7 @@
     Tell us where the data lives in the workbook. (Auto-detection will be
     added &mdash; for now please confirm by hand.)
   </p>
-  <form method="post">
+  <form method="post" enctype="multipart/form-data">
     <table style="border-collapse:collapse; font-size:13px;">
       <tr>
         <th style="text-align:left; padding:4px 10px;">Sheet name</th>
@@ -286,7 +295,6 @@
       <button class="btn btn-primary" type="submit"
               name="action" value="next">Save &amp; Next &rarr;</button>
     </div>
-  </form>
 </div>
 
 {# ── 3. Allowance for Credit Loss (ACL) ── #}
@@ -306,10 +314,10 @@
     needed for this quarter&rsquo;s reports.
   </p>
 
-  <form method="post" enctype="multipart/form-data">
     <div style="margin:8px 0;">
       <label style="display:block; margin:6px 0;">
         <input type="radio" name="acl_source" value="monthly_file"
+               onchange="window._aclSetSource && window._aclSetSource(this)"
                {% if acl_src == 'monthly_file' %}checked{% endif %}>
         <strong>1. Pull from this Monthly Balance file.</strong>
         <span class="muted">
@@ -328,10 +336,11 @@
               <td style="padding:4px 10px;">
                 <input type="number" name="acl_row" min="1"
                        value="{{ acl.row or '' }}" style="width:80px;">
-                {% if mb.filename %}
+                {% if mb.filename or (mb.monthly_files and mb.monthly_files|length > 0) %}
                   <button class="btn btn-secondary" type="submit"
                           name="action" value="acl_refresh_row"
-                          style="margin-left:6px;">Refresh history</button>
+                          style="margin-left:6px;"
+                          title="Re-read the ACL row number above from every uploaded balance file.">Refresh history</button>
                 {% endif %}
                 <button class="btn btn-secondary" type="submit"
                         name="action" value="acl_scan_balance_files"
@@ -386,6 +395,7 @@
 
       <label style="display:block; margin:6px 0;">
         <input type="radio" name="acl_source" value="separate"
+               onchange="window._aclSetSource && window._aclSetSource(this)"
                {% if acl_src == 'separate' %}checked{% endif %}>
         <strong>2. Upload a separate file.</strong>
         <span class="muted">
@@ -441,6 +451,7 @@
 
       <label style="display:block; margin:6px 0;">
         <input type="radio" name="acl_source" value="manual"
+               onchange="window._aclSetSource && window._aclSetSource(this)"
                {% if acl_src == 'manual' %}checked{% endif %}>
         <strong>3. Manually enter the ACL balance.</strong>
         <span class="muted">
@@ -463,7 +474,7 @@
               <tr>
                 <td style="padding:4px 10px;">{{ loop.index }}</td>
                 <td style="padding:4px 10px;">
-                  <input type="text" name="acl_manual_{{ k }}_date"
+                  <input type="date" name="acl_manual_{{ k }}_date"
                          value="{{ acl_man[k+'_date'] or '' }}"
                          placeholder="YYYY-MM-DD" style="width:140px;">
                 </td>
@@ -479,6 +490,8 @@
       </div>
       {% endif %}
     </div>
+
+    {% include 'setup/_acl_5300_fallback.html' %}
 
     <div class="btn-row" style="margin-top:12px;">
       <button class="btn btn-secondary" type="submit"
@@ -688,6 +701,10 @@
       pools. Leave blank to ignore a label. Rows are pre-populated from
       labels auto-detected on the uploads above &mdash; add or edit as
       needed.
+      {% if label_balance_period %}
+        Balance column shows the value from
+        <strong>{{ label_balance_period }}</strong>.
+      {% endif %}
     </p>
     {# Build label list: union of auto-detected parsed_pool_labels and any
        labels already present in the saved pool_map. Keeps user-typed
@@ -709,15 +726,24 @@
       <thead>
         <tr>
           <th style="text-align:left; padding:4px 10px;">Label in file</th>
+          <th style="text-align:right; padding:4px 10px;">Latest balance</th>
           <th style="text-align:left; padding:4px 10px;">Wizard pool</th>
         </tr>
       </thead>
       <tbody>
         {% for label in pm_labels %}
+          {% set _bal = (label_balances or {}).get(label|lower) %}
           <tr>
             <td style="padding:4px 10px;">
               <input type="text" name="map_label" value="{{ label }}"
                      style="width:280px;">
+            </td>
+            <td style="padding:4px 10px; text-align:right; font-variant-numeric: tabular-nums; color:#444;">
+              {% if _bal is not none %}
+                ${{ '{:,.0f}'.format(_bal) }}
+              {% else %}
+                <span class="muted">&mdash;</span>
+              {% endif %}
             </td>
             <td style="padding:4px 10px;">
               <select name="map_pool" style="width:240px;">
@@ -737,6 +763,9 @@
           <td style="padding:4px 10px;">
             <input type="text" name="map_label" value="" style="width:280px;">
           </td>
+          <td style="padding:4px 10px; text-align:right;">
+            <span class="muted">&mdash;</span>
+          </td>
           <td style="padding:4px 10px;">
             <select name="map_pool" style="width:240px;">
               <option value="">&mdash; ignore &mdash;</option>
@@ -749,18 +778,108 @@
       </tbody>
     </table>
 
-    {# ACL still applies in per_month mode — re-use the existing block by
-       including a stripped-down version: just the radios + manual fields.
-       Source-mode "monthly_file" is replaced with separate or manual here. #}
+    {# ACL still applies in per_month mode. Users can either pull the ACL
+       row from each uploaded balance sheet, upload a separate file, or
+       enter values manually. #}
     {% set acl = mb.acl or {} %}
-    {% set acl_src = acl.source or 'manual' %}
+    {% set acl_src = acl.source or 'monthly_file' %}
+    {% set acl_hist = acl.history or {} %}
     {% set acl_man = acl.manual or {} %}
     <h4 style="margin-top:18px;">Allowance for Credit Loss (ACL)</h4>
     <p class="muted">
       A single ACL balance per month is needed for the reports. Pick a
-      source below (the &ldquo;monthly file&rdquo; option is only available
-      in single-file mode).
+      source below.
     </p>
+
+    <label style="display:block; margin:4px 0;">
+      <input type="radio" name="acl_source" value="monthly_file"
+             {% if acl_src == 'monthly_file' %}checked{% endif %}>
+      <strong>Pull from each monthly balance file.</strong>
+      <span class="muted">
+        The wizard auto-detects the row that holds the ACL balance.
+        You can override the row number if it picked the wrong one.
+      </span>
+    </label>
+
+    {% if acl_src == 'monthly_file' %}
+      <div style="margin:6px 0 14px 28px;">
+        {% if mb.monthly_files and mb.monthly_files|length > 0 %}
+          <table style="border-collapse:collapse; font-size:13px;">
+            <tr>
+              <th style="text-align:left; padding:4px 10px;">ACL row (1-based)</th>
+              <td style="padding:4px 10px;">
+                <input type="number" name="acl_row" min="1"
+                       value="{{ acl.row or '' }}" style="width:80px;">
+              </td>
+            </tr>
+            <tr>
+              <th style="text-align:left; padding:4px 10px;">ACL column (letter)</th>
+              <td style="padding:4px 10px;">
+                <input type="text" name="acl_col" maxlength="3"
+                       value="{{ acl.col or '' }}"
+                       placeholder="auto"
+                       style="width:80px; text-transform:uppercase;">
+                <span class="muted">leave blank to use the auto-detected
+                  balance column ({{ pm.balance_col or '?' }})</span>
+              </td>
+            </tr>
+            <tr>
+              <th></th>
+              <td style="padding:4px 10px;">
+                <button class="btn btn-secondary" type="submit"
+                        name="action" value="acl_refresh_row"
+                        title="Re-read the ACL row/column above from every uploaded balance file.">Refresh history</button>
+                <button class="btn btn-secondary" type="submit"
+                        name="action" value="acl_scan_balance_files"
+                        style="margin-left:6px;"
+                        title="Auto-detect the ACL row in every uploaded balance file and refresh the history table below.">
+                  Scan uploaded balance files
+                </button>
+                {% if acl.label %}
+                  <span class="muted" style="margin-left:8px;">
+                    Detected label: <strong>{{ acl.label }}</strong>
+                  </span>
+                {% endif %}
+              </td>
+            </tr>
+          </table>
+          {% if acl_hist %}
+            <p class="muted" style="margin:8px 0 4px 0;">
+              <strong>Historical ACL balances</strong>
+              ({{ acl_hist|length }} month{{ '' if acl_hist|length == 1 else 's' }}):
+            </p>
+            <table style="border-collapse:collapse; font-size:13px;">
+              <thead>
+                <tr>
+                  <th style="text-align:left; padding:4px 10px; border-bottom:1px solid #ccc;">Month-end</th>
+                  <th style="text-align:right; padding:4px 10px; border-bottom:1px solid #ccc;">ACL Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for d, v in acl_hist|dictsort %}
+                  <tr>
+                    <td style="padding:3px 10px;">{{ d }}</td>
+                    <td style="padding:3px 10px; text-align:right; font-variant-numeric:tabular-nums;">
+                      ${{ '{:,.2f}'.format(v) }}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% else %}
+            <p class="muted" style="margin-top:8px;">
+              No ACL row detected yet. Click
+              <em>Scan uploaded balance files</em> to auto-detect, or set
+              the row number above and refresh.
+            </p>
+          {% endif %}
+        {% else %}
+          <p class="muted">Upload at least one monthly balance file in
+            Section 1 to enable auto-detection.</p>
+        {% endif %}
+      </div>
+    {% endif %}
+
     <label style="display:block; margin:4px 0;">
       <input type="radio" name="acl_source" value="separate"
              {% if acl_src == 'separate' %}checked{% endif %}>
@@ -768,7 +887,7 @@
     </label>
     <label style="display:block; margin:4px 0;">
       <input type="radio" name="acl_source" value="manual"
-             {% if acl_src != 'separate' %}checked{% endif %}>
+             {% if acl_src == 'manual' %}checked{% endif %}>
       Enter manually:
     </label>
     <table style="border-collapse:collapse; font-size:13px; margin-left:24px;">
@@ -782,7 +901,7 @@
         {% for k in ['month1','month2','month3'] %}
           <tr>
             <td style="padding:4px 10px;">
-              <input type="text" name="acl_manual_{{ k }}_date"
+              <input type="date" name="acl_manual_{{ k }}_date"
                      value="{{ acl_man[k+'_date'] or '' }}"
                      placeholder="YYYY-MM-DD" style="width:140px;">
             </td>
@@ -795,6 +914,8 @@
         {% endfor %}
       </tbody>
     </table>
+
+    {% include 'setup/_acl_5300_fallback.html' %}
 
     <div class="btn-row" style="margin-top:18px;">
       <button class="btn btn-secondary" type="submit"
@@ -928,6 +1049,10 @@
     <p class="muted">
       Map each pool/type label found in the annual files to one of this
       CU&rsquo;s pools. Leave blank to ignore a label.
+      {% if label_balance_period %}
+        Balance column shows the value from
+        <strong>{{ label_balance_period }}</strong>.
+      {% endif %}
     </p>
     {% set _parsed = mb.parsed_pool_labels or [] %}
     {% set _mapped = mb.pool_map.keys()|list %}
@@ -946,15 +1071,24 @@
       <thead>
         <tr>
           <th style="text-align:left; padding:4px 10px;">Label in file</th>
+          <th style="text-align:right; padding:4px 10px;">Latest balance</th>
           <th style="text-align:left; padding:4px 10px;">Wizard pool</th>
         </tr>
       </thead>
       <tbody>
         {% for label in py_labels %}
+          {% set _bal = (label_balances or {}).get(label|lower) %}
           <tr>
             <td style="padding:4px 10px;">
               <input type="text" name="map_label" value="{{ label }}"
                      style="width:280px;">
+            </td>
+            <td style="padding:4px 10px; text-align:right; font-variant-numeric: tabular-nums; color:#444;">
+              {% if _bal is not none %}
+                ${{ '{:,.0f}'.format(_bal) }}
+              {% else %}
+                <span class="muted">&mdash;</span>
+              {% endif %}
             </td>
             <td style="padding:4px 10px;">
               <select name="map_pool" style="width:240px;">
@@ -972,6 +1106,9 @@
         <tr>
           <td style="padding:4px 10px;">
             <input type="text" name="map_label" value="" style="width:280px;">
+          </td>
+          <td style="padding:4px 10px; text-align:right;">
+            <span class="muted">&mdash;</span>
           </td>
           <td style="padding:4px 10px;">
             <select name="map_pool" style="width:240px;">
@@ -1077,7 +1214,7 @@
         {% for k in ['month1','month2','month3'] %}
           <tr>
             <td style="padding:4px 10px;">
-              <input type="text" name="acl_manual_{{ k }}_date"
+              <input type="date" name="acl_manual_{{ k }}_date"
                      value="{{ acl_man[k+'_date'] or '' }}"
                      placeholder="YYYY-MM-DD" style="width:140px;">
             </td>
@@ -1090,6 +1227,8 @@
         {% endfor %}
       </tbody>
     </table>
+
+    {% include 'setup/_acl_5300_fallback.html' %}
 
     <div class="btn-row" style="margin-top:18px;">
       <button class="btn btn-secondary" type="submit"
@@ -1202,7 +1341,7 @@
         {% for k in ['month1','month2','month3'] %}
           <tr>
             <td style="padding:4px 10px;">
-              <input type="text" name="acl_manual_{{ k }}_date"
+              <input type="date" name="acl_manual_{{ k }}_date"
                      value="{{ acl_man[k+'_date'] or '' }}"
                      placeholder="YYYY-MM-DD" style="width:140px;">
             </td>
@@ -1216,6 +1355,8 @@
       </tbody>
     </table>
 
+    {% include 'setup/_acl_5300_fallback.html' %}
+
     <div class="btn-row" style="margin-top:18px;">
       <button class="btn btn-secondary" type="submit"
               name="action" value="back">&larr; Back</button>
@@ -1228,4 +1369,22 @@
   </form>
 </div>
 {% endif %}{# source == 'manual' #}
+
+<script>
+// When the user picks one of the ACL-source radios, auto-submit the
+// enclosing form with action=acl_set_source so the server re-renders
+// with the matching sub-panel (row override / separate-file uploader /
+// manual three-month entry). Without this, the panels stay hidden
+// until the user clicks "Save ACL settings".
+window._aclSetSource = function (radio) {
+  var form = radio.form;
+  if (!form) return;
+  var hidden = document.createElement('input');
+  hidden.type = 'hidden';
+  hidden.name = 'action';
+  hidden.value = 'acl_set_source';
+  form.appendChild(hidden);
+  form.submit();
+};
+</script>
 {% endblock %}

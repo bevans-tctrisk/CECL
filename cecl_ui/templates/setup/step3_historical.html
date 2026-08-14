@@ -156,24 +156,39 @@
       {% endif %}
 
       {% if active %}
+      {% set bulk_form_id = 'bulk-ignore-' ~ ignore_action %}
       <div class="flash info" style="margin:8px 0;">
         <strong>{{ active | length }} active layout(s)</strong>
-        &mdash; click <em>Ignore layout</em> to remove already-added
-        {{ kind_label }} files matching that header signature and skip
-        them on future scans.
+        &mdash; tick one or more rows and click <em>Ignore selected
+        layout(s)</em> to remove already-added {{ kind_label }} files
+        matching those header signatures and skip them on future scans.
+        <form method="post" id="{{ bulk_form_id }}" style="margin:0;">
+          <input type="hidden" name="action" value="{{ ignore_action }}">
+        </form>
         <table class="data-table"
                style="width:100%; margin-top:8px; background:#fff;">
           <thead>
             <tr>
+              <th style="width:36px; text-align:center;">
+                <input type="checkbox"
+                       onclick="var boxes=document.querySelectorAll('input[name=signature][form=&quot;{{ bulk_form_id }}&quot;]'); for (var i=0;i<boxes.length;i++){ boxes[i].checked=this.checked; }"
+                       title="Select / deselect all">
+              </th>
               <th>Sample file</th>
               <th style="width:90px; text-align:right;">Files</th>
               <th>Headers (first few)</th>
-              <th style="width:140px;"></th>
+              {% if columns_action %}
+                <th style="width:140px;"></th>
+              {% endif %}
             </tr>
           </thead>
           <tbody>
           {% for s in active %}
             <tr>
+              <td style="text-align:center;">
+                <input type="checkbox" name="signature" form="{{ bulk_form_id }}"
+                       value="{{ s.signature }}">
+              </td>
               <td>
                 <code>{{ s.sample_file }}</code>
                 <br>
@@ -188,47 +203,48 @@
                 {{ (s.sample_headers or [])[:6] | join(' | ') }}
                 {% if (s.sample_headers or []) | length > 6 %}&hellip;{% endif %}
               </td>
+              {% if columns_action %}
               <td>
-                <div style="display:flex; gap:6px; flex-wrap:wrap;
-                            justify-content:flex-end;">
-                  {% if columns_action and s.sample_path %}
-                  <form method="post" style="margin:0;">
-                    <input type="hidden" name="action"
-                           value="{{ columns_action }}">
-                    <input type="hidden" name="sample_path"
-                           value="{{ s.sample_path }}">
-                    <button class="btn btn-primary btn-sm" type="submit"
-                            style="padding:2px 10px; font-size:12px;"
-                            title="Load this file into the {{ kind_label }} Column Mapping card below.">
-                      Column Mapping
-                    </button>
-                  </form>
-                  {% endif %}
-                  <form method="post" style="margin:0;"
-                        onsubmit="return confirm('Ignore all {{ kind_label }} files with this header layout? Already-added matches will be removed.');">
-                    <input type="hidden" name="action"
-                           value="{{ ignore_action }}">
-                    <input type="hidden" name="signature"
-                           value="{{ s.signature }}">
-                    <button class="btn btn-secondary btn-sm" type="submit"
-                            style="padding:2px 10px; font-size:12px;">
-                      Ignore layout
-                    </button>
-                  </form>
-                </div>
+                {% if s.sample_path %}
+                <form method="post" style="margin:0;">
+                  <input type="hidden" name="action"
+                         value="{{ columns_action }}">
+                  <input type="hidden" name="sample_path"
+                         value="{{ s.sample_path }}">
+                  <button class="btn btn-primary btn-sm" type="submit"
+                          style="padding:2px 10px; font-size:12px;"
+                          title="Load this file into the {{ kind_label }} Column Mapping card below.">
+                    Column Mapping
+                  </button>
+                </form>
+                {% endif %}
               </td>
+              {% endif %}
             </tr>
           {% endfor %}
           </tbody>
         </table>
+        <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+          <button class="btn btn-secondary" type="submit"
+                  form="{{ bulk_form_id }}"
+                  style="font-size:12px;">
+            Ignore selected layout(s)
+          </button>
+          <span class="muted" style="font-size:11px;">
+            You can unignore any layout later from the table below.
+          </span>
+        </div>
       </div>
       {% endif %}
 
       {% if ignored %}
-      <div class="flash" style="margin:8px 0; background:#f5f5f5; border:1px solid #ddd;">
-        <strong>{{ ignored | length }} ignored layout(s)</strong>
-        &mdash; files matching these header signatures are excluded from
-        {{ kind_label }} processing.
+      <details class="flash" style="margin:8px 0; background:#f5f5f5; border:1px solid #ddd; padding:8px;">
+        <summary style="cursor:pointer;">
+          <strong>{{ ignored | length }} ignored layout(s)</strong>
+          &mdash; files matching these header signatures are excluded from
+          {{ kind_label }} processing.
+          <span class="muted" style="font-weight:normal;">(click to expand)</span>
+        </summary>
         <table class="data-table"
                style="width:100%; margin-top:8px; background:#fff;">
           <thead>
@@ -270,7 +286,7 @@
           {% endfor %}
           </tbody>
         </table>
-      </div>
+      </details>
       {% endif %}
     </div>
   {% endif %}
@@ -304,6 +320,52 @@
   <h3>1. Historical Loan Balances by Pool / Type
     <span class="badge-required">Required</span>
   </h3>
+
+  {% set prov = hist_balance_provenance or {} %}
+  {% if prov.recorded %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #b6d4e6; background:#eef6fb;">
+    <div style="font-weight:600; color:#20628a; margin-bottom:4px;">
+      &#9432; How these balances were compiled
+    </div>
+    <div style="margin-bottom:4px;">
+      <strong>{{ prov.label }}</strong>
+      {% if prov.summary %}<br><span class="muted">{{ prov.summary }}</span>{% endif %}
+    </div>
+    {% if prov.coverage and prov.coverage.months %}
+    <div class="muted" style="margin-bottom:4px;">
+      Covers <strong>{{ prov.coverage.months }}</strong> month(s)
+      ({{ prov.coverage.start }} &rarr; {{ prov.coverage.end }})
+      across <strong>{{ prov.coverage.pools }}</strong> pool(s).
+    </div>
+    {% endif %}
+    {% if prov.inputs %}
+    <div class="muted" style="margin-bottom:4px;">
+      Source: {{ prov.inputs | join('; ') }}.
+    </div>
+    {% endif %}
+    {% if prov.generated_by %}
+    <div class="muted" style="margin-bottom:4px;">{{ prov.generated_by }}.</div>
+    {% endif %}
+    {% if prov.validation_hint %}
+    <div style="margin-top:6px; padding:6px 8px; background:#ffffff;
+                border-left:3px solid #20628a; font-size:0.92em;">
+      <strong>To validate:</strong> {{ prov.validation_hint }}
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #e6cfa0; background:#fdf6e9;">
+    <div style="font-weight:600; color:#8a5a20; margin-bottom:4px;">
+      &#9888; Source not recorded
+    </div>
+    <div class="muted">
+      {{ prov.summary or "The source of these historical balances has not been confirmed. Choose how they were compiled below so a reviewer can validate them." }}
+    </div>
+  </div>
+  {% endif %}
+
   <p class="muted">
     Choose how this credit union will provide its monthly historical loan
     balances. Pick one of the three options below.
@@ -367,11 +429,31 @@
   {% if hist_source == 'single_workbook' %}
     {% set bal_files = (state.hist_scan or {}).get('monthly_files', []) %}
     {% if bal_files %}
-      <div class="upload-status-list" style="margin-top:16px;">
+      <div style="display:flex; gap:12px; align-items:center; margin-top:16px; margin-bottom:6px;">
+        <strong>Uploaded historical balance workbook(s) ({{ bal_files|length }})</strong>
+        {% if bal_files|length > 1 %}
+          <form method="post" style="display:inline; margin-left:auto;"
+                onsubmit="return confirm('Remove ALL {{ bal_files|length }} historical balance workbook(s) and the associated loan-type \u2192 pool mapping? This cannot be undone.');">
+            <input type="hidden" name="action" value="remove_all_balance_history">
+            <button type="submit" class="btn btn-link" style="color:#a33;">
+              Remove all
+            </button>
+          </form>
+        {% endif %}
+      </div>
+      <div class="upload-status-list">
         {% for f in bal_files %}
-          <div class="upload-status-item">
+          <div class="upload-status-item" style="display:flex; gap:8px; align-items:center;">
             <span class="upload-status-icon">&#10003;</span>
             <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+            <form method="post" style="display:inline; margin-left:auto;"
+                  onsubmit="return confirm('Remove {{ f.name }} and clear the associated loan-type \u2192 pool mapping?');">
+              <input type="hidden" name="action" value="remove_balance_history">
+              <input type="hidden" name="filename" value="{{ f.name }}">
+              <button type="submit" class="btn btn-link" style="color:#a33;">
+                Remove
+              </button>
+            </form>
           </div>
         {% endfor %}
       </div>
@@ -926,10 +1008,13 @@
 
           {% set ignored_layouts = scan.get('ignored_layouts') or [] %}
           {% if ignored_layouts %}
-          <div class="flash" style="margin:8px 0; background:#f5f5f5; border:1px solid #ddd;">
-            <strong>{{ ignored_layouts | length }} ignored layout(s)</strong>
-            &mdash; files matching these header signatures are excluded from
-            historical balance processing.
+          <details class="flash" style="margin:8px 0; background:#f5f5f5; border:1px solid #ddd; padding:8px;">
+            <summary style="cursor:pointer;">
+              <strong>{{ ignored_layouts | length }} ignored layout(s)</strong>
+              &mdash; files matching these header signatures are excluded from
+              historical balance processing.
+              <span class="muted" style="font-weight:normal;">(click to expand)</span>
+            </summary>
             <table class="data-table"
                    style="width:100%; margin-top:8px; background:#fff;">
               <thead>
@@ -968,7 +1053,7 @@
               {% endfor %}
               </tbody>
             </table>
-          </div>
+          </details>
           {% endif %}
 
           <h5 style="margin:12px 0 4px 0;">Months in window</h5>
@@ -1324,11 +1409,335 @@
 
     </div>
   {% elif hist_source == 'monthly_balance_sheets' %}
+    {% set mb_pm = state.monthly_bal or {} %}
+    {% set mfiles = mb_pm.monthly_files or [] %}
+    {% set pm_layout = mb_pm.per_month_layout or {} %}
+    {% set pm_pool_map = mb_pm.pool_map or {} %}
+    {% set pm_labels = mb_pm.parsed_pool_labels or [] %}
+    {% set pm_folder = mb_pm.per_month_source_folder or '' %}
+
     <div class="flash info" style="margin-top:16px;">
-      <strong>Monthly balance-sheet uploader &mdash; coming soon.</strong><br>
-      You'll be able to drop in one balance sheet per month and the wizard
-      will pull pool balances out of each one to build the historical database.
+      <strong>Monthly balance-sheet workbooks.</strong>
+      Upload one sample balance sheet to auto-detect the layout, then
+      point us at the folder containing every month's workbook so we can
+      pull the full historical balance history in one pass. The same
+      data feeds Step 5 (current quarter) automatically.
     </div>
+
+    {# -- Upload a single sample month (for layout detection or one-offs) -- #}
+    <form method="post" enctype="multipart/form-data" style="margin-top:16px;">
+      <input type="hidden" name="action" value="upload_per_month_step3">
+      <h4 style="margin-bottom:6px;">Upload one monthly balance sheet</h4>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <label style="flex:1 1 280px;">Monthly balance workbook
+          <input type="file" name="per_month_file"
+                 accept=".xlsx,.xlsm,.xls,.csv">
+          <span class="help">e.g. <code>878339 Balance Sheet 123125.xlsx</code></span>
+        </label>
+        <label style="flex:0 0 160px;">Month-end (optional)
+          <input type="date" name="per_month_period">
+          <span class="help">Leave blank to auto-detect from filename or the
+          file's "As of:" cell.</span>
+        </label>
+        <label style="flex:0 0 140px;">As-of cell (optional)
+          <input type="text" name="per_month_as_of_cell"
+                 placeholder="e.g. B3" maxlength="8"
+                 value="{{ pm_layout.as_of_cell or '' }}"
+                 style="text-transform:uppercase;">
+          <span class="help">Cell that holds the "As of" date (e.g.
+          <code>B3</code>). Leave blank to auto-detect from the filename
+          or an <em>As of:</em> row.</span>
+        </label>
+        <label style="flex:0 0 140px;">Stop at row (optional)
+          <input type="number" name="per_month_stop_row" min="1" max="5000"
+                 value="{{ pm_layout.stop_row or '' }}">
+          <span class="help">Hard cap. The parser also auto-stops at
+          "Total Net Loans" / "Total Loans" / "Net Loans" markers.
+          Leave blank to auto-detect.</span>
+        </label>
+        <button class="btn btn-secondary" type="submit">Upload Sample</button>
+      </div>
+      {% if mfiles %}
+        <div class="muted" style="margin-top:6px;">
+          Tip: change <em>Stop at row</em> or <em>As-of cell</em> and click
+          <em>Upload Sample</em> again without picking a file to re-analyse
+          the most recently uploaded workbook with the new settings.
+        </div>
+      {% endif %}
+    </form>
+
+    {# -- Bulk folder scan -- #}
+    <form method="post" style="margin-top:16px;">
+      <input type="hidden" name="action" value="scan_per_month_folder_step3">
+      <h4 style="margin-bottom:6px;">Or scan a folder for all monthly workbooks</h4>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <label style="flex:1 1 480px;">Folder path
+          <input type="text" name="per_month_folder"
+                 value="{{ pm_folder }}"
+                 placeholder="Z:\Shared\Clients\... \Historical Files\Balance Sheets"
+                 style="font-family: Consolas, monospace;">
+          <span class="help">Every <code>.xlsx</code> / <code>.xls</code> /
+          <code>.csv</code> file in this folder will be parsed as one
+          month-end. The month-end date must be detectable from the
+          filename (e.g. <code>123125</code> or <code>2025-12-31</code>)
+          or from an "As of:" cell inside the file.</span>
+        </label>
+        <button class="btn btn-secondary" type="submit">Scan Folder</button>
+      </div>
+    </form>
+
+    {# -- Files table -- #}
+    {% if mfiles %}
+      <div style="display:flex; gap:12px; align-items:center; margin-top:20px; margin-bottom:6px;">
+        <h4 style="margin:0;">
+          Ingested monthly workbooks ({{ mfiles|length }})
+        </h4>
+        <form method="post" style="display:inline; margin-left:auto;"
+              onsubmit="return confirm('Remove ALL {{ mfiles|length }} monthly workbook(s)? This cannot be undone.');">
+          <input type="hidden" name="action" value="remove_all_per_month_step3">
+          <button type="submit" class="btn btn-link" style="color:#a33;">
+            Remove all
+          </button>
+        </form>
+      </div>
+      <table class="data-table" style="width:100%; margin-top:4px;">
+        <thead>
+          <tr>
+            <th style="text-align:left;">File</th>
+            <th style="text-align:left;">Month-end</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for mf in mfiles %}
+            <tr>
+              <td><code>{{ mf.filename }}</code></td>
+              <td>{{ mf.period }}</td>
+              <td style="text-align:right;">
+                <form method="post" style="display:inline;">
+                  <input type="hidden" name="action" value="remove_per_month_step3">
+                  <input type="hidden" name="filename" value="{{ mf.filename }}">
+                  <button type="submit" class="btn btn-link" style="color:#a33;">
+                    Remove
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    {# -- Detected layout summary -- #}
+    {% if pm_layout.sheet %}
+      <div class="muted" style="margin-top:12px;">
+        Detected layout: sheet <code>{{ pm_layout.sheet }}</code>,
+        header row {{ pm_layout.header_row }}, label column
+        <code>{{ pm_layout.label_col }}</code>, balance column
+        <code>{{ pm_layout.balance_col }}</code>{% if pm_layout.stop_row %},
+        stops at row {{ pm_layout.stop_row }}{% if pm_layout.auto_stop_row and pm_layout.auto_stop_row != pm_layout.stop_row %}
+        (auto-detected at row {{ pm_layout.auto_stop_row }}){% endif %}{%
+        elif pm_layout.auto_stop_row %}, auto-stop at row {{ pm_layout.auto_stop_row }}{% endif %}.
+      </div>
+    {% endif %}
+
+    {# -- Pool mapping table -- #}
+    {% set all_labels = [] %}
+    {% for lbl in pm_labels %}{% if lbl and lbl not in all_labels %}{% set _ = all_labels.append(lbl) %}{% endif %}{% endfor %}
+    {% for lbl in pm_pool_map.keys() %}{% if lbl and lbl not in all_labels %}{% set _ = all_labels.append(lbl) %}{% endif %}{% endfor %}
+
+    {# -- Optional: import a 2-column mapping file -- #}
+    <form method="post" enctype="multipart/form-data" style="margin-top:16px;">
+      <input type="hidden" name="action" value="upload_pool_mapping">
+      <h4 style="margin-bottom:6px;">Or import a pool-mapping file</h4>
+      {% set pm_up = mb_pm.pool_mapping_upload or {} %}
+      {% set pm_hdr = pm_up.header_preview or [] %}
+      {% set pm_letters = ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'] %}
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <label style="flex:1 1 320px;">Mapping file (.csv / .xlsx / .xls)
+          <input type="file" name="pool_mapping_file"
+                 accept=".csv,.xlsx,.xlsm,.xls">
+          <span class="help">Pick the columns below if the layout isn't
+            "label in column A, pool in column B". Use <code>ignore</code>
+            or an empty cell in the pool column to exclude a label.
+            Existing entries are overwritten and labels are matched
+            case-insensitively against the parsed workbook labels.</span>
+        </label>
+        <label style="flex:0 0 180px;">Label column
+          {% if pm_hdr %}
+            <select name="pm_file_label_col">
+              {% for h in pm_hdr %}
+                {% set lt = pm_letters[loop.index0] if loop.index0 < pm_letters|length else loop.index|string %}
+                <option value="{{ lt }}"
+                  {% if pm_up.label_col == lt %}selected{% endif %}>
+                  Col {{ lt }}{% if h %} &mdash; {{ h }}{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          {% else %}
+            <input type="text" name="pm_file_label_col" maxlength="3"
+                   value="{{ pm_up.label_col or 'A' }}"
+                   style="text-transform:uppercase; width:80px;">
+            <span class="help">Letter (A, B, ...).</span>
+          {% endif %}
+        </label>
+        <label style="flex:0 0 180px;">Pool column
+          {% if pm_hdr %}
+            <select name="pm_file_pool_col">
+              {% for h in pm_hdr %}
+                {% set lt = pm_letters[loop.index0] if loop.index0 < pm_letters|length else loop.index|string %}
+                <option value="{{ lt }}"
+                  {% if pm_up.pool_col == lt %}selected{% endif %}>
+                  Col {{ lt }}{% if h %} &mdash; {{ h }}{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          {% else %}
+            <input type="text" name="pm_file_pool_col" maxlength="3"
+                   value="{{ pm_up.pool_col or 'B' }}"
+                   style="text-transform:uppercase; width:80px;">
+          {% endif %}
+        </label>
+        <label style="flex:0 0 130px;">Header row
+          <select name="pm_file_header">
+            <option value="auto"
+              {% if not pm_up.header_choice or pm_up.header_choice == 'auto' %}selected{% endif %}>
+              Auto-detect
+            </option>
+            <option value="yes"
+              {% if pm_up.header_choice == 'yes' %}selected{% endif %}>
+              Yes &mdash; skip row 1
+            </option>
+            <option value="no"
+              {% if pm_up.header_choice == 'no' %}selected{% endif %}>
+              No
+            </option>
+          </select>
+        </label>
+        <button class="btn btn-secondary" type="submit">Import Mapping</button>
+      </div>
+      {% if pm_up.filename %}
+        <div class="muted" style="margin-top:6px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+          <span>
+            Last upload: <code>{{ pm_up.filename }}</code>
+            (label = col {{ pm_up.label_col }}, pool = col {{ pm_up.pool_col }},
+            {{ pm_up.row_count or 0 }} row(s) parsed).
+            Adjust the columns above and click <em>Import Mapping</em> again
+            to re-parse the same file &mdash; you don't need to re-pick it.
+          </span>
+        </div>
+        {% if pm_up.sample_pairs %}
+          <div style="margin-top:8px;">
+            <strong>Parsed sample (first {{ pm_up.sample_pairs|length }}):</strong>
+            <table class="data-table" style="max-width:680px; margin-top:4px;">
+              <thead>
+                <tr>
+                  <th style="text-align:left;">Label (col {{ pm_up.label_col }})</th>
+                  <th style="text-align:left;">Pool (col {{ pm_up.pool_col }})</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for lab, pool in pm_up.sample_pairs %}
+                  <tr>
+                    <td><code>{{ lab }}</code></td>
+                    <td>{% if pool %}<code>{{ pool }}</code>{% else %}<em class="muted">(ignore)</em>{% endif %}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <div class="muted" style="margin-top:4px;">
+              If the wrong cells appear here, change the column letters
+              above and click Import Mapping again.
+            </div>
+          </div>
+        {% endif %}
+      {% endif %}
+    </form>
+
+    {% if pm_up.filename %}
+      <form method="post" style="margin-top:6px;"
+            onsubmit="return confirm('Remove the uploaded pool-mapping file? The label-to-pool entries it added will stay; edit them in the table above if needed.');">
+        <input type="hidden" name="action" value="remove_pool_mapping_upload">
+        <button class="btn btn-link" type="submit" style="color:#a33;">
+          Remove uploaded mapping file
+        </button>
+      </form>
+    {% endif %}
+
+    {% if all_labels %}
+        <p class="muted" style="margin-top:0;">
+          Map each label found in the workbook's label column to one of the
+          pools defined on Step 2 &mdash; Loan Pools. Choose
+          <em>&mdash; ignore &mdash;</em> to exclude.
+        </p>
+        <table class="data-table" style="width:100%; max-width:780px;">
+          <thead>
+            <tr>
+              <th style="text-align:left;">Workbook label</th>
+              <th style="text-align:left;">Maps to pool</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for lbl in all_labels %}
+              {% set current = pm_pool_map.get(lbl, '') %}
+              <tr>
+                <td>
+                  <input type="hidden" name="pm_label_{{ loop.index0 }}" value="{{ lbl }}">
+                  <code>{{ lbl }}</code>
+                </td>
+                <td>
+                  <select name="pm_pool_{{ loop.index0 }}" style="width:100%;">
+                    <option value="__ignore__"
+                      {% if not current %}selected{% endif %}>
+                      &mdash; ignore &mdash;
+                    </option>
+                    {% for pool in step2_pools %}
+                      <option value="{{ pool }}"
+                        {% if current == pool %}selected{% endif %}>
+                        {{ pool }}
+                      </option>
+                    {% endfor %}
+                    {% if current and current not in step2_pools %}
+                      <option value="{{ current }}" selected>
+                        {{ current }} (not in Step 2)
+                      </option>
+                    {% endif %}
+                  </select>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <button class="btn btn-secondary" type="submit" style="margin-top:8px;">
+          Save Pool Mapping
+        </button>
+      </form>
+    {% endif %}
+
+    {# -- Danger zone: wipe everything Step 3 has captured -- #}
+    <details style="margin-top:24px;">
+      <summary style="cursor:pointer; color:#a33;">
+        Reset Step 3 (clear all uploaded balance sheets, mappings, and
+        detected layout)
+      </summary>
+      <div style="margin-top:8px;">
+        <p class="muted" style="margin:6px 0;">
+          Removes every uploaded sample / scanned monthly file, the
+          imported pool-mapping file, the detected sheet/columns/stop
+          row, and every label-to-pool entry. Useful when the first
+          upload picked up too many rows and you want a clean slate.
+        </p>
+        <form method="post"
+              onsubmit="return confirm('Wipe all Step 3 monthly-balance uploads, mappings, and detected layout?');">
+          <input type="hidden" name="action" value="reset_step3_balance_sheets">
+          <button class="btn" type="submit"
+                  style="background:#a33; color:white;">
+            Yes &mdash; reset Step 3
+          </button>
+        </form>
+      </div>
+    </details>
+
   {% elif hist_source == 'annual_balance_sheets' %}
     {% set mb_ann = state.monthly_bal or {} %}
     {% set yfiles = mb_ann.year_files or [] %}
@@ -1383,9 +1792,18 @@
 
     {# -- Files table -- #}
     {% if yfiles %}
-      <h4 style="margin-top:20px; margin-bottom:6px;">
-        Ingested annual workbooks ({{ yfiles|length }})
-      </h4>
+      <div style="display:flex; gap:12px; align-items:center; margin-top:20px; margin-bottom:6px;">
+        <h4 style="margin:0;">
+          Ingested annual workbooks ({{ yfiles|length }})
+        </h4>
+        <form method="post" style="display:inline; margin-left:auto;"
+              onsubmit="return confirm('Remove ALL {{ yfiles|length }} annual workbook(s)? This cannot be undone.');">
+          <input type="hidden" name="action" value="remove_all_annual_step3">
+          <button type="submit" class="btn btn-link" style="color:#a33;">
+            Remove all
+          </button>
+        </form>
+      </div>
       <table class="data-table" style="width:100%; margin-top:4px;">
         <thead>
           <tr>
@@ -1487,35 +1905,242 @@
   {% endif %}
 </div>
 
+{# -- Confirmation: historical balances actually extracted from the
+     uploaded workbook(s). Always rendered when the source can be
+     previewed (annual / monthly / single); shows a compact months ×
+     pools grid so the user can visually verify the data before
+     proceeding. -- #}
+{% set ebp = extracted_bal_preview or {} %}
+{% if ebp.get('ok') %}
+<div class="card" style="border:1px solid #b8d8be; background:#f0faf2;">
+  <h3 style="margin-top:0;">
+    <span style="color:#1e7e34;">&#10003;</span>
+    Historical balances extracted
+  </h3>
+  <p class="muted" style="margin-top:0;">
+    Read <strong>{{ ebp.period_count }}</strong> month-end period(s)
+    from <code>{{ ebp.earliest_period }}</code> through
+    <code>{{ ebp.latest_period }}</code> across
+    <strong>{{ ebp.pool_count }}</strong> pool(s)
+    {% if ebp.source_files %}
+      from
+      {% for fn in ebp.source_files[:3] %}
+        <code>{{ fn }}</code>{% if not loop.last %}, {% endif %}
+      {% endfor %}
+      {% if ebp.source_files|length > 3 %}
+        and {{ ebp.source_files|length - 3 }} more
+      {% endif %}
+    {% endif %}.
+    {% if ebp.latest_period_with_data and ebp.latest_period_with_data != ebp.latest_period %}
+      Periods after <code>{{ ebp.latest_period_with_data }}</code>
+      are empty placeholders in the workbook and are hidden below.
+    {% endif %}
+    {% if ebp.recent_periods|length < ebp.period_count %}
+      Showing the most-recent {{ ebp.recent_periods|length }} month(s)
+      with data and top {{ ebp.top_pools|length }} pool(s) by latest
+      balance.
+    {% endif %}
+  </p>
+
+  {% if ebp.top_pools and ebp.recent_periods %}
+  <div style="overflow-x:auto; max-width:100%; margin-top:6px;">
+    <table class="data-table" style="min-width:520px;">
+      <thead>
+        <tr>
+          <th style="text-align:left;">Pool</th>
+          {% for per in ebp.recent_periods %}
+            <th style="text-align:right;">{{ per }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for pool in ebp.top_pools %}
+        <tr>
+          <td>{{ pool }}</td>
+          {% for per in ebp.recent_periods %}
+            <td style="text-align:right;">
+              ${{ '{:,.0f}'.format(ebp.balances_grid.get(pool, {}).get(per, 0)) }}
+            </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+        <tr style="font-weight:bold; background:#e6f4ea;">
+          <td>Total (all pools)</td>
+          {% for per in ebp.recent_periods %}
+            <td style="text-align:right;">
+              ${{ '{:,.0f}'.format(ebp.totals_by_period.get(per, 0)) }}
+            </td>
+          {% endfor %}
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if ebp.backfill.present %}
+    {% if ebp.backfill.ok %}
+      <div style="margin-top:10px; padding:8px 12px;
+            background:#fff; border:1px solid #b8d8be;
+            border-radius:4px;">
+        <strong>NCUA 5300 distributed backfill:</strong>
+        wrote <strong>{{ '{:,}'.format(ebp.backfill.rows_written) }}</strong>
+        row(s) across
+        <strong>{{ ebp.backfill.months_filled }}</strong>
+        month-end(s)
+        {% if ebp.backfill.earliest_filled %}
+          ({{ ebp.backfill.earliest_filled }} &rarr;
+          {{ ebp.backfill.latest_filled }})
+        {% endif %}.
+      </div>
+    {% elif ebp.backfill.error %}
+      <div class="flash warning" style="margin-top:10px;">
+        <strong>NCUA 5300 backfill error:</strong>
+        {{ ebp.backfill.error }}
+      </div>
+    {% endif %}
+  {% endif %}
+</div>
+{% elif ebp.get('error') and hist_source in ('annual_balance_sheets', 'monthly_balance_sheets', 'single_workbook') %}
+<div class="card" style="border:1px solid #f5c2c0; background:#fdecea;">
+  <h3 style="margin-top:0; color:#a02020;">
+    Historical balance preview unavailable
+  </h3>
+  <p style="margin-bottom:0;">{{ ebp.error }}</p>
+</div>
+{% endif %}
+
 {# -- 1a. NCUA 5300 backfill (works for ALL three source choices) -- #}
 {% set sb = (state.hist_extracts or {}).get('solr_backfill') or {} %}
 {% set sb_test = sb.get('last_test') %}
 {% set sb_run = sb.get('last_run') %}
+{% set sb_mode = sb.get('mode') or 'distributed' %}
 {% set cmap = solr_canonical_map or [] %}
 {% set _he_1a = state.hist_extracts or {} %}
 {% set _tp_1a = _he_1a.get('target_period') or '' %}
 {% set _hm_1a = _he_1a.get('history_months') or '' %}
+{% set dist_preview = solr_dist_preview or {} %}
 <div class="card" style="border:1px solid #c9d6e8; background:#f4f8ff;">
   <h3 style="margin-top:0;">
     1a. Fill missing months from NCUA 5300
     <span class="muted" style="font-weight:normal;">(automatic, optional)</span>
   </h3>
+
+  {# Default-on auto-fill toggle. When ON, the wizard runs the 5300 balance
+     backfill automatically as you continue past this step. #}
+  <form method="post" style="margin:4px 0 10px;">
+    <input type="hidden" name="action" value="set_solr_backfill_enabled">
+    <label style="display:flex; gap:8px; align-items:center;">
+      <input type="checkbox" name="solr_backfill_enabled"
+             onchange="this.form.submit()"
+             {% if sb.get('enabled', True) %}checked{% endif %}>
+      <span><strong>Auto-fill balances from NCUA 5300</strong> when I continue
+      past this step (recommended default). The earlier quarters with no
+      balance data are filled from the CU's 5300 call report; existing months
+      are never overwritten.</span>
+    </label>
+    <noscript><button class="btn btn-secondary" type="submit"
+      style="margin-top:6px;">Save</button></noscript>
+  </form>
+
+  {# Mode selector — auto-submits on change. #}
+  <form method="post" style="margin:6px 0 12px 0;
+        padding:10px 14px; background:#fff; border:1px solid #c9d6e8;
+        border-radius:6px;">
+    <input type="hidden" name="action" value="set_solr_backfill_mode">
+    <strong>Backfill mode:</strong>
+    <label style="display:block; margin-top:6px;">
+      <input type="radio" name="solr_backfill_mode" value="per_loan_code"
+             onchange="this.form.submit()"
+             {% if sb_mode == 'per_loan_code' %}checked{% endif %}>
+      <strong>Per loan code</strong> &mdash; map each canonical 5300
+      bucket (e.g. <em>New Vehicles</em>, <em>First Liens</em>) to one
+      of this CU's pools via the Loan Code Mapping step.
+    </label>
+    <label style="display:block; margin-top:4px;">
+      <input type="radio" name="solr_backfill_mode" value="distributed"
+             onchange="this.form.submit()"
+             {% if sb_mode == 'distributed' %}checked{% endif %}>
+      <strong>Distribute by earliest-month ratios</strong> &mdash; take
+      each quarter's <em>total</em> loan balance from the 5300 and
+      apportion it across this CU's pools using the SAME percentages
+      as the earliest month in the historical balance file(s) above.
+      Use this when the 5300 categories don't line up cleanly with
+      this CU's pools.
+    </label>
+  </form>
+
   <p class="muted" style="margin-top:0;">
-    For any quarter-end (Mar/Jun/Sep/Dec) inside the lookback window that
-    has <strong>no row</strong> in this CU's historical balance table,
-    pull the credit union's 5300 call report from the TCT NCUA Solr index
-    and write one row per canonical 5300 loan-type bucket. Because 5300
-    reports are quarterly, the quarter-end balances are
-    <strong>also copied to the two prior month-ends</strong>
-    (e.g. Q1's March balance fills January and February too), but only
-    for months that aren't already loaded. Existing rows are
-    <strong>never overwritten</strong> &mdash; this is purely a
-    gap-filler. The new loan codes are seeded into the
-    <strong>Loan Code Mapping</strong> step so you can assign each one
-    to a pool for this credit union. FICO histograms are <em>not</em>
-    available from 5300 data &mdash; those columns will be empty for
-    backfilled months.
+    {% if sb_mode == 'distributed' %}
+      For any quarter-end inside the lookback window with no row in
+      this CU's historical balance table, pull the 5300 call report,
+      compute the total loan balance, and distribute it across pools
+      using the earliest-month ratios shown below. Existing rows are
+      <strong>never overwritten</strong>. Choosing this mode also
+      removes any prior per-loan-code backfill rows for this CU to
+      avoid double-counting.
+    {% else %}
+      For any quarter-end (Mar/Jun/Sep/Dec) inside the lookback window
+      that has <strong>no row</strong> in this CU's historical balance
+      table, pull the credit union's 5300 call report from the TCT
+      NCUA Solr index and write one row per canonical 5300 loan-type
+      bucket. Because 5300 reports are quarterly, the quarter-end
+      balances are <strong>also copied to the two prior
+      month-ends</strong> (e.g. Q1's March balance fills January and
+      February too), but only for months that aren't already loaded.
+      Existing rows are <strong>never overwritten</strong> &mdash;
+      this is purely a gap-filler. The new loan codes are seeded into
+      the <strong>Loan Code Mapping</strong> step so you can assign
+      each one to a pool. FICO histograms are <em>not</em> available
+      from 5300 data.
+    {% endif %}
   </p>
+
+  {% if sb_mode == 'distributed' %}
+    {# Earliest-month preview panel — shows the ratios that will be
+       used for the backfill. Computed on render from the uploaded
+       balance file(s) (annual or per_month). #}
+    <div style="margin:6px 0 12px 0;
+          padding:10px 14px; background:#fff; border:1px solid #c9d6e8;
+          border-radius:6px;">
+      <strong>Earliest-month pool distribution preview</strong>
+      {% if dist_preview.get('ok') %}
+        <div class="muted" style="margin-top:4px;">
+          From earliest period
+          <code>{{ dist_preview.get('period') }}</code> &mdash;
+          total ${{ '{:,.0f}'.format(dist_preview.get('total') or 0) }}
+          across {{ dist_preview.get('pool_distribution') | length }}
+          pool(s). Each backfilled quarter's 5300 total will be split
+          using these percentages.
+        </div>
+        <table class="data-table" style="width:auto; min-width:480px;
+              margin-top:6px;">
+          <thead><tr>
+            <th style="text-align:left;">Pool</th>
+            <th style="text-align:right;">Earliest-month $</th>
+            <th style="text-align:right;">% of total</th>
+          </tr></thead>
+          <tbody>
+          {% for pool, ratio in (dist_preview.get('pool_distribution') or {}).items() | sort %}
+            <tr>
+              <td>{{ pool }}</td>
+              <td style="text-align:right;">
+                ${{ '{:,.0f}'.format(dist_preview.get('by_pool', {}).get(pool, 0)) }}
+              </td>
+              <td style="text-align:right;">
+                {{ '{:.2f}%'.format(ratio * 100) }}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="flash warning" style="margin-top:6px;">
+          {{ dist_preview.get('error')
+             or 'Upload at least one historical balance workbook above to enable distributed mode.' }}
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
 
   {# Target period + history depth — required for the backfill action.
      Only shown directly here when the user isn't on the monthly_loan_extracts
@@ -1592,6 +2217,10 @@
         (app-wide, read-only here &mdash; edit
         <code>cecl_ui/data/ncua_5300_loan_codes.csv</code> to
         change)
+        {% if sb_mode == 'distributed' %}
+          &mdash; <em>not used in distributed mode (only the total
+          loan balance is read)</em>
+        {% endif %}
       </span>
       {% if not cmap %}
         <div class="flash error" style="margin-top:6px;">
@@ -1636,8 +2265,12 @@
       <button class="btn btn-primary" type="submit"
         formaction="{{ url_for('setup.step3_historical') }}"
         name="action" value="run_solr_backfill"
-        {% if not _ch or not cmap %}disabled{% endif %}>
-        Backfill missing quarters
+        {% if not _ch or not cmap or (sb_mode == 'distributed' and not dist_preview.get('ok')) %}disabled{% endif %}>
+        {% if sb_mode == 'distributed' %}
+          Backfill missing quarters (distributed)
+        {% else %}
+          Backfill missing quarters
+        {% endif %}
       </button>
     </div>
   </form>
@@ -1764,7 +2397,8 @@
       <tbody>
       {% for label in hpm.get('labels', []) %}
         {% set current = (hpm.get('mapping') or {}).get(label, '') %}
-        {% set in_step2 = current and (current in (step2_pools or [])) %}
+        {% set is_ignored = (current == '__ignore__') %}
+        {% set in_step2 = current and not is_ignored and (current in (step2_pools or [])) %}
         <tr>
           <td>
             <code>{{ label }}</code>
@@ -1773,12 +2407,12 @@
           <td>
             <select name="pool_for_{{ loop.index0 }}" style="width:100%;">
               <option value="__ignore__"
-                      {% if not current %}selected{% endif %}>&laquo; ignore &raquo;</option>
+                      {% if is_ignored or not current %}selected{% endif %}>&laquo; ignore &raquo;</option>
               {% for p in step2_pools or [] %}
                 <option value="{{ p }}"
                         {% if in_step2 and current == p %}selected{% endif %}>{{ p }}</option>
               {% endfor %}
-              {% if current and not in_step2 %}
+              {% if current and not in_step2 and not is_ignored %}
                 {# Preserve a previously-saved value that doesn't match any
                    current Step 2 pool (e.g. pool was renamed/removed) so
                    the user doesn't lose data silently. #}
@@ -1802,11 +2436,13 @@
 
   {% set unmapped_ns = namespace(count=0) %}
   {% for lbl, pool in (hpm.get('mapping') or {}).items() %}
+    {# Treat "__ignore__" as an intentional choice, not an unmapped row. #}
     {% if not pool %}{% set unmapped_ns.count = unmapped_ns.count + 1 %}{% endif %}
   {% endfor %}
   {% if unmapped_ns.count > 0 %}
     <div class="flash error" style="margin-top:10px;">
-      {{ unmapped_ns.count }} loan type(s) still need a pool assignment.
+      {{ unmapped_ns.count }} loan type(s) still need a pool assignment
+      (pick a pool or choose &laquo; ignore &raquo; for header / spacer rows).
     </div>
   {% endif %}
 </div>
@@ -1828,6 +2464,49 @@
   <h3>2. Historical Charge-Offs
     <span class="badge-required">Required</span>
   </h3>
+  {% set cprov = co_provenance or {} %}
+  {% if cprov.recorded %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #b6d4e6; background:#eef6fb;">
+    <div style="font-weight:600; color:#20628a; margin-bottom:4px;">
+      &#9432; How these charge-offs were compiled
+    </div>
+    <div style="margin-bottom:4px;"><strong>{{ cprov.label }}</strong></div>
+    {% if cprov.summary %}<div class="muted" style="margin-bottom:6px;">{{ cprov.summary }}</div>{% endif %}
+    {% if cprov.cu_files %}
+    <div style="margin-bottom:4px;"><span class="muted">CU-provided file(s):</span>
+      <ul style="margin:2px 0 4px 18px;">
+        {% for f in cprov.cu_files %}
+        <li>{{ f.name }}{% if f.file_pattern %} <code style="font-size:0.85em;">{{ f.file_pattern }}</code>{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if cprov.db_sources %}
+    <div style="margin-bottom:4px;"><span class="muted">Backfill source(s):</span>
+      <ul style="margin:2px 0 4px 18px;">
+        {% for s in cprov.db_sources %}
+        <li>{{ s.label }}{% if s.years %} ({{ s.years }}){% endif %}{% if s.total %} &mdash; ${{ '{:,.2f}'.format(s.total) }}{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if cprov.validation_hint %}
+    <div style="margin-top:6px; padding:6px 8px; background:#ffffff;
+                border-left:3px solid #20628a; font-size:0.92em;">
+      <strong>To validate:</strong> {{ cprov.validation_hint }}
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #e6cfa0; background:#fdf6e9;">
+    <div style="font-weight:600; color:#8a5a20; margin-bottom:4px;">
+      &#9888; Source not recorded
+    </div>
+    <div class="muted">{{ cprov.summary or "The source of these historical charge-offs has not been confirmed. Configure it below so a reviewer can validate them." }}</div>
+  </div>
+  {% endif %}
   <p class="muted">
     Choose where this CU's historical charge-off data comes from. The same
     <strong>target reporting period</strong> and <strong>history depth</strong>
@@ -1876,21 +2555,27 @@
 
   {% if co_src == 'single_workbook' %}
     {% if co_files %}
-      <div class="upload-status-list">
-        {% for f in co_files %}
-          <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
-            <span class="upload-status-icon">&#10003;</span>
-            <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
-            <form method="post" style="display:inline; margin-left:auto;">
-              <input type="hidden" name="action" value="remove_co_workbook">
-              <input type="hidden" name="filename" value="{{ f.name }}">
-              <button class="btn btn-link" type="submit"
-                      style="color:#a04; padding:0 4px;"
-                      title="Remove">&times;</button>
-            </form>
-          </div>
-        {% endfor %}
-      </div>
+      <details style="margin-top:8px;">
+        <summary style="cursor:pointer; font-weight:600;">
+          Uploaded charge-off workbook(s)
+          <span class="muted" style="font-weight:normal;">({{ co_files|length }} &mdash; click to expand)</span>
+        </summary>
+        <div class="upload-status-list" style="margin-top:6px;">
+          {% for f in co_files %}
+            <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
+              <span class="upload-status-icon">&#10003;</span>
+              <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+              <form method="post" style="display:inline; margin-left:auto;">
+                <input type="hidden" name="action" value="remove_co_workbook">
+                <input type="hidden" name="filename" value="{{ f.name }}">
+                <button class="btn btn-link" type="submit"
+                        style="color:#a04; padding:0 4px;"
+                        title="Remove">&times;</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+      </details>
     {% endif %}
     <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
       <label>Historical charge-off workbook
@@ -1904,23 +2589,212 @@
       </button>
     </form>
 
+    {# Column-mapping card for the single-workbook upload. Uses the
+       same `co_inspect` / `co_columns` state and `save_co_columns`
+       action as the monthly-files mode — just rendered with a slim
+       UX (no per-layout picker, no member/account block). When the
+       auto-detector fails to find a Loan Code / Charge-Off Amount /
+       Charge-Off Date column on upload, the user picks here and
+       re-runs Aggregate. #}
+    {% set co_ins_sw = state.get('co_inspect') %}
+    {% set co_cols_sw = state.get('co_columns') or {} %}
+    {% if co_ins_sw and co_files %}
+      <div class="card" style="margin-top:12px; padding:10px;
+                               background:#f7faff;">
+        <strong>Column Mapping</strong>
+        <span class="muted">
+          (auto-detected from <code>{{ co_ins_sw.filename }}</code>)
+        </span>
+        <p class="muted" style="margin:4px 0 0 0; font-size:12px;">
+          Pick the workbook columns the aggregator should use. If the
+          auto-detector left any field blank, choose it here and click
+          <strong>Save Column Mapping</strong>, then re-run
+          <em>Aggregate Charge-Off Workbook(s)</em>.
+        </p>
+        {% if co_ins_sw.error %}
+          <div class="flash error" style="margin-top:6px;">
+            {{ co_ins_sw.error }}
+          </div>
+        {% endif %}
+        <form method="post" style="margin-top:8px;">
+          <div style="display:grid;
+                      grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+                      gap:12px;">
+            <label>Loan Code column
+              <select name="co_loan_code_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins_sw.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols_sw.get('loan_code') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Charge-Off Amount column
+              <select name="co_amount_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins_sw.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols_sw.get('amount') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Charge-Off Date column
+              <select name="co_date_col">
+                <option value="">&mdash; choose &mdash;</option>
+                {% for h in co_ins_sw.headers %}
+                  <option value="{{ h }}"
+                    {% if co_cols_sw.get('date') == h %}selected{% endif %}>
+                    {{ h }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+          <div style="margin-top:8px;">
+            <button class="btn btn-secondary" type="submit"
+                    name="action" value="save_co_columns">
+              Save Column Mapping
+            </button>
+            <button class="btn btn-link" type="submit"
+                    name="action" value="reinspect_co_monthly"
+                    style="margin-left:8px;"
+                    title="Re-read headers from the uploaded workbook">
+              Re-inspect
+            </button>
+          </div>
+        </form>
+        {% if co_ins_sw.preview_rows %}
+          <details style="margin-top:8px;">
+            <summary style="cursor:pointer;">Preview rows</summary>
+            <table class="data-table" style="margin-top:6px;">
+              <thead><tr>
+                {% for h in co_ins_sw.headers %}<th>{{ h }}</th>{% endfor %}
+              </tr></thead>
+              <tbody>
+              {% for r in co_ins_sw.preview_rows %}
+                <tr>
+                  {% for c in r %}<td>{{ c if c is not none else '' }}</td>{% endfor %}
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </details>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    {# Aggregate uploaded workbook(s) into the historical CO database.
+       Each row's Charge-Off Date is snapped to its month-end, then sums
+       per (loan code, month-end) are upserted.  The "what's loaded"
+       table at the bottom of this step reads from the same DB so users
+       see their data appear there after clicking Aggregate. #}
+    <div style="margin-top:14px;">
+      {% set co_agg = state.get('monthly_co_aggregate') %}
+      <form method="post" style="display:inline;">
+        <button class="btn btn-primary" type="submit" name="action"
+                value="process_co_workbook"
+                {% if not co_files %}disabled{% endif %}>
+          Aggregate Charge-Off Workbook(s) Into Database
+        </button>
+      </form>
+      {% if not co_files %}
+        <span class="muted" style="margin-left:8px;">
+          Upload at least one workbook first.
+        </span>
+      {% endif %}
+      {% if co_agg %}
+        <div class="card" style="margin-top:10px; padding:10px;">
+          <strong>Last aggregation:</strong>
+          {% if co_agg.ok %}
+            wrote <strong>{{ co_agg.total_rows_written }}</strong> row(s)
+            across <strong>{{ co_agg.months_written|length }}</strong>
+            month(s) &mdash; total
+            <strong>${{ '{:,.2f}'.format(co_agg.total_amount) }}</strong>.
+          {% else %}
+            <span style="color:#a04;">{{ co_agg.error or 'failed' }}</span>
+          {% endif %}
+          {% if co_agg.files %}
+            <details style="margin-top:6px;">
+              <summary style="cursor:pointer;">Per-file detail</summary>
+              <table class="data-table" style="margin-top:6px;">
+                <thead><tr>
+                  <th>File</th><th>Date Range</th>
+                  <th style="text-align:right;">Months</th>
+                  <th style="text-align:right;">Rows</th>
+                  <th style="text-align:right;">Amount</th>
+                  <th>Status</th>
+                </tr></thead>
+                <tbody>
+                {% for f in co_agg.files %}
+                  <tr>
+                    <td><code>{{ f.name }}</code></td>
+                    <td>{{ f.as_of_date or '\u2014' }}</td>
+                    <td style="text-align:right;">{{ f.months or 0 }}</td>
+                    <td style="text-align:right;">{{ f.rows }}</td>
+                    <td style="text-align:right;">
+                      ${{ '{:,.2f}'.format(f.amount or 0) }}
+                    </td>
+                    <td>
+                      {% if f.ok %}
+                        <span style="color:#2a6;">ok</span>
+                      {% else %}
+                        <span style="color:#a04;">{{ f.error }}</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </details>
+          {% endif %}
+        </div>
+      {% else %}
+        <p class="muted" style="margin-top:8px;">
+          Aggregation reads the <em>Charge-Off Amount</em> and
+          <em>Charge-Off Date</em> columns from each workbook, snaps each
+          row to its month-end, sums by Loan Code, and writes one row per
+          (loan code, month-end) into
+          <code>loan_code_chargeoff_history</code>. The "what's loaded"
+          table at the bottom of this step reads from that same table.
+        </p>
+      {% endif %}
+    </div>
+
   {% elif co_src == 'monthly_files' %}
     {% if co_monthly %}
-      <div class="upload-status-list">
-        {% for f in co_monthly %}
-          <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
-            <span class="upload-status-icon">&#10003;</span>
-            <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
-            <form method="post" style="display:inline; margin-left:auto;">
-              <input type="hidden" name="action" value="remove_co_monthly">
-              <input type="hidden" name="filename" value="{{ f.name }}">
-              <button class="btn btn-link" type="submit"
-                      style="color:#a04; padding:0 4px;"
-                      title="Remove">&times;</button>
-            </form>
-          </div>
-        {% endfor %}
-      </div>
+      <details style="margin-top:8px;">
+        <summary style="cursor:pointer; font-weight:600;">
+          Uploaded monthly charge-off files
+          <span class="muted" style="font-weight:normal;">({{ co_monthly|length }} &mdash; click to expand)</span>
+        </summary>
+        <div class="upload-status-list" style="margin-top:6px;">
+          {% for f in co_monthly %}
+            <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
+              <span class="upload-status-icon">&#10003;</span>
+              <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+              <form method="post" style="display:inline; margin-left:auto;">
+                <input type="hidden" name="action" value="remove_co_monthly">
+                <input type="hidden" name="filename" value="{{ f.name }}">
+                <button class="btn btn-link" type="submit"
+                        style="color:#a04; padding:0 4px;"
+                        title="Remove">&times;</button>
+              </form>
+            </div>
+          {% endfor %}
+        </div>
+        <form method="post" style="margin-top:8px;"
+              onsubmit="return confirm('Remove all {{ co_monthly|length }} monthly charge-off file(s) from this step? Your column mappings will be preserved if you re-add them.');">
+          <input type="hidden" name="action" value="clear_all_co_monthly">
+          <button class="btn btn-link" type="submit"
+                  style="color:#a04;">
+            Clear all files
+          </button>
+        </form>
+      </details>
     {% else %}
       <p class="muted" style="margin-top:8px;">
         No monthly charge-off files uploaded yet.
@@ -1965,8 +2839,77 @@
                               'unignore_co_layout',
                               'use_co_scan_file_as_columns') }}
 
+    {# --- Active layouts picker --- #}
+    {% if co_layouts and co_layouts|length > 0 %}
+      <div class="card" style="margin-top:12px; padding:10px;
+                               background:#fffaf2; border:1px solid #f0d9a8;">
+        <strong>Active layouts in this step</strong>
+        <span class="muted">
+          ({{ co_layouts|length }} distinct header signature(s) across
+          {{ co_layouts|sum(attribute='file_count') }} file(s))
+        </span>
+        <p class="muted" style="margin:4px 0 8px 0; font-size:12px;">
+          Click <strong>Edit Mapping</strong> on any layout to load its
+          file into the Column Mapping card below.  Each layout keeps
+          its own column mapping; loan-code &rarr; pool mapping is
+          shared across layouts and lives on the dedicated
+          <em>Loan Code Mapping</em> step (Step 3).
+        </p>
+        <table class="data-table" style="width:100%;">
+          <thead>
+            <tr>
+              <th>Sample file</th>
+              <th style="width:90px; text-align:right;">Files</th>
+              <th style="width:170px;">Column mapping</th>
+              <th style="width:140px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for L in co_layouts %}
+              <tr {% if L.is_active %}style="background:#eef6ff;"{% endif %}>
+                <td>
+                  <code>{{ L.sample_file }}</code>
+                  <br>
+                  <span class="muted" style="font-size:11px;">
+                    sig <code>{{ L.signature }}</code>
+                  </span>
+                </td>
+                <td style="text-align:right;"><strong>{{ L.file_count }}</strong></td>
+                <td>
+                  {% if L.has_column_mapping %}
+                    <span style="color:#2a6;">&#10003; saved</span>
+                  {% else %}
+                    <span class="muted">not saved</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <form method="post" style="margin:0;">
+                    <input type="hidden" name="action"
+                           value="use_co_scan_file_as_columns">
+                    <input type="hidden" name="sample_path"
+                           value="{{ L.sample_path }}">
+                    <button class="btn btn-{% if L.is_active %}secondary{% else %}primary{% endif %} btn-sm"
+                            type="submit"
+                            style="padding:2px 10px; font-size:12px;"
+                            {% if L.is_active %}disabled
+                            title="This layout is loaded in the form below"
+                            {% endif %}>
+                      {% if L.is_active %}Editing{% else %}Edit Mapping{% endif %}
+                    </button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
     {% set co_ins = state.get('co_inspect') %}
     {% set co_cols = state.get('co_columns') or {} %}
+    {% set co_active_sig = state.get('co_active_signature') or '' %}
+    {% set co_layout_cols = state.get('co_layout_columns') or {} %}
+    {% set co_lcm = (state.get('co_loan_code_map') or {}).get(co_active_sig) or {} %}
     {% set co_ma = co_cols.get('member_account') or {} %}
     {% set co_ma_mode = co_ma.get('mode', 'fixed_suffix') %}
     {% set co_ma_suffix = co_ma.get('suffix_length', 3) %}
@@ -1978,6 +2921,26 @@
         <span class="muted">
           (auto-detected from <code>{{ co_ins.filename }}</code>)
         </span>
+        {% if co_active_sig %}
+          <div class="flash info" style="margin:6px 0; font-size:12px;">
+            Editing layout
+            <code>{{ co_active_sig[:12] }}{% if co_active_sig|length > 12 %}&hellip;{% endif %}</code>
+            {% if co_active_sig in co_layout_cols %}
+              &mdash; this layout has a saved mapping; saving will update it.
+            {% else %}
+              &mdash; this layout has no saved mapping yet; saving will
+              create one for files matching this header signature.
+            {% endif %}
+          </div>
+        {% else %}
+          <div class="flash" style="margin:6px 0; font-size:12px;
+                                     background:#fff7e6; border:1px solid #fcd9a8;">
+            No layout selected &mdash; saving here updates the
+            <em>shared default</em> mapping.  To map a specific layout,
+            click <strong>Column Mapping</strong> on a row in the scan
+            results above.
+          </div>
+        {% endif %}
         {% if co_ins.error %}
           <div class="flash error" style="margin-top:6px;">
             {{ co_ins.error }}
@@ -2116,6 +3079,67 @@
             </button>
           </div>
         </form>
+
+        {# --- Loan-code -> pool mapping is now defined globally on Step 3 (Loan Code Mapping). --- #}
+        {% if co_distinct_codes %}
+          {% set lcm_global = state.get('pool_map') or {} %}
+          {% set _co_resolved = [] %}
+          {% set _co_unmapped = [] %}
+          {% for c in co_distinct_codes %}
+            {% set _v = (lcm_global.get(c) or '') | string %}
+            {% if _v and _v.strip() %}
+              {% set _ = _co_resolved.append(c) %}
+            {% else %}
+              {% set _ = _co_unmapped.append(c) %}
+            {% endif %}
+          {% endfor %}
+          <div class="muted" style="margin-top:12px; padding:8px; background:#f7f9fc; border:1px solid #e3e7ee; border-radius:4px;">
+            <strong>Loan codes resolved via Step 3 mapping:</strong>
+            {{ _co_resolved|length }} of {{ co_distinct_codes|length }}.
+            {% if _co_unmapped %}
+              <span style="color:#a60;">
+                {{ _co_unmapped|length }} unmapped code(s) will be excluded from the report:
+              </span>
+              <code>{{ _co_unmapped|join(', ') }}</code>.
+              <a href="{{ url_for('setup.step4_pools') }}"
+                 style="margin-left:6px;">Edit Loan Code Mapping (Step 3) &rarr;</a>
+            {% endif %}
+          </div>
+          {% if _co_unmapped %}
+            {% set _co_pool_choices = [] %}
+            {% for p in (state.pool_settings or []) %}
+              {% if p.name and not p.excluded and p.name not in _co_pool_choices %}
+                {% set _ = _co_pool_choices.append(p.name) %}
+              {% endif %}
+            {% endfor %}
+            <form method="post" style="margin-top:8px;">
+              <input type="hidden" name="action" value="map_unmapped_co_codes">
+              <table class="data-table" style="margin-top:4px; max-width:600px;">
+                <thead><tr><th>Loan code</th><th>Map to pool</th></tr></thead>
+                <tbody>
+                  {% for c in _co_unmapped %}
+                    <tr>
+                      <td><code>{{ c }}</code><input type="hidden" name="unmapped_code" value="{{ c }}"></td>
+                      <td>
+                        <select name="unmapped_pool_{{ loop.index0 }}" style="min-width:200px;">
+                          <option value="">&mdash; choose &mdash;</option>
+                          {% for p in _co_pool_choices %}
+                            <option value="{{ p }}">{{ p }}</option>
+                          {% endfor %}
+                          <option value="Ignore">Ignore (exclude)</option>
+                        </select>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              <button class="btn btn-secondary" type="submit" style="margin-top:6px;">
+                Save mappings
+              </button>
+              <span class="muted" style="margin-left:8px;">Saves to the global Step 3 Loan Code Mapping.</span>
+            </form>
+          {% endif %}
+        {% endif %}
         {% if co_ins.preview_rows %}
           <details style="margin-top:8px;">
             <summary style="cursor:pointer;">Preview rows</summary>
@@ -2311,7 +3335,6 @@
 
     <form method="post" style="margin-top:10px;">
       <button class="btn btn-primary" type="submit"
-              formaction="{{ url_for('setup.step3_historical') }}"
               name="action" value="run_solr_co_backfill"
               {% if not _ch or not tgt_period or not sb.get('solr_url')
                     or not co_cmap %}disabled{% endif %}>
@@ -2382,6 +3405,104 @@
     {% endif %}
   </div>
 
+  {# --- 5300/file Loan-code -> pool mapping (always shown when there are
+       any distinct loan codes from the workbook OR the DB history table).
+       This lets the user assign NCUA canonical names emitted by the
+       5300 backfill (e.g. "Used Vehicles", "Junior Liens") to the pools
+       established on Step 2, exactly like the Balance Titles flow on
+       the WARM setup. Saves into the global Step 3 Loan Code Mapping
+       so balance / CO / recov / DQ overlays all share one pool_map. --- #}
+  {% if co_distinct_codes %}
+    {% set lcm_global = state.get('pool_map') or {} %}
+    {% set _co_resolved = [] %}
+    {% set _co_unmapped = [] %}
+    {% for c in co_distinct_codes %}
+      {% set _v = (lcm_global.get(c) or '') | string %}
+      {% if _v and _v.strip() %}
+        {% set _ = _co_resolved.append(c) %}
+      {% else %}
+        {% set _ = _co_unmapped.append(c) %}
+      {% endif %}
+    {% endfor %}
+    <div class="card" style="margin-top:16px;">
+      <strong>Map charge-off loan codes &rarr; pools</strong>
+      <p class="muted" style="margin:4px 0 0 0;">
+        {{ _co_resolved|length }} of {{ co_distinct_codes|length }}
+        loan code(s) already mapped to a pool.
+        {% if _co_unmapped %}
+          <span style="color:#a60;">
+            {{ _co_unmapped|length }} need to be mapped before they
+            appear in the report.
+          </span>
+        {% endif %}
+        Saves to the global Step 3 Loan Code Mapping (used by every
+        history overlay).
+      </p>
+      {% if _co_unmapped %}
+        {% set _co_pool_choices = [] %}
+        {% for p in (state.pool_settings or []) %}
+          {% if p.name and not p.excluded
+                and p.name not in _co_pool_choices %}
+            {% set _ = _co_pool_choices.append(p.name) %}
+          {% endif %}
+        {% endfor %}
+        <form method="post" style="margin-top:8px;">
+          <input type="hidden" name="action"
+                 value="map_unmapped_co_codes">
+          <table class="data-table"
+                 style="margin-top:4px; max-width:600px;">
+            <thead>
+              <tr><th>Loan code</th><th>Map to pool</th></tr>
+            </thead>
+            <tbody>
+              {% for c in _co_unmapped %}
+                <tr>
+                  <td><code>{{ c }}</code>
+                    <input type="hidden" name="unmapped_code"
+                           value="{{ c }}">
+                  </td>
+                  <td>
+                    <select name="unmapped_pool_{{ loop.index0 }}"
+                            style="min-width:200px;">
+                      <option value="">&mdash; choose &mdash;</option>
+                      {% for p in _co_pool_choices %}
+                        <option value="{{ p }}">{{ p }}</option>
+                      {% endfor %}
+                      <option value="Ignore">Ignore (exclude)</option>
+                    </select>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <button class="btn btn-secondary" type="submit"
+                  style="margin-top:6px;">
+            Save mappings
+          </button>
+        </form>
+      {% endif %}
+      {% if _co_resolved %}
+        <details style="margin-top:8px;">
+          <summary class="muted" style="cursor:pointer;">
+            Already mapped ({{ _co_resolved|length }})
+          </summary>
+          <table class="data-table"
+                 style="margin-top:4px; max-width:600px;">
+            <thead><tr><th>Loan code</th><th>Pool</th></tr></thead>
+            <tbody>
+              {% for c in _co_resolved %}
+                <tr>
+                  <td><code>{{ c }}</code></td>
+                  <td>{{ lcm_global.get(c) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </details>
+      {% endif %}
+    </div>
+  {% endif %}
+
   {{ amount_history_matrix(co_history_view|default(none), state.credit_union,
         'charge-off',
         'Nothing in the charge-off history database yet for this CU. '
@@ -2401,6 +3522,57 @@
   <h3>3. Historical Recoveries
     <span class="badge-optional">Optional</span>
   </h3>
+  {% set rprov = recov_provenance or {} %}
+  {% if rprov.no_recoveries %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #ccc; background:#f6f6f6;">
+    <div style="font-weight:600; color:#555; margin-bottom:4px;">
+      &#9432; How these recoveries were compiled
+    </div>
+    <div class="muted">{{ rprov.summary }}</div>
+  </div>
+  {% elif rprov.recorded %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #b6d4e6; background:#eef6fb;">
+    <div style="font-weight:600; color:#20628a; margin-bottom:4px;">
+      &#9432; How these recoveries were compiled
+    </div>
+    <div style="margin-bottom:4px;"><strong>{{ rprov.label }}</strong></div>
+    {% if rprov.summary %}<div class="muted" style="margin-bottom:6px;">{{ rprov.summary }}</div>{% endif %}
+    {% if rprov.cu_files %}
+    <div style="margin-bottom:4px;"><span class="muted">CU-provided file(s):</span>
+      <ul style="margin:2px 0 4px 18px;">
+        {% for f in rprov.cu_files %}
+        <li>{{ f.name }}{% if f.file_pattern %} <code style="font-size:0.85em;">{{ f.file_pattern }}</code>{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if rprov.db_sources %}
+    <div style="margin-bottom:4px;"><span class="muted">Backfill source(s):</span>
+      <ul style="margin:2px 0 4px 18px;">
+        {% for s in rprov.db_sources %}
+        <li>{{ s.label }}{% if s.years %} ({{ s.years }}){% endif %}{% if s.total %} &mdash; ${{ '{:,.2f}'.format(s.total) }}{% endif %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if rprov.validation_hint %}
+    <div style="margin-top:6px; padding:6px 8px; background:#ffffff;
+                border-left:3px solid #20628a; font-size:0.92em;">
+      <strong>To validate:</strong> {{ rprov.validation_hint }}
+    </div>
+    {% endif %}
+  </div>
+  {% elif rprov.recorded == false and not state.no_hist_recoveries %}
+  <div style="margin:8px 0 14px; padding:12px 14px; border-radius:6px;
+              border:1px solid #e6cfa0; background:#fdf6e9;">
+    <div style="font-weight:600; color:#8a5a20; margin-bottom:4px;">
+      &#9888; Source not recorded
+    </div>
+    <div class="muted">{{ rprov.summary or "The source of these historical recoveries has not been confirmed. Configure it below (or mark that this CU has no recoveries) so a reviewer can validate them." }}</div>
+  </div>
+  {% endif %}
   <p class="muted">
     If this CU has no recovery history, check the box and skip the rest of
     this section. Otherwise pick where the historical recoveries come from
@@ -2456,21 +3628,27 @@
 
     {% if recov_src == 'single_workbook' %}
       {% if recov_files %}
-        <div class="upload-status-list">
-          {% for f in recov_files %}
-            <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
-              <span class="upload-status-icon">&#10003;</span>
-              <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
-              <form method="post" style="display:inline; margin-left:auto;">
-                <input type="hidden" name="action" value="remove_recov_workbook">
-                <input type="hidden" name="filename" value="{{ f.name }}">
-                <button class="btn btn-link" type="submit"
-                        style="color:#a04; padding:0 4px;"
-                        title="Remove">&times;</button>
-              </form>
-            </div>
-          {% endfor %}
-        </div>
+        <details style="margin-top:8px;">
+          <summary style="cursor:pointer; font-weight:600;">
+            Uploaded recoveries workbook(s)
+            <span class="muted" style="font-weight:normal;">({{ recov_files|length }} &mdash; click to expand)</span>
+          </summary>
+          <div class="upload-status-list" style="margin-top:6px;">
+            {% for f in recov_files %}
+              <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
+                <span class="upload-status-icon">&#10003;</span>
+                <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+                <form method="post" style="display:inline; margin-left:auto;">
+                  <input type="hidden" name="action" value="remove_recov_workbook">
+                  <input type="hidden" name="filename" value="{{ f.name }}">
+                  <button class="btn btn-link" type="submit"
+                          style="color:#a04; padding:0 4px;"
+                          title="Remove">&times;</button>
+                </form>
+              </div>
+            {% endfor %}
+          </div>
+        </details>
       {% endif %}
       <form method="post" enctype="multipart/form-data" style="margin-top:12px;">
         <label>Historical recoveries workbook
@@ -2484,23 +3662,216 @@
         </button>
       </form>
 
+      {# Column-mapping card for the single-workbook upload. Uses the
+         same `recov_inspect` / `recov_columns` state and
+         `save_recov_columns` action as the monthly-files mode. #}
+      {% set recov_ins_sw = state.get('recov_inspect') %}
+      {% set recov_cols_sw = state.get('recov_columns') or {} %}
+      {% if recov_ins_sw and recov_files %}
+        <div class="card" style="margin-top:12px; padding:10px;
+                                 background:#f7faff;">
+          <strong>Column Mapping</strong>
+          <span class="muted">
+            (auto-detected from <code>{{ recov_ins_sw.filename }}</code>)
+          </span>
+          <p class="muted" style="margin:4px 0 0 0; font-size:12px;">
+            Pick the workbook columns the aggregator should use. If the
+            auto-detector left any field blank, choose it here and click
+            <strong>Save Column Mapping</strong>, then re-run
+            <em>Aggregate Recoveries Workbook(s)</em>.
+          </p>
+          {% if recov_ins_sw.error %}
+            <div class="flash error" style="margin-top:6px;">
+              {{ recov_ins_sw.error }}
+            </div>
+          {% endif %}
+          <form method="post" style="margin-top:8px;">
+            <div style="display:grid;
+                        grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+                        gap:12px;">
+              <label>Loan Code column
+                <select name="recov_loan_code_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins_sw.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols_sw.get('loan_code') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>Recovery Amount column
+                <select name="recov_amount_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins_sw.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols_sw.get('amount') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>Recovery Date column
+                <select name="recov_date_col">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for h in recov_ins_sw.headers %}
+                    <option value="{{ h }}"
+                      {% if recov_cols_sw.get('date') == h %}selected{% endif %}>
+                      {{ h }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+            </div>
+            <div style="margin-top:8px;">
+              <button class="btn btn-secondary" type="submit"
+                      name="action" value="save_recov_columns">
+                Save Column Mapping
+              </button>
+              <button class="btn btn-link" type="submit"
+                      name="action" value="reinspect_recov_monthly"
+                      style="margin-left:8px;"
+                      title="Re-read headers from the uploaded workbook">
+                Re-inspect
+              </button>
+              {% set _co_cols_for_copy_sw = state.get('co_columns') or {} %}
+              {% if _co_cols_for_copy_sw.get('loan_code') or _co_cols_for_copy_sw.get('amount') %}
+                <button class="btn btn-link" type="submit"
+                        name="action" value="copy_co_mapping_to_recov"
+                        style="margin-left:8px;"
+                        title="Copy the charge-off mapping into recoveries (amount column auto-swapped to recoveries; date column swapped if a recoveries-specific date header exists). Use this when charge-offs and recoveries come from the same file.">
+                  Copy from Charge-Off mapping
+                </button>
+              {% endif %}
+            </div>
+          </form>
+          {% if recov_ins_sw.preview_rows %}
+            <details style="margin-top:8px;">
+              <summary style="cursor:pointer;">Preview rows</summary>
+              <table class="data-table" style="margin-top:6px;">
+                <thead><tr>
+                  {% for h in recov_ins_sw.headers %}<th>{{ h }}</th>{% endfor %}
+                </tr></thead>
+                <tbody>
+                {% for r in recov_ins_sw.preview_rows %}
+                  <tr>
+                    {% for c in r %}<td>{{ c if c is not none else '' }}</td>{% endfor %}
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </details>
+          {% endif %}
+        </div>
+      {% endif %}
+
+      {# Aggregate uploaded recoveries workbook(s) into the historical
+         recoveries DB.  Same per-row date binning as the CO workbook
+         path above. #}
+      <div style="margin-top:14px;">
+        {% set recov_agg = state.get('monthly_recov_aggregate') %}
+        <form method="post" style="display:inline;">
+          <button class="btn btn-primary" type="submit" name="action"
+                  value="process_recov_workbook"
+                  {% if not recov_files %}disabled{% endif %}>
+            Aggregate Recoveries Workbook(s) Into Database
+          </button>
+        </form>
+        {% if not recov_files %}
+          <span class="muted" style="margin-left:8px;">
+            Upload at least one workbook first.
+          </span>
+        {% endif %}
+        {% if recov_agg %}
+          <div class="card" style="margin-top:10px; padding:10px;">
+            <strong>Last aggregation:</strong>
+            {% if recov_agg.ok %}
+              wrote <strong>{{ recov_agg.total_rows_written }}</strong>
+              row(s) across
+              <strong>{{ recov_agg.months_written|length }}</strong>
+              month(s) &mdash; total
+              <strong>${{ '{:,.2f}'.format(recov_agg.total_amount) }}</strong>.
+            {% else %}
+              <span style="color:#a04;">{{ recov_agg.error or 'failed' }}</span>
+            {% endif %}
+            {% if recov_agg.files %}
+              <details style="margin-top:6px;">
+                <summary style="cursor:pointer;">Per-file detail</summary>
+                <table class="data-table" style="margin-top:6px;">
+                  <thead><tr>
+                    <th>File</th><th>Date Range</th>
+                    <th style="text-align:right;">Months</th>
+                    <th style="text-align:right;">Rows</th>
+                    <th style="text-align:right;">Amount</th>
+                    <th>Status</th>
+                  </tr></thead>
+                  <tbody>
+                  {% for f in recov_agg.files %}
+                    <tr>
+                      <td><code>{{ f.name }}</code></td>
+                      <td>{{ f.as_of_date or '\u2014' }}</td>
+                      <td style="text-align:right;">{{ f.months or 0 }}</td>
+                      <td style="text-align:right;">{{ f.rows }}</td>
+                      <td style="text-align:right;">
+                        ${{ '{:,.2f}'.format(f.amount or 0) }}
+                      </td>
+                      <td>
+                        {% if f.ok %}
+                          <span style="color:#2a6;">ok</span>
+                        {% else %}
+                          <span style="color:#a04;">{{ f.error }}</span>
+                        {% endif %}
+                      </td>
+                    </tr>
+                  {% endfor %}
+                  </tbody>
+                </table>
+              </details>
+            {% endif %}
+          </div>
+        {% else %}
+          <p class="muted" style="margin-top:8px;">
+            Aggregation reads the <em>Recovery Amount</em> and a
+            recovery-date column from each workbook, snaps each row to
+            its month-end, sums by Loan Code, and writes one row per
+            (loan code, month-end) into
+            <code>loan_code_recovery_history</code>. The "what's loaded"
+            table at the bottom of this step reads from that same table.
+          </p>
+        {% endif %}
+      </div>
+
     {% elif recov_src == 'monthly_files' %}
       {% if recov_monthly %}
-        <div class="upload-status-list">
-          {% for f in recov_monthly %}
-            <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
-              <span class="upload-status-icon">&#10003;</span>
-              <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
-              <form method="post" style="display:inline; margin-left:auto;">
-                <input type="hidden" name="action" value="remove_recov_monthly">
-                <input type="hidden" name="filename" value="{{ f.name }}">
-                <button class="btn btn-link" type="submit"
-                        style="color:#a04; padding:0 4px;"
-                        title="Remove">&times;</button>
-              </form>
-            </div>
-          {% endfor %}
-        </div>
+        <details style="margin-top:8px;">
+          <summary style="cursor:pointer; font-weight:600;">
+            Uploaded monthly recoveries files
+            <span class="muted" style="font-weight:normal;">({{ recov_monthly|length }} &mdash; click to expand)</span>
+          </summary>
+          <div class="upload-status-list" style="margin-top:6px;">
+            {% for f in recov_monthly %}
+              <div class="upload-status-item" style="display:flex; align-items:center; gap:8px;">
+                <span class="upload-status-icon">&#10003;</span>
+                <code>{{ f.name }}</code>{% if f.period %} <span class="muted">({{ f.period }})</span>{% endif %}
+                <form method="post" style="display:inline; margin-left:auto;">
+                  <input type="hidden" name="action" value="remove_recov_monthly">
+                  <input type="hidden" name="filename" value="{{ f.name }}">
+                  <button class="btn btn-link" type="submit"
+                          style="color:#a04; padding:0 4px;"
+                          title="Remove">&times;</button>
+                </form>
+              </div>
+            {% endfor %}
+          </div>
+          <form method="post" style="margin-top:8px;"
+                onsubmit="return confirm('Remove all {{ recov_monthly|length }} monthly recoveries file(s) from this step? Your column mappings will be preserved if you re-add them.');">
+            <input type="hidden" name="action" value="clear_all_recov_monthly">
+            <button class="btn btn-link" type="submit"
+                    style="color:#a04;">
+              Clear all files
+            </button>
+          </form>
+        </details>
       {% else %}
         <p class="muted" style="margin-top:8px;">
           No monthly recoveries files uploaded yet.
@@ -2545,8 +3916,77 @@
                                 'unignore_recov_layout',
                                 'use_recov_scan_file_as_columns') }}
 
+      {# --- Active layouts picker --- #}
+      {% if recov_layouts and recov_layouts|length > 0 %}
+        <div class="card" style="margin-top:12px; padding:10px;
+                                 background:#fffaf2; border:1px solid #f0d9a8;">
+          <strong>Active layouts in this step</strong>
+          <span class="muted">
+            ({{ recov_layouts|length }} distinct header signature(s) across
+            {{ recov_layouts|sum(attribute='file_count') }} file(s))
+          </span>
+          <p class="muted" style="margin:4px 0 8px 0; font-size:12px;">
+            Click <strong>Edit Mapping</strong> on any layout to load its
+            file into the Column Mapping card below.  Each layout keeps
+            its own column mapping; loan-code &rarr; pool mapping is
+            shared across layouts and lives on the dedicated
+            <em>Loan Code Mapping</em> step (Step 3).
+          </p>
+          <table class="data-table" style="width:100%;">
+            <thead>
+              <tr>
+                <th>Sample file</th>
+                <th style="width:90px; text-align:right;">Files</th>
+                <th style="width:170px;">Column mapping</th>
+                <th style="width:140px;"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for L in recov_layouts %}
+                <tr {% if L.is_active %}style="background:#eef6ff;"{% endif %}>
+                  <td>
+                    <code>{{ L.sample_file }}</code>
+                    <br>
+                    <span class="muted" style="font-size:11px;">
+                      sig <code>{{ L.signature }}</code>
+                    </span>
+                  </td>
+                  <td style="text-align:right;"><strong>{{ L.file_count }}</strong></td>
+                  <td>
+                    {% if L.has_column_mapping %}
+                      <span style="color:#2a6;">&#10003; saved</span>
+                    {% else %}
+                      <span class="muted">not saved</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    <form method="post" style="margin:0;">
+                      <input type="hidden" name="action"
+                             value="use_recov_scan_file_as_columns">
+                      <input type="hidden" name="sample_path"
+                             value="{{ L.sample_path }}">
+                      <button class="btn btn-{% if L.is_active %}secondary{% else %}primary{% endif %} btn-sm"
+                              type="submit"
+                              style="padding:2px 10px; font-size:12px;"
+                              {% if L.is_active %}disabled
+                              title="This layout is loaded in the form below"
+                              {% endif %}>
+                        {% if L.is_active %}Editing{% else %}Edit Mapping{% endif %}
+                      </button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+
       {% set recov_ins = state.get('recov_inspect') %}
       {% set recov_cols = state.get('recov_columns') or {} %}
+      {% set recov_active_sig = state.get('recov_active_signature') or '' %}
+      {% set recov_layout_cols = state.get('recov_layout_columns') or {} %}
+      {% set recov_lcm = (state.get('recov_loan_code_map') or {}).get(recov_active_sig) or {} %}
       {% set recov_ma = recov_cols.get('member_account') or {} %}
       {% set recov_ma_mode = recov_ma.get('mode', 'fixed_suffix') %}
       {% set recov_ma_suffix = recov_ma.get('suffix_length', 3) %}
@@ -2558,6 +3998,26 @@
           <span class="muted">
             (auto-detected from <code>{{ recov_ins.filename }}</code>)
           </span>
+          {% if recov_active_sig %}
+            <div class="flash info" style="margin:6px 0; font-size:12px;">
+              Editing layout
+              <code>{{ recov_active_sig[:12] }}{% if recov_active_sig|length > 12 %}&hellip;{% endif %}</code>
+              {% if recov_active_sig in recov_layout_cols %}
+                &mdash; this layout has a saved mapping; saving will update it.
+              {% else %}
+                &mdash; this layout has no saved mapping yet; saving will
+                create one for files matching this header signature.
+              {% endif %}
+            </div>
+          {% else %}
+            <div class="flash" style="margin:6px 0; font-size:12px;
+                                       background:#fff7e6; border:1px solid #fcd9a8;">
+              No layout selected &mdash; saving here updates the
+              <em>shared default</em> mapping.  To map a specific layout,
+              click <strong>Column Mapping</strong> on a row in the scan
+              results above.
+            </div>
+          {% endif %}
           {% if recov_ins.error %}
             <div class="flash error" style="margin-top:6px;">
               {{ recov_ins.error }}
@@ -2694,8 +4154,78 @@
                       title="Re-read headers from the first file">
                 Re-inspect
               </button>
+              {% set _co_cols_for_copy = state.get('co_columns') or {} %}
+              {% if _co_cols_for_copy.get('loan_code') or _co_cols_for_copy.get('amount') %}
+                <button class="btn btn-link" type="submit"
+                        name="action" value="copy_co_mapping_to_recov"
+                        style="margin-left:8px;"
+                        title="Copy the charge-off mapping into recoveries (amount column auto-swapped to recoveries; date column swapped if a recoveries-specific date header exists). Use this when charge-offs and recoveries come from the same file.">
+                  Copy from Charge-Off mapping
+                </button>
+              {% endif %}
             </div>
           </form>
+
+          {# --- Loan-code -> pool mapping is now defined globally on Step 3 (Loan Code Mapping). --- #}
+          {% if recov_distinct_codes %}
+            {% set lcm_global = state.get('pool_map') or {} %}
+            {% set _rc_resolved = [] %}
+            {% set _rc_unmapped = [] %}
+            {% for c in recov_distinct_codes %}
+              {% set _v = (lcm_global.get(c) or '') | string %}
+              {% if _v and _v.strip() %}
+                {% set _ = _rc_resolved.append(c) %}
+              {% else %}
+                {% set _ = _rc_unmapped.append(c) %}
+              {% endif %}
+            {% endfor %}
+            <div class="muted" style="margin-top:12px; padding:8px; background:#f7f9fc; border:1px solid #e3e7ee; border-radius:4px;">
+              <strong>Loan codes resolved via Step 3 mapping:</strong>
+              {{ _rc_resolved|length }} of {{ recov_distinct_codes|length }}.
+              {% if _rc_unmapped %}
+                <span style="color:#a60;">
+                  {{ _rc_unmapped|length }} unmapped code(s) will be excluded from the report:
+                </span>
+                <code>{{ _rc_unmapped|join(', ') }}</code>.
+                <a href="{{ url_for('setup.step4_pools') }}"
+                   style="margin-left:6px;">Edit Loan Code Mapping (Step 3) &rarr;</a>
+              {% endif %}
+            </div>
+            {% if _rc_unmapped %}
+              {% set _rc_pool_choices = [] %}
+              {% for p in (state.pool_settings or []) %}
+                {% if p.name and not p.excluded and p.name not in _rc_pool_choices %}
+                  {% set _ = _rc_pool_choices.append(p.name) %}
+                {% endif %}
+              {% endfor %}
+              <form method="post" style="margin-top:8px;">
+                <input type="hidden" name="action" value="map_unmapped_recov_codes">
+                <table class="data-table" style="margin-top:4px; max-width:600px;">
+                  <thead><tr><th>Loan code</th><th>Map to pool</th></tr></thead>
+                  <tbody>
+                    {% for c in _rc_unmapped %}
+                      <tr>
+                        <td><code>{{ c }}</code><input type="hidden" name="unmapped_code" value="{{ c }}"></td>
+                        <td>
+                          <select name="unmapped_pool_{{ loop.index0 }}" style="min-width:200px;">
+                            <option value="">&mdash; choose &mdash;</option>
+                            {% for p in _rc_pool_choices %}
+                              <option value="{{ p }}">{{ p }}</option>
+                            {% endfor %}
+                            <option value="Ignore">Ignore (exclude)</option>
+                          </select>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+                <button class="btn btn-secondary" type="submit" style="margin-top:6px;">
+                  Save mappings
+                </button>
+                <span class="muted" style="margin-left:8px;">Saves to the global Step 3 Loan Code Mapping.</span>
+              </form>
+            {% endif %}
+          {% endif %}
           {% if recov_ins.preview_rows %}
             <details style="margin-top:8px;">
               <summary style="cursor:pointer;">Preview rows</summary>
@@ -2892,7 +4422,6 @@
 
       <form method="post" style="margin-top:10px;">
         <button class="btn btn-primary" type="submit"
-                formaction="{{ url_for('setup.step3_historical') }}"
                 name="action" value="run_solr_recov_backfill"
                 {% if not _ch or not tgt_period or not sb.get('solr_url')
                       or not rec_cmap %}disabled{% endif %}>
@@ -2964,6 +4493,100 @@
     </div>
   </div>
 
+  {# --- Recovery loan-code -> pool mapping (always shown when there are
+       any distinct loan codes from the workbook OR the DB history table).
+       Mirrors the CO section so 5300-backfill canonical names get mapped. --- #}
+  {% if recov_distinct_codes %}
+    {% set lcm_global = state.get('pool_map') or {} %}
+    {% set _rc_resolved = [] %}
+    {% set _rc_unmapped = [] %}
+    {% for c in recov_distinct_codes %}
+      {% set _v = (lcm_global.get(c) or '') | string %}
+      {% if _v and _v.strip() %}
+        {% set _ = _rc_resolved.append(c) %}
+      {% else %}
+        {% set _ = _rc_unmapped.append(c) %}
+      {% endif %}
+    {% endfor %}
+    <div class="card" style="margin-top:16px;">
+      <strong>Map recovery loan codes &rarr; pools</strong>
+      <p class="muted" style="margin:4px 0 0 0;">
+        {{ _rc_resolved|length }} of {{ recov_distinct_codes|length }}
+        loan code(s) already mapped to a pool.
+        {% if _rc_unmapped %}
+          <span style="color:#a60;">
+            {{ _rc_unmapped|length }} need to be mapped before they
+            appear in the report.
+          </span>
+        {% endif %}
+        Saves to the global Step 3 Loan Code Mapping (used by every
+        history overlay).
+      </p>
+      {% if _rc_unmapped %}
+        {% set _rc_pool_choices = [] %}
+        {% for p in (state.pool_settings or []) %}
+          {% if p.name and not p.excluded
+                and p.name not in _rc_pool_choices %}
+            {% set _ = _rc_pool_choices.append(p.name) %}
+          {% endif %}
+        {% endfor %}
+        <form method="post" style="margin-top:8px;">
+          <input type="hidden" name="action"
+                 value="map_unmapped_recov_codes">
+          <table class="data-table"
+                 style="margin-top:4px; max-width:600px;">
+            <thead>
+              <tr><th>Loan code</th><th>Map to pool</th></tr>
+            </thead>
+            <tbody>
+              {% for c in _rc_unmapped %}
+                <tr>
+                  <td><code>{{ c }}</code>
+                    <input type="hidden" name="unmapped_code"
+                           value="{{ c }}">
+                  </td>
+                  <td>
+                    <select name="unmapped_pool_{{ loop.index0 }}"
+                            style="min-width:200px;">
+                      <option value="">&mdash; choose &mdash;</option>
+                      {% for p in _rc_pool_choices %}
+                        <option value="{{ p }}">{{ p }}</option>
+                      {% endfor %}
+                      <option value="Ignore">Ignore (exclude)</option>
+                    </select>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <button class="btn btn-secondary" type="submit"
+                  style="margin-top:6px;">
+            Save mappings
+          </button>
+        </form>
+      {% endif %}
+      {% if _rc_resolved %}
+        <details style="margin-top:8px;">
+          <summary class="muted" style="cursor:pointer;">
+            Already mapped ({{ _rc_resolved|length }})
+          </summary>
+          <table class="data-table"
+                 style="margin-top:4px; max-width:600px;">
+            <thead><tr><th>Loan code</th><th>Pool</th></tr></thead>
+            <tbody>
+              {% for c in _rc_resolved %}
+                <tr>
+                  <td><code>{{ c }}</code></td>
+                  <td>{{ lcm_global.get(c) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </details>
+      {% endif %}
+    </div>
+  {% endif %}
+
   {{ amount_history_matrix(recov_history_view|default(none), state.credit_union,
         'recovery',
         'Nothing in the recovery history database yet for this CU. '
@@ -2978,11 +4601,15 @@
      - monthly_loan_extracts -> history_view.row_count > 0
      - annual_balance_sheets -> monthly_bal.year_files
      - monthly_balance_sheets -> monthly_bal.monthly_files (per-month)
-     - single_workbook / legacy folder scan -> hist_scan.monthly_files     Treat the section as complete if ANY of these supplied data. #}
+     - single_workbook / legacy folder scan -> hist_scan.monthly_files
+     - 5300 distributed backfill (NCUA) -> hist_extracts.solr_backfill.last_run.ok
+     Treat the section as complete if ANY of these supplied data. #}
+{% set _sb_last = (((state.hist_extracts or {}).get('solr_backfill') or {}).get('last_run') or {}) %}
 {% set has_balances = hist_scan.get('monthly_files')
       or (history_view and history_view.row_count)
       or _mb_nav.get('year_files')
-      or _mb_nav.get('monthly_files') %}
+      or _mb_nav.get('monthly_files')
+      or (_sb_last.get('ok') and (_sb_last.get('months_filled') or _sb_last.get('rows_written'))) %}
 {% set has_co = hist_scan.get('co_files')
       or hist_scan.get('monthly_co_files')
       or (co_history_view and co_history_view.row_count) %}
@@ -2992,11 +4619,15 @@
       or (recov_history_view and recov_history_view.row_count) %}
 {% set hpm2 = state.hist_pool_map or {} %}
 {% set mapping_required = hist_scan.get('monthly_files')
-      and (hpm2.get('labels') | length) > 0 %}
+      and ((hpm2.get('labels') or []) | length) > 0 %}
 {% set ns = namespace(complete=True) %}
 {% if mapping_required %}
   {% for lbl in hpm2.get('labels', []) %}
-    {% if not (hpm2.get('mapping') or {}).get(lbl) %}
+    {# A row counts as "complete" if it has either a real pool or the
+       explicit "__ignore__" sentinel (user chose to skip it). Only an
+       unreviewed blank keeps the section incomplete. #}
+    {% set _m = (hpm2.get('mapping') or {}).get(lbl) %}
+    {% if not _m %}
       {% set ns.complete = False %}
     {% endif %}
   {% endfor %}

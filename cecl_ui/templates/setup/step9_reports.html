@@ -57,11 +57,24 @@
             it manually when needed.</div>
         </span>
       </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
+        <input type="checkbox" name="mgmt_adj_napkin"
+               {% if state.reports.get('mgmt_adj_napkin', True) %}checked{% endif %}>
+        <span>
+          <strong>Management Adjustment Worksheet</strong>
+          <div class="help">Standalone what-if workbook mirroring the
+            <em>Mgmt Adj Napkin</em> tab. Each pool gets a Total row whose
+            <em>Management Adj</em> cell is editable; adjusted columns
+            recalculate automatically and a <em>Variance</em> column shows
+            the impact relative to the baseline.</div>
+        </span>
+      </label>
     </fieldset>
 
     <div class="btn-row">
       <a class="btn btn-secondary" href="{{ url_for('setup.step8_mgmt_adj') }}">&larr; Back</a>
-      <button class="btn btn-primary" type="submit">Next: Review &rarr;</button>
+      <button class="btn btn-primary" type="submit" name="action" value="next">Next: Review &rarr;</button>
     </div>
   </form>
 </div>

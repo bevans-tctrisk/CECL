@@ -131,6 +131,7 @@ def get_pools(cfg: dict[str, Any]) -> list[dict[str, Any]]:
             "acl_months": int(acl_map[n]) if n in acl_map else None,
             "excluded": n in excl,
             "use_default_mgmt_adj": False,
+            "brr": False,
         })
     return out
 
@@ -148,6 +149,12 @@ def _normalize_pool(p: dict[str, Any]) -> dict[str, Any]:
         "acl_months": acl_int,
         "excluded": bool(p.get("excluded", False)),
         "use_default_mgmt_adj": bool(p.get("use_default_mgmt_adj", False)),
+        # ``brr`` is True when the pool is broken out by Business Risk
+        # Ratings instead of Credit Grade bands. Only meaningful when
+        # ``risk_rated`` is True. Defaults to False so legacy configs
+        # (which don't carry this field) keep using credit grades.
+        "brr": bool(p.get("brr", False)) and bool(p.get("risk_rated", True))
+                 and not bool(p.get("excluded", False)),
     }
 
 
@@ -204,9 +211,14 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
     # NCUA charter number — only emit when present.
     if state.get("charter_number"):
         cfg["charter_number"] = str(state["charter_number"])
+    # Report period (YYYY-MM) — used as a snapshot fallback when a
+    # loan-data filename has a month name but no year.
+    if state.get("report_period"):
+        cfg["report_period"] = str(state["report_period"]).strip()
     cfg.update({
         "file_pattern": state["file_pattern"],
         "date_pattern": state["date_pattern"],
+        "date_format": state.get("date_format") or "YYYY-MM",
         "account_suffix_length": int(state.get("account_suffix_length", 3)),
         "member_account": dict(state.get("member_account") or {
             "mode": "fixed_suffix",
@@ -215,7 +227,7 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         }),
         "has_header": bool(state.get("has_header", True)),
         "column_mappings": state["column_mappings"],
-        "credit_pull": state["credit_pull"],
+        "credit_pull": state.get("credit_pull") or {},
         "balance_format": {
             "remove_chars": state.get("balance_remove_chars", ["$", ","]),
             "accounting_negatives": bool(
@@ -233,8 +245,17 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         "no_score_label": state.get("no_score_label", "Not Reported"),
         "reports": state["reports"],
         "economic_data": state["economic_data"],
-        "mgmt_adj": state["mgmt_adj"],
+        "mgmt_adj": state.get("mgmt_adj") or {"ltv_baseline": 0.9, "probability_factor": 0.35},
     })
+    # Headerless positional extracts address columns by 0-based integer
+    # position; drop any leftover named/placeholder mappings (default-state
+    # strings like 'DQ_DAYS'/'OPEN_DATE') that can't resolve to a position so
+    # the importer doesn't warn or mis-read. Keep ints and ``*_static`` keys.
+    if not cfg["has_header"]:
+        cfg["column_mappings"] = {
+            k: v for k, v in (cfg.get("column_mappings") or {}).items()
+            if isinstance(v, int) or str(k).endswith("_static")
+        }
     # Per-pool management-adjustment overlay — only emitted when non-empty so
     # the YAML stays clean for CUs that don't use it.
     overlay = state.get("mgmt_adj_by_pool") or {}
@@ -257,6 +278,12 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         ma_lf = lf.get("member_account") or {}
         if not cm:
             continue
+        # Headerless extract: keep only integer positions / *_static keys.
+        if not bool(lf.get("has_header")):
+            cm = {k: v for k, v in cm.items()
+                  if isinstance(v, int) or str(k).endswith("_static")}
+            if not cm:
+                continue
         entry: dict[str, Any] = {
             "label": lf.get("name") or "",
             "file_pattern": lf.get("file_pattern") or "",
@@ -276,6 +303,14 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             hr_lf = 0
         if hr_lf > 1:
             entry["header_row"] = hr_lf
+        # Phase 9.22: per-extract ``pool_code_split`` override. When the
+        # wizard's Sample step set this on the entry, faithfully emit it
+        # (including the empty string, which signals "do not split" — used
+        # for CUMA mortgage files whose loan codes legitimately contain
+        # ``/``, e.g. ``15/15 ARM``). Absent key inherits the CU-level
+        # ``pool_code_split``.
+        if "pool_code_split" in lf:
+            entry["pool_code_split"] = lf.get("pool_code_split") or ""
         extracts_block.append(entry)
     if extracts_block:
         cfg["loan_data_extracts"] = extracts_block
@@ -295,9 +330,31 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             "acl_months": int(p["acl_months"]) if p.get("acl_months") else None,
             "excluded": bool(p.get("excluded")),
             "use_default_mgmt_adj": bool(p.get("use_default_mgmt_adj")),
+            "brr": bool(p.get("brr")),
         })
     if pools_block:
         set_pools(cfg, pools_block)
+
+    # Business Risk Ratings (optional CU-wide registry — only emitted
+    # when the user enabled BRR on the Credit Grades step). Mirrors the
+    # wizard's ``state.uses_brr`` flag plus the ``business_risk_ratings``
+    # list of {label, criteria} rows. Downstream the report engine looks
+    # at each pool's ``brr`` flag to decide whether to bucket loans by
+    # credit grade or BRR label; the loan-extract column that carries
+    # the raw rating value rides in ``column_mappings.business_risk_rating``
+    # (per extract) as already mapped on the Column Mappings step.
+    brr_rows_raw = state.get("business_risk_ratings") or []
+    brr_rows: list[dict[str, Any]] = []
+    for r in brr_rows_raw:
+        lbl = str((r or {}).get("label") or "").strip()
+        crit = str((r or {}).get("criteria") or "").strip()
+        if not lbl and not crit:
+            continue
+        brr_rows.append({"label": lbl, "criteria": crit})
+    if state.get("uses_brr") or brr_rows:
+        cfg["uses_brr"] = bool(state.get("uses_brr"))
+        if brr_rows:
+            cfg["business_risk_ratings"] = brr_rows
 
     try:
         acl_bal = float(state.get("acl_balance") or 0)
@@ -359,6 +416,13 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         acl_block["history"] = {
             d: float(v) for d, v in sorted(acl_history.items())
         }
+    # NCUA 5300 fallback flag — emitted unconditionally so the report
+    # engine has a clear True/False toggle. Default True for any wizard
+    # state that didn't explicitly set it (matches the new-CU default).
+    if acl_state:
+        acl_block["use_5300_fallback"] = bool(
+            acl_state.get("use_5300_fallback", True)
+        )
     if acl_block:
         cfg["acl"] = acl_block
 
@@ -378,6 +442,52 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             })
         if oac:
             cfg["other_allowance_considerations"] = oac
+
+    # Data-derived "Negative Share Provision" OAC. Emitted as an
+    # other_allowance_considerations entry with source: negative_share so the
+    # report engine recomputes balance / rate / amount each quarter.
+    if state.get("include_negative_share"):
+        ns = state.get("negative_share") or {}
+        try:
+            life_months = int(ns.get("life_of_loan_months") or 12)
+        except (TypeError, ValueError):
+            life_months = 12
+        ns_entry = {
+            "title": str(ns.get("title") or "").strip() or "Negative Share Provision",
+            "source": "negative_share",
+            "life_of_loan_months": life_months,
+            "source_folder": str(ns.get("source_folder") or "").strip(),
+            "balance_column": str(ns.get("balance_column") or "").strip()
+            or "Current Balance",
+            "balance_pattern": str(ns.get("balance_pattern") or "").strip()
+            or r"(?i)Negative Share File",
+            "co_summary_pattern": str(ns.get("co_summary_pattern") or "").strip()
+            or r"(?i)Negative Shares Charge Off and Recovery",
+            "co_quarterly_pattern": str(ns.get("co_quarterly_pattern") or "").strip()
+            or r"(?i)Share COs?\s*-\s*Recoveries",
+            "percentage": 0.0,
+            "balance": 0.0,
+            "amount": 0.0,
+        }
+        cfg.setdefault("other_allowance_considerations", []).append(ns_entry)
+
+    # Data-derived "Unfunded Commitments" OAC. Emitted with
+    # source: unfunded_commitment; the report engine sums undrawn credit for
+    # the configured codes grouped by pool and applies each pool's ACL rate.
+    if state.get("include_unfunded_commitment"):
+        uc = state.get("unfunded_commitment") or {}
+        codes = [str(c).strip() for c in (uc.get("loan_type_codes") or [])
+                 if str(c).strip()]
+        if codes:
+            uc_entry = {
+                "title": str(uc.get("title") or "").strip() or "Unfunded Commitments",
+                "source": "unfunded_commitment",
+                "loan_type_codes": codes,
+                "percentage": 0.0,
+                "balance": 0.0,
+                "amount": 0.0,
+            }
+            cfg.setdefault("other_allowance_considerations", []).append(uc_entry)
 
     if state.get("data_directory"):
         cfg["data_directory"] = state["data_directory"]
@@ -417,15 +527,72 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             block["member_col"] = int(src["member_col"])
         ma_src = src.get("member_account") or {}
         if ma_src:
+            # Honour explicit suffix_length=0 (CUs whose member-number
+            # column already holds the full account, no separate suffix).
+            _sl_src = ma_src.get("suffix_length")
+            try:
+                _sl_int = int(_sl_src) if _sl_src is not None else 3
+            except (TypeError, ValueError):
+                _sl_int = 3
             block["member_account"] = {
                 "mode": ma_src.get("mode") or "split",
-                "suffix_length": int(ma_src.get("suffix_length") or 3),
+                "suffix_length": _sl_int,
                 "delimiter": ma_src.get("delimiter") or "-",
             }
         hff[dst_key] = block
     if hff:
         existing = cfg.get("historical_file_formats") or {}
         existing.update(hff)
+        cfg["historical_file_formats"] = existing
+
+    # Multi-format CO/Recovery: an optional list of named formats, each
+    # routing files by ``file_pattern`` to its own chargeoff/recovery column
+    # wiring. Lets one CU mix several CO/recovery layouts (e.g. consumer-loan,
+    # credit-card and overdraft files whose columns differ). The report engine
+    # reads ``historical_file_formats.formats``; when present it takes
+    # precedence over the single top-level chargeoff/recovery block. Each
+    # per-side block carries ``strict_columns: true`` so the engine trusts the
+    # explicit indices (a combined file's CO and recovery amount columns
+    # differ, which the header-text heuristic cannot disambiguate). A side may
+    # use ``code_static`` instead of ``code_col`` when the file has no loan-
+    # code column (every row is implicitly one pool, e.g. a credit-card file).
+    formats_state = state.get("co_recov_formats") or []
+    formats_out: list[dict[str, Any]] = []
+    for fmt in formats_state:
+        fp = str((fmt or {}).get("file_pattern") or "").strip()
+        if not fp:
+            continue
+        entry: dict[str, Any] = {
+            "name": str(fmt.get("name") or "").strip() or "(unnamed)",
+            "file_pattern": fp,
+        }
+        for src_key, dst_key in (("co_columns", "chargeoff"),
+                                  ("recov_columns", "recovery")):
+            src = fmt.get(src_key) or {}
+            has_amount = src.get("amount_col") not in (None, "")
+            has_code = (src.get("code_col") not in (None, "")
+                        or str(src.get("code_static") or "").strip())
+            if not (has_amount and has_code):
+                continue
+            block2: dict[str, Any] = {
+                "has_header": bool(src.get("has_header")),
+                "skip_rows": int(src.get("skip_rows") or 0),
+                "account_col": int(src.get("account_col") or 0),
+                "amount_col": int(src["amount_col"]),
+                "strict_columns": True,
+            }
+            if src.get("code_col") not in (None, ""):
+                block2["code_col"] = int(src["code_col"])
+            if str(src.get("code_static") or "").strip():
+                block2["code_static"] = str(src["code_static"]).strip()
+            if src.get("date_col") not in (None, ""):
+                block2["date_col"] = int(src["date_col"])
+            entry[dst_key] = block2
+        if entry.get("chargeoff") or entry.get("recovery"):
+            formats_out.append(entry)
+    if formats_out:
+        existing = cfg.get("historical_file_formats") or {}
+        existing["formats"] = formats_out
         cfg["historical_file_formats"] = existing
 
     # Impaired-loans configuration (Step "impaired"). Persist the
@@ -561,6 +728,25 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             if pool_map:
                 mb_block["pool_map"] = pool_map
 
+            # Pass through the supplemental monthly-balance mechanisms
+            # verbatim so advanced wiring survives wizard regeneration.
+            # A CU that starts delivering a fresh rolling workbook
+            # (``supplemental_wide``) or a per-month / formatted balance-
+            # sheet snapshot (``monthly_file_pattern`` family) alongside
+            # the historical workbook keeps that config across reruns
+            # instead of silently losing the recent month's balances.
+            sw = mb.get("supplemental_wide")
+            if sw:
+                mb_block["supplemental_wide"] = sw
+            for _k in ("monthly_file_pattern", "monthly_sheet",
+                       "monthly_label_col", "monthly_balance_col",
+                       "monthly_header_row", "monthly_start_marker"):
+                _v = mb.get(_k)
+                if _v not in (None, "", 0):
+                    mb_block[_k] = _v
+            if mb.get("monthly_strict_pool_map"):
+                mb_block["monthly_strict_pool_map"] = True
+
         elif mb_source == "per_month":
             layout = mb.get("per_month_layout") or {}
             mb_block["layout"] = {
@@ -664,6 +850,98 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
         if mb.get("notes"):
             mb_block["notes"] = mb["notes"]
         cfg["monthly_balance"] = mb_block
+
+    # Historical-balance provenance — a display-only record of HOW the monthly
+    # historical balances were compiled, so a reviewer of the saved report can
+    # see and validate the source (e.g. "derived from the imported loan
+    # extracts" vs. an uploaded balance workbook). Persisted verbatim from the
+    # wizard state; only emitted when a method was recorded.
+    prov = state.get("hist_balance_provenance") or {}
+    if isinstance(prov, dict) and prov.get("method"):
+        prov_block: dict[str, Any] = {"method": str(prov["method"])}
+        for k in ("label", "summary", "generated_by", "validation_hint",
+                  "generated_at"):
+            if prov.get(k):
+                prov_block[k] = str(prov[k])
+        inputs = [str(x) for x in (prov.get("inputs") or []) if str(x).strip()]
+        if inputs:
+            prov_block["inputs"] = inputs
+        cov = prov.get("coverage") or {}
+        if isinstance(cov, dict) and cov:
+            cov_clean: dict[str, Any] = {}
+            for ck in ("start", "end"):
+                if cov.get(ck):
+                    cov_clean[ck] = str(cov[ck])
+            for ck in ("months", "pools"):
+                try:
+                    if cov.get(ck) is not None:
+                        cov_clean[ck] = int(cov[ck])
+                except (TypeError, ValueError):
+                    pass
+            if cov_clean:
+                prov_block["coverage"] = cov_clean
+        cfg["hist_balance_provenance"] = prov_block
+
+    # Charge-off / recovery provenance — display-only record of HOW the
+    # historical charge-offs and recoveries were compiled (CU files, NCUA
+    # 5300 backfill, or a mix), so the saved report carries a validator-facing
+    # trail. Passed through verbatim from wizard state when present.
+    crp = state.get("co_recov_provenance") or {}
+    if isinstance(crp, dict) and crp:
+        crp_block: dict[str, Any] = {}
+        for side in ("chargeoff", "recovery"):
+            rec = crp.get(side) or {}
+            if not isinstance(rec, dict) or not (rec.get("method") or rec.get("no_recoveries")):
+                continue
+            side_block: dict[str, Any] = {}
+            for k in ("method", "label", "summary", "validation_hint"):
+                if rec.get(k):
+                    side_block[k] = str(rec[k])
+            if rec.get("no_recoveries"):
+                side_block["no_recoveries"] = True
+            cu_files = [
+                {"name": str(f.get("name") or ""),
+                 "file_pattern": str(f.get("file_pattern") or "")}
+                for f in (rec.get("cu_files") or []) if f.get("name")
+            ]
+            if cu_files:
+                side_block["cu_files"] = cu_files
+            db_src = []
+            for s in (rec.get("db_sources") or []):
+                entry = {"label": str(s.get("label") or "")}
+                if s.get("years"):
+                    entry["years"] = str(s["years"])
+                try:
+                    if s.get("total") is not None:
+                        entry["total"] = round(float(s["total"]), 2)
+                except (TypeError, ValueError):
+                    pass
+                if entry["label"]:
+                    db_src.append(entry)
+            if db_src:
+                side_block["db_sources"] = db_src
+            if side_block:
+                crp_block[side] = side_block
+        if crp_block:
+            cfg["co_recov_provenance"] = crp_block
+
+    # ---- WARM auto-derive: reserve pinning + monthly book ----
+    # Populated by the setup wizard's WARM upload (the ``warm_autoderive``
+    # bridge) with the validated resolver-path derivations that this function
+    # does not otherwise produce: col-G per-grade base-loss pins, warm-allowance
+    # pools, balance-only ``not_risk_rated`` (detected from the WARM ACL tab, not
+    # the coarse risk-rated flag), and the WARM's manual monthly book. These are
+    # what make a WARM-sourced config tie to the analyst's WARM. Overlaid only
+    # when present, so non-WARM CUs are unaffected.
+    wr = state.get("warm_reserve") or {}
+    if wr.get("base_loss_rate_by_pool_grade"):
+        cfg["base_loss_rate_by_pool_grade"] = wr["base_loss_rate_by_pool_grade"]
+    if wr.get("warm_allowance_pools"):
+        cfg["warm_allowance_pools"] = wr["warm_allowance_pools"]
+    if wr.get("not_risk_rated"):
+        cfg["not_risk_rated"] = wr["not_risk_rated"]
+    if wr.get("monthly_balance") and not cfg.get("monthly_balance"):
+        cfg["monthly_balance"] = wr["monthly_balance"]
 
     return cfg
 

@@ -44,6 +44,21 @@ def _norm(v: Any) -> str:
     return "" if v is None else str(v).strip()
 
 
+def _digits(v: Any) -> str:
+    """Digits-only form of a member / suffix / account value.
+
+    Strips a trailing Excel ``.0`` (integer-valued floats) and any
+    non-digit characters so ``19238``, ``19238.0`` and ``'19238-'`` all
+    collapse to the comparable digit string ``'19238'``.
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return "".join(ch for ch in s if ch.isdigit())
+
+
 def _to_float(v: Any) -> float | None:
     if v is None or v == "":
         return None
@@ -168,6 +183,33 @@ def parse_file(filepath: str | Path) -> dict[str, Any]:
             if "impair" in sn.lower() and "pivot" not in sn.lower():
                 ws = wb[sn]
                 break
+    # Phase 9.36b — mirror the tab-name ladder in
+    # ``generate_report.load_standalone_impaired``: some CUs (e.g. TCP
+    # 2026-06) ship the workbook with the impaired data on a tab named
+    # ``Sheet2`` and the title "Impaired Loans" only in cell A1/A2/A3.
+    # Fall through to header-cell + largest-tab detection so the wizard
+    # run-time verification page can still parse those workbooks.
+    if ws is None:
+        for sn in wb.sheetnames:
+            _ws = wb[sn]
+            for _r in range(1, 4):
+                _v = _ws.cell(row=_r, column=1).value
+                if _v and "impaired" in str(_v).lower():
+                    ws = _ws
+                    break
+            if ws is not None:
+                break
+    if ws is None:
+        _candidates = [
+            (wb[sn].max_row * wb[sn].max_column, sn)
+            for sn in wb.sheetnames
+            if "instruction" not in sn.strip().lower()
+            and "help" not in sn.strip().lower()
+            and "readme" not in sn.strip().lower()
+        ]
+        _candidates.sort(reverse=True)
+        if _candidates:
+            ws = wb[_candidates[0][1]]
     if ws is None:
         wb.close()
         out["error"] = "No 'Impaired Loans' worksheet found."
@@ -437,13 +479,21 @@ def _coerce_member_part(v: Any) -> str:
 
 def _build_loan_index(loan_path: str | Path,
                       state: dict[str, Any],
-                      header_row: int | None = None) -> dict[str, dict[str, Any]]:
+                      header_row: int | None = None,
+                      entry: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     """Build {member-suffix: {pool, grade, balance}} from a loan extract.
 
     ``header_row`` is the per-file 1-indexed header row stored on the
     loan_data_files entry (e.g. ``2`` for AIRES extracts whose row 1 is
     column position numbers and row 2 is the real header). When omitted
     or <= 1 we fall back to pandas' default header=0.
+
+    ``entry`` is the loan_data_files entry dict. When provided, its
+    ``column_mappings`` and ``member_account`` override the top-level
+    ``state`` values for THIS file only — required for CUs that ship
+    multiple extracts with different column shapes (e.g. Symitar
+    ceclXX files with ACCTBS/ACTTYP/CURBAL/RISKSC + a CUMA Mortgage
+    workbook with Account/Type/NEW PRINC BALANCE).
     """
     index: dict[str, dict[str, Any]] = {}
     p = Path(str(loan_path))
@@ -482,13 +532,34 @@ def _build_loan_index(loan_path: str | Path,
     if df is None or df.empty:
         return index
 
-    cm = state.get("column_mappings") or {}
-    ma = state.get("member_account") or {}
+    # Phase 9.24c — prefer per-entry column_mappings / member_account over
+    # the top-level state values so multi-extract CUs (Symitar + CUMA
+    # alongside, etc.) honour each file's own configured shape. Falls back
+    # to the top-level dict for any key not overridden by the entry.
+    top_cm = state.get("column_mappings") or {}
+    top_ma = state.get("member_account") or {}
+    if entry is not None:
+        ecm = entry.get("column_mappings") or {}
+        cm = {**top_cm, **{k: v for k, v in ecm.items() if v}}
+        ema = entry.get("member_account") or {}
+        ma = {**top_ma, **{k: v for k, v in ema.items() if v not in (None, "")}}
+    else:
+        cm = top_cm
+        ma = top_ma
     pool_map = state.get("pool_map") or {}
     default_pool = state.get("default_pool") or ""
     grades = state.get("credit_grades") or []
     no_score = state.get("no_score_label") or "Not Reported"
     pool_split = state.get("pool_code_split") or None
+
+    # Build a normalised header lookup once so column-name matches tolerate
+    # leading/trailing whitespace and case differences (Symitar extracts
+    # ship headers like ' CURBAL ' or '   CURBAL   ' that exact-match
+    # against the saved 'CURBAL' would miss).
+    def _norm_header(s: Any) -> str:
+        return " ".join(str(s).split()).strip().lower()
+
+    norm_cols = {_norm_header(c): c for c in df.columns}
 
     def _resolve_col(field_name: str):
         target = cm.get(field_name) or ""
@@ -497,6 +568,10 @@ def _build_loan_index(loan_path: str | Path,
         # If the mapping is a header name, use it directly when has_header.
         if has_header and target in df.columns:
             return target
+        # Whitespace/case-insensitive header lookup (handles ' CURBAL ').
+        nt = _norm_header(target)
+        if nt and nt in norm_cols:
+            return norm_cols[nt]
         # Otherwise treat as 0-based index.
         try:
             idx = int(target)
@@ -518,7 +593,16 @@ def _build_loan_index(loan_path: str | Path,
         return index
 
     mode = (ma.get("mode") or "fixed_suffix").lower()
-    suffix_len = int(ma.get("suffix_length") or 3)
+    # Honour an explicit suffix_length=0 (combined-fixed mode where the
+    # member-number column already holds the full account, no suffix).
+    # Plain ``int(... or 3)`` would silently override 0 -> 3 because 0 is
+    # falsy in Python; that produced phantom mismatches against impaired
+    # files for CUs configured with combined-fixed/no-suffix accounts.
+    _sl_raw = ma.get("suffix_length")
+    try:
+        suffix_len = int(_sl_raw) if _sl_raw is not None else 3
+    except (TypeError, ValueError):
+        suffix_len = 3
     delim = ma.get("delimiter") or "-"
 
     def _grade_for(score: Any) -> str:
@@ -552,13 +636,16 @@ def _build_loan_index(loan_path: str | Path,
             m = _coerce_member_part(raw_member)
             s = _coerce_member_part(row.get(suffix_col))
             key = f"{m}-{s}"
+            acct_raw = f"{m}{s}"
         elif mode == "delimiter":
             s_raw = _coerce_member_part(raw_member)
             if delim and delim in s_raw:
                 m, s = s_raw.split(delim, 1)
                 key = f"{m.strip()}-{s.strip()}"
+                acct_raw = f"{m.strip()}{s.strip()}"
             else:
                 key = f"{s_raw}-"
+                acct_raw = s_raw
         else:  # fixed_suffix
             s_raw = _coerce_member_part(raw_member)
             if suffix_len > 0 and len(s_raw) > suffix_len:
@@ -567,11 +654,23 @@ def _build_loan_index(loan_path: str | Path,
                 key = f"{m}-{s}"
             else:
                 key = f"{s_raw}-"
+            acct_raw = s_raw
+
+        # Phase 9.24b — also carry the raw extract loan_pool_code value
+        # so the impaired-step validation card can surface codes from the
+        # loan extract whose mapping resolved to Ignore (matched-row case).
+        raw_pool_code = ""
+        if pool_col is not None:
+            _rpc = row.get(pool_col)
+            if _rpc is not None:
+                raw_pool_code = str(_rpc).strip()
 
         index[key] = {
             "loan_pool": _pool_for(row.get(pool_col)) if pool_col else default_pool,
+            "loan_pool_code_raw": raw_pool_code,
             "credit_grade": _grade_for(row.get(fico_col)) if fico_col else no_score,
             "balance_from_loan_report": _to_float(row.get(bal_col)) if bal_col else None,
+            "_acct": _digits(acct_raw),
         }
     return index
 
@@ -596,6 +695,8 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
         cb = row.get("current_balance")
         row["loan_pool"] = _resolve_pool_code(
             row.get("loan_type"), pool_map, default_pool, pool_split)
+        # No extract row matched — clear any stale resolved code.
+        row["loan_pool_code_resolved"] = ""
         row["credit_grade"] = no_score
         row["balance_from_loan_report"] = (
             float(cb) if cb is not None else None)
@@ -632,7 +733,7 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
             hr_entry = int(entry.get("header_row") or 0) or None
         except (TypeError, ValueError):
             hr_entry = None
-        sub = _build_loan_index(p, state, header_row=hr_entry)
+        sub = _build_loan_index(p, state, header_row=hr_entry, entry=entry)
         if sub:
             index.update(sub)
             sources.append(entry.get("name") or Path(p).name)
@@ -642,6 +743,81 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
             _fallback_from_data_entry(row)
         return status
     status["source"] = ", ".join(sources)
+
+    # Phase 9.37b — build a leading-zero-normalised secondary index so
+    # extract keys like ``000001002-4`` still match impaired rows keyed as
+    # ``1002-4`` (or vice versa). Some CU loan extracts (Symitar AIRES)
+    # zero-pad Account Number to 9 digits as a text string, while the
+    # impaired workbook ships raw ints.
+    def _strip_lead(k: str) -> str:
+        if "-" in k:
+            a, b = k.split("-", 1)
+            return f"{a.lstrip('0') or '0'}-{b.lstrip('0') or '0'}"
+        return k.lstrip("0") or "0"
+
+    norm_index: dict[str, dict[str, Any]] = {}
+    for _k, _v in index.items():
+        _nk = _strip_lead(_k)
+        # First-in wins for duplicates; the primary index (padded form)
+        # is authoritative when both exist.
+        norm_index.setdefault(_nk, _v)
+
+    # Phase 9.41 — account-reconstruction index. Keyed by the digits-only
+    # combined account (member digits + suffix digits) captured when the
+    # loan index was built. Lets an impaired row whose member/suffix are
+    # split differently than the extract still resolve: e.g. the AIRES
+    # extract packs a 4-digit zero-padded loan suffix ("192380004") while
+    # the CU is configured with suffix_length=3 (so the extract mis-splits
+    # to "192380-4"), and the impaired file lists member 19238 / suffix 4.
+    # We reconstruct the extract's full account from the impaired member +
+    # a zero-padded suffix and require an EXACT account-digit match, so it
+    # cannot introduce spurious hits. Driven from the impaired side (few
+    # rows), it is a last-resort fallback after the direct / leading-zero
+    # paths miss.
+    acct_index: dict[str, dict[str, Any]] = {}
+    for _v in index.values():
+        _a = _v.get("_acct")
+        if _a:
+            acct_index.setdefault(_a, _v)
+            acct_index.setdefault(_a.lstrip("0") or "0", _v)
+
+    def _match_by_account(member: Any, suffix: Any):
+        md = _digits(member)
+        if not md:
+            return None
+        sd = _digits(suffix)
+        sd_core = sd.lstrip("0")
+        # Loan suffixes are short sequence numbers; only reconstruct when
+        # the significant suffix is small so we don't concatenate a long
+        # suffix into a *different* member's account by coincidence.
+        if len(sd_core) > 4:
+            return None
+        md_variants = [md]
+        md_stripped = md.lstrip("0")
+        if md_stripped and md_stripped != md:
+            md_variants.append(md_stripped)
+        # Reconstruct the extract account as member + the suffix zero-padded
+        # to widths from its own length up to +4 leading zeros (covers the
+        # common 2-, 3- and 4-digit zero-padded loan-suffix conventions).
+        # Longest (most-padded) width first so the structurally correct
+        # reconstruction wins before shorter, more ambiguous forms.
+        base_w = max(len(sd_core), 1)
+        for _md in md_variants:
+            cands: list[str] = []
+            for w in range(base_w + 4, base_w - 1, -1):
+                cands.append(_md + sd_core.zfill(w))
+            cands.append(_md + sd)        # suffix exactly as entered
+            if not sd_core:
+                cands.append(_md)         # no / zero suffix
+            seen: set[str] = set()
+            for c in cands:
+                if not c or c in seen:
+                    continue
+                seen.add(c)
+                hit = acct_index.get(c) or acct_index.get(c.lstrip("0") or "0")
+                if hit is not None:
+                    return hit
+        return None
 
     for row in rows:
         key = row.get("member_suffix") or _member_suffix_key(
@@ -653,11 +829,33 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
             alt = f"{m}-{s.lstrip('0') or '0'}"
             match = index.get(alt)
         if match is None:
+            # Phase 9.37b — try the leading-zero-normalised index
+            match = norm_index.get(_strip_lead(key))
+        if match is None:
+            # Phase 9.41 — reconstruct the extract account from the
+            # impaired member + zero-padded suffix (handles suffix-length /
+            # zero-pad disagreements between the two files).
+            match = _match_by_account(row.get("member"), row.get("suffix"))
+        if match is None:
             status["unmatched"] += 1
             _fallback_from_data_entry(row)
         else:
             status["matched"] += 1
-            row["loan_pool"] = match.get("loan_pool") or ""
+            # Phase 9.24b — if the extract row's pool_col was blank or
+            # resolved to Ignore, fall back to the impaired row's own
+            # loan_type resolution. Lets the user remap pool_map[loan_type]
+            # via the impaired validation card to fix Ignore-resolving rows
+            # whose loan extract had no useful pool info.
+            extract_pool = match.get("loan_pool") or ""
+            _ep_l = extract_pool.strip().lower()
+            if _ep_l and _ep_l != "ignore":
+                row["loan_pool"] = extract_pool
+            else:
+                row["loan_pool"] = _resolve_pool_code(
+                    row.get("loan_type"), pool_map, default_pool, pool_split)
+            # Propagate the extract's raw loan_pool_code so the wizard's
+            # impaired validation card can offer to remap it when present.
+            row["loan_pool_code_resolved"] = match.get("loan_pool_code_raw") or ""
             row["credit_grade"] = match.get("credit_grade") or ""
             row["balance_from_loan_report"] = match.get("balance_from_loan_report")
             cb = row.get("current_balance") or 0.0
@@ -682,7 +880,13 @@ def recompute_all(impaired_state: dict[str, Any],
     Returns the lookup-status dict from ``lookup_from_loan_data``.
     """
     rows = impaired_state.get("data_rows") or []
-    types = impaired_state.get("types") or []
+    # NOTE: parse_file stores the impairment-type table under
+    # "impairment_types" (not "types"); reading the wrong key left the
+    # provision-percentage lookup empty, so every row relying on a
+    # type-table percentage (e.g. "Delinquent Loans" @ 35%) resolved to
+    # None and the verification page showed $0 provision.
+    types = (impaired_state.get("impairment_types")
+             or impaired_state.get("types") or [])
     dq = impaired_state.get("dq_ranges") or []
     compute_calculations(rows, types, dq)
     return lookup_from_loan_data(rows, wizard_state)

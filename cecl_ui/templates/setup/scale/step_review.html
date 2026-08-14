@@ -37,6 +37,15 @@
         {% endif %}
       </td>
     </tr>
+    <tr><th>Life of Loan months</th>
+      <td>
+        {% if lol_count %}
+          {{ lol_count }} pool(s) overridden for this CU
+        {% else %}
+          <span class="muted">All pools using template defaults</span>
+        {% endif %}
+      </td>
+    </tr>
     <tr><th>Impaired loans</th>
       <td>
         {% if imp_parsed.get('ok') %}

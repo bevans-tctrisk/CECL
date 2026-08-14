@@ -134,11 +134,31 @@ def cu_dashboard(short_name: str):
     workspace_root = _workspace_root()
     all_cus = runs_service.list_scale_cus(workspace_root)
     cu = next((c for c in all_cus if c["short_name"] == short_name), None)
-    if cu is None:
-        flash(f"No SCALE reports found for {short_name}.", "warning")
-        return redirect(url_for("scale_runs.index"))
-
     state = runs_service.load_state_for_cu(workspace_root, short_name)
+    if cu is None:
+        # No SCALE workbook on disk yet, but if a wizard draft exists we
+        # still show the CU dashboard so the user can run the first
+        # quarter. This is the common "just finished the SCALE wizard"
+        # landing target from ``scale_setup.complete_and_home``.
+        if state is None:
+            flash(
+                f"No SCALE reports or wizard draft found for {short_name}.",
+                "warning",
+            )
+            return redirect(url_for("scale_runs.index"))
+        cu = {
+            "short_name": short_name,
+            "credit_union": state.get("credit_union") or short_name,
+            "latest_period": "",
+            "latest_path": "",
+            "periods": [],
+            "draft_present": True,
+        }
+        flash(
+            f"No SCALE workbook on disk yet for {cu['credit_union']}. "
+            "Run the first quarter below.",
+            "info",
+        )
     draft_present = state is not None
     all_choices = _period_choices()
 

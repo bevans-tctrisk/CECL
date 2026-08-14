@@ -265,6 +265,56 @@ def _is_real_pool_label(name: str) -> bool:
     return not any(low.startswith(p) for p in _POOL_BLOCKLIST_PREFIXES)
 
 
+def _detect_bs_data_columns(ws) -> tuple[int, int]:
+    """Inspect row 1 of ``BS Data`` to find which columns hold the
+    *title* (CU-supplied loan-type / line-item label that appears in the
+    monthly balance feed) and the *pool* (which configured loan pool the
+    title rolls up into).
+
+    Returns a ``(title_col, pool_col)`` 1-based tuple. Falls back to the
+    historical layout ``(1, 2)`` (col A = Loan Type, col B = Loan Pool)
+    when no header row is recognisable.
+
+    Recognised header phrasings:
+      * title : "loan type", "type", "title", "balance title",
+                "balance sheet line", "line item", "description"
+      * pool  : "loan pool", "pool", "loan pools", "pool name"
+
+    Skips the canonical anchor headers ``Pool Order`` / ``Loan Pools``
+    when those happen to sit on row 1 of the sheet -- those mark the
+    *bottom* canonical pool list on every WARM template, not the title
+    block at the top.
+    """
+    title_keys = (
+        "loan type", "type", "title", "balance title",
+        "balance sheet line", "line item", "description",
+    )
+    pool_keys = ("loan pool", "pool", "loan pools", "pool name")
+    title_col = 0
+    pool_col = 0
+    for c in range(1, 8):
+        v = ws.cell(row=1, column=c).value
+        if not isinstance(v, str):
+            continue
+        s = v.strip().lower()
+        if not s:
+            continue
+        # Skip the canonical pool-order anchor row when it lands on row 1.
+        if s == "pool order":
+            continue
+        if not title_col and s in title_keys:
+            title_col = c
+            continue
+        if not pool_col and s in pool_keys:
+            pool_col = c
+            continue
+    if not title_col:
+        title_col = 1
+    if not pool_col:
+        pool_col = title_col + 1
+    return title_col, pool_col
+
+
 def _pool_names_from_bs(ws) -> list[str]:
     """Read the canonical loan-pool list from ``BS Data``.
 
@@ -506,52 +556,57 @@ def _balance_titles_above_pool_order(ws) -> list[dict[str, Any]]:
     """Read the credit-union-supplied balance titles from ``BS Data``,
     above the ``Pool Order`` / ``Loan Pools`` anchor.
 
-    Layout::
+    Two layouts are supported (auto-detected from the row-1 header):
 
-        Row 1: Pools | Types | Pool | <dates>...
-        Row 2: New Autos          | 1,3,7,15 | Collateralized Loans | <bal>
-        Row 3: Used Autos         | 2,4,...  | Collateralized Loans | <bal>
-        ...
-        Row 17: Sub-Total Loans   |          | Blank                  (skipped)
-        Row 19: 3 Dealers         |          | Dealer Loans
-        Row 21: Total Loans       |          | Blank                  (skipped)
-        ...
-        Row N: Pool Order         | Loan Pools | <dates>              (anchor)
+      * Legacy::
+
+            Row 1: Loan Type    | Loan Pool            | <dates>...
+            Row 2: New Autos    | Collateralized Loans | <bal>
+            Row 3: Used Autos   | Collateralized Loans | <bal>
+
+      * GL-prefixed::
+
+            Row 1: GL    | Loan Type             | Pool            | <dates>...
+            Row 2: 70102 | CNS-NEW AUTO-FIXED    | Direct Auto     | <bal>
+            Row 3: 70105 | CNS-RV-FIXED          | Direct Auto     | <bal>
 
     Each accepted row becomes ``{title, note, suggested_pool}`` where
-    ``title`` is col A (the CU-supplied raw label that appears in the
-    monthly data), ``note`` is col B (loan-code list, free-form), and
-    ``suggested_pool`` is col C (the workbook's hint at which loan pool
-    the row belongs in -- empty / 'Blank' rows are dropped).
+    ``title`` is the CU-supplied raw label that appears in the monthly
+    data, ``note`` is whatever sits in any column LEFT of the title
+    column (loan-code list, GL number, etc.), and ``suggested_pool`` is
+    the workbook's hint at which loan pool the row belongs in. Empty /
+    'Blank' rows are dropped.
     """
+    title_col, pool_col = _detect_bs_data_columns(ws)
     anchor = _find_pool_order_anchor(ws)
     end_row = (anchor[0] - 1) if anchor else 60
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for row in ws.iter_rows(min_row=2, max_row=end_row, values_only=True):
-        if not row:
-            continue
-        a = row[0]
-        b = row[1] if len(row) > 1 else None
-        c = row[2] if len(row) > 2 else None
+    for r in range(2, end_row + 1):
+        a = ws.cell(row=r, column=title_col).value
+        b = ws.cell(row=r, column=pool_col).value
+        # "note" column: prefer the column LEFT of title (legacy "Loan Type
+        # codes" or GL numbers); else col-A free-form.
+        note_col = title_col - 1 if title_col > 1 else 0
+        n = ws.cell(row=r, column=note_col).value if note_col else None
         title = a.strip() if isinstance(a, str) else ""
         if not title:
             continue
         if not _is_real_pool_label(title):
             continue
-        suggested = c.strip() if isinstance(c, str) else ""
-        # Skip the ALLOWANCE row and any row whose suggested-pool cell is
-        # literally "Blank" (totals/spacers).
+        suggested = b.strip() if isinstance(b, str) else ""
+        # Skip rows whose suggested-pool cell is literally "Blank"
+        # (totals/spacers).
         if suggested.lower() == "blank":
             continue
         low = title.lower()
         if low in seen:
             continue
         seen.add(low)
-        if isinstance(b, float) and b.is_integer():
-            note = str(int(b))
+        if isinstance(n, float) and n.is_integer():
+            note = str(int(n))
         else:
-            note = str(b).strip() if b is not None else ""
+            note = str(n).strip() if n is not None else ""
         out.append({
             "title": title,
             "note": note,
@@ -561,29 +616,22 @@ def _balance_titles_above_pool_order(ws) -> list[dict[str, Any]]:
 
 
 def _bs_loan_type_to_pool_map(ws) -> dict[str, str]:
-    """From ``BS Data``, build a mapping of *loan-type label* (col A, row 2+)
-    to *pool name* (col B).
+    """From ``BS Data``, build a mapping of *loan-type label* to *pool name*.
 
-    The BS Data tab has the layout::
+    Auto-detects the title and pool columns from the row-1 header (see
+    ``_detect_bs_data_columns``) so layouts like
+    ``GL | Loan Type | Pool | dates`` work in addition to the legacy
+    ``Loan Type | Loan Pool | dates`` layout.
 
-        Row 1: Loan Type | Loan Pool | <date> | <date> | ...
-        Row 2: NEW VEHICLE 22-26 | New Vehicle | ...
-        Row 3: USED VEHICLE 27-31 | Used Vehicle | ...
-        ...
-        Row N: Total Loans | (blank)
-        Row N+1: (blank rows)
-        Row M: Pool Order | Loan Pools | <date> | ...   (canonical pool list)
-
-    We stop reading at the first row whose col A label is a blocklist prefix
-    (e.g. "Total Loans", "Pool Order") or after a stretch of blanks.
+    We stop reading at the first row whose title cell is a blocklist
+    prefix (e.g. "Total Loans", "Pool Order") or after a stretch of blanks.
     """
+    title_col, pool_col = _detect_bs_data_columns(ws)
     mapping: dict[str, str] = {}
     blanks = 0
-    for row in ws.iter_rows(min_row=2, max_row=80, values_only=True):
-        if not row:
-            continue
-        a = row[0]
-        b = row[1] if len(row) > 1 else None
+    for r in range(2, 81):
+        a = ws.cell(row=r, column=title_col).value
+        b = ws.cell(row=r, column=pool_col).value
         a_s = a.strip() if isinstance(a, str) else ""
         b_s = b.strip() if isinstance(b, str) else ""
         if not a_s and not b_s:
@@ -602,26 +650,69 @@ def _bs_loan_type_to_pool_map(ws) -> dict[str, str]:
 
 def _loan_code_to_pool_map_from_grades(ws) -> dict[str, str]:
     """From ``Grade Ranges & Loan Codes``, build a mapping of *raw loan
-    code* (col S = index 18) to *pool name* (col T = index 19).
+    code* to *pool name*.
 
-    Scans rows 2..200 (header is row 1). Stops counting after a stretch
-    of blank rows. Codes are normalised to a stripped string; integer-valued
-    codes are emitted without a trailing ``.0``.
+    The code/pool columns move between WARM templates: older layouts put
+    them at cols S/T (index 18/19), newer ones (e.g. Cottonwood) at cols
+    U/V (index 20/21) with an adjacent ``pinetree`` map further right. To
+    survive both, the columns are located by header text — a cell reading
+    ``Loan Pool`` / ``Loan Pools`` / ``Pool`` marks the pool column, and the
+    code column is the labelled ``Collateral Code`` / ``Loan Type`` column
+    (else the column immediately to its left). Falls back to the historical
+    fixed S/T layout when no headers are recognised.
+
+    Codes are normalised to a stripped string; integer-valued codes are
+    emitted without a trailing ``.0``. Header/total rows are skipped.
     """
+    pool_hdrs = {"loan pool", "loan pools", "pool", "pool name"}
+    code_hdrs = {
+        "collateral code", "loan type", "loan types", "loan code",
+        "loan codes", "code", "codes",
+    }
+    pool_col: int | None = None
+    code_col: int | None = None
+    header_row: int | None = None
+
+    for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=8,
+                                             values_only=True), start=1):
+        row_pool = row_code = None
+        for c_idx, val in enumerate(row or ()):
+            if not isinstance(val, str):
+                continue
+            v = val.strip().lower()
+            if row_pool is None and v in pool_hdrs:
+                row_pool = c_idx
+            if row_code is None and v in code_hdrs:
+                row_code = c_idx
+        if row_pool is not None:
+            pool_col = row_pool
+            header_row = r_idx
+            # Prefer a labelled code column to the LEFT of the pool column;
+            # otherwise assume the code sits immediately left of the pool.
+            code_col = row_code if (row_code is not None
+                                    and row_code < row_pool) else row_pool - 1
+            break
+
+    if pool_col is None or code_col is None or code_col < 0:
+        # Legacy fixed layout: col S (18) = code, col T (19) = pool.
+        code_col, pool_col, header_row = 18, 19, 1
+
     mapping: dict[str, str] = {}
     blanks = 0
-    for row in ws.iter_rows(min_row=2, max_row=200, values_only=True):
-        # row may be shorter than 20 cells on early rows
-        if row is None or len(row) < 20:
+    need = max(code_col, pool_col)
+    start_row = (header_row or 1) + 1
+    for row in ws.iter_rows(min_row=start_row, max_row=start_row + 400,
+                            values_only=True):
+        if row is None or len(row) <= need:
             blanks += 1
-            if blanks >= 10:
+            if blanks >= 12:
                 break
             continue
-        code_v = row[18]
-        pool_v = row[19]
+        code_v = row[code_col]
+        pool_v = row[pool_col]
         if code_v in (None, "") and pool_v in (None, ""):
             blanks += 1
-            if blanks >= 10:
+            if blanks >= 12:
                 break
             continue
         blanks = 0
@@ -639,7 +730,9 @@ def _loan_code_to_pool_map_from_grades(ws) -> dict[str, str]:
         # Skip header rows like ("Collateral Code", "Loan Pool").
         if pool_s.lower() in {"loan pool", "pool", "pool name", "loan pools"}:
             continue
-        if code_s.lower().endswith(" code") or code_s.lower() in {"code", "loan code", "collateral code"}:
+        if code_s.lower().endswith(" code") or code_s.lower() in {
+            "code", "loan code", "collateral code",
+        }:
             continue
         # First write wins (preserves order of appearance on the sheet).
         mapping.setdefault(code_s, pool_s)
@@ -937,6 +1030,15 @@ _WARM_FILE_RX = re.compile(
 _CO_FILE_RX = re.compile(
     r"(charge[\s_\-]*off|charge_off_track|co[\s_\-]*hist)", re.IGNORECASE
 )
+# A loan extract delivered "without charge-offs" (AIRES exports named
+# "... WO Charge-offs" / "W/O Charge-offs" / "Without Charge-offs" /
+# "Excluding Charge-offs") carries the charge-off token but is NOT a
+# charge-off tracking file — the charge-off signal is negated. Detect the
+# negation so such files fall through to the loan-data branch below.
+_CO_NEGATED_RX = re.compile(
+    r"(\bw[\s._/\-]*o\b|without|excluding|excl\.?)[\s._/\-]*charge[\s_\-]*off",
+    re.IGNORECASE,
+)
 _RECOV_FILE_RX = re.compile(
     r"(recov(?:er(?:y|ies))?|historical[\s_\-]*recov)", re.IGNORECASE
 )
@@ -1060,7 +1162,7 @@ def scan_historical_folder(folder: str | Path) -> dict[str, Any]:
             continue
 
         lname = name.lower()
-        if _CO_FILE_RX.search(lname):
+        if _CO_FILE_RX.search(lname) and not _CO_NEGATED_RX.search(lname):
             entry["period"] = _period_from_filename(name)
             result["co_files"].append(entry)
         elif _IMPAIRED_FILE_RX.search(lname):
@@ -1100,3 +1202,158 @@ def scan_historical_folder(folder: str | Path) -> dict[str, Any]:
             pass
 
     return result
+
+
+# ---------------------------------------------------------------------
+# DQ % history loader (Charge off History tab -> 4th section "DQ %")
+# ---------------------------------------------------------------------
+
+SHEET_CHARGE_OFF_HISTORY = "Charge off History"
+
+_DQ_HIST_SECTION_NAMES = ("dq %", "dq%")
+_DQ_HIST_NEXT_SECTIONS = (
+    "charge offs", "recoveries", "net charge offs", "dq %", "dq%",
+)
+_DQ_HIST_SKIP_PREFIXES = ("hide", "exclude", "total")
+
+
+def parse_dq_history_from_warm(path: str) -> dict[str, Any]:
+    """Extract per-pool monthly DQ % from a WARM workbook.
+
+    Looks for the "Charge off History" sheet, finds the row whose column A
+    is "DQ %" (case-insensitive), reads month-end datetime headers from the
+    same row across columns C..end, then iterates pool rows below until a
+    blank / "Total ..." / next-section row.
+
+    Returns::
+
+        {
+          "ok":   bool,
+          "error": str | None,
+          "rows": [ {"as_of_date": "YYYY-MM-DD",
+                      "loan_code": "<WARM pool label>",
+                      "dq_pct":    float}, ... ],
+          "sheet":          str,
+          "section_row":    int,
+          "date_columns":   int,
+          "pool_count":     int,
+          "first_period":   str | None,
+          "last_period":    str | None,
+        }
+
+    DQ values are stored as fractions in the WARM template
+    (``0.024 == 2.4%``).  Anything > 1.5 is divided by 100 to mirror the
+    Source-C manual-entry convention.
+    """
+    out: dict[str, Any] = {
+        "ok": False, "error": None, "rows": [],
+        "sheet": "", "section_row": 0, "date_columns": 0,
+        "pool_count": 0, "first_period": None, "last_period": None,
+    }
+    try:
+        import openpyxl  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"openpyxl import failed: {exc}"
+        return out
+
+    p = Path(path)
+    if not p.exists():
+        out["error"] = f"WARM file not found: {p}"
+        return out
+
+    try:
+        wb = openpyxl.load_workbook(p, data_only=True, read_only=False)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"Could not open workbook: {exc}"
+        return out
+
+    target_sheet = None
+    for name in wb.sheetnames:
+        if "charge off history" in name.strip().lower():
+            target_sheet = name
+            break
+    if target_sheet is None:
+        out["error"] = (
+            f"Sheet '{SHEET_CHARGE_OFF_HISTORY}' not found in workbook."
+        )
+        return out
+    ws = wb[target_sheet]
+    out["sheet"] = target_sheet
+
+    # Find the "DQ %" section header row (col A).
+    section_row = 0
+    max_row = ws.max_row or 0
+    max_col = ws.max_column or 0
+    for r in range(1, max_row + 1):
+        v = ws.cell(row=r, column=1).value
+        if v is None:
+            continue
+        norm = str(v).strip().lower()
+        if norm in _DQ_HIST_SECTION_NAMES:
+            section_row = r
+            break
+    if not section_row:
+        out["error"] = "Could not find 'DQ %' section in Charge off History."
+        return out
+    out["section_row"] = section_row
+
+    # Build the (col_index, iso_date) list from the same row.
+    date_cols: list[tuple[int, str]] = []
+    for c in range(2, max_col + 1):
+        cell_val = ws.cell(row=section_row, column=c).value
+        if cell_val is None:
+            continue
+        # openpyxl returns datetime objects for native date cells.
+        try:
+            iso = cell_val.strftime("%Y-%m-%d")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            continue
+        date_cols.append((c, iso))
+    out["date_columns"] = len(date_cols)
+    if not date_cols:
+        out["error"] = "DQ % header row had no date columns."
+        return out
+    out["first_period"] = date_cols[0][1]
+    out["last_period"] = date_cols[-1][1]
+
+    # Walk pool rows.
+    rows_out: list[dict[str, Any]] = []
+    pools_seen: set[str] = set()
+    for r in range(section_row + 1, max_row + 1):
+        label = ws.cell(row=r, column=1).value
+        if label is None:
+            break
+        s = str(label).strip()
+        if not s:
+            break
+        s_lc = s.lower()
+        # Stop at the next section header.
+        if r != section_row and s_lc in _DQ_HIST_NEXT_SECTIONS:
+            break
+        # Skip hide/exclude/total rows but keep walking.
+        if any(s_lc.startswith(p) for p in _DQ_HIST_SKIP_PREFIXES):
+            continue
+        pools_seen.add(s)
+        for col_idx, iso in date_cols:
+            v = ws.cell(row=r, column=col_idx).value
+            if v is None:
+                continue
+            try:
+                pct = float(v)
+            except (TypeError, ValueError):
+                continue
+            # Mirror Source-C convention: anything > 1.5 was typed as a
+            # percent and needs to become a fraction.
+            if pct > 1.5:
+                pct = pct / 100.0
+            rows_out.append({
+                "as_of_date": iso,
+                "loan_code": s,
+                "dq_pct": pct,
+            })
+
+    out["pool_count"] = len(pools_seen)
+    out["rows"] = rows_out
+    out["ok"] = True
+    return out
+
