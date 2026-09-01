@@ -183,6 +183,12 @@ def _check_dq_co_blocks(z, warnings):
             if not ws.title.startswith("Risk Ch"):
                 continue
             rows = list(ws.iter_rows())
+            # When the empty-state note is present the DQ/CO chart was
+            # intentionally suppressed and replaced by an explanation, so the
+            # zero block no longer renders as an empty frame -- don't warn.
+            if any(isinstance(c.value, str) and "not yet available" in c.value
+                   for row in rows for c in row):
+                continue
             for r_idx, row in enumerate(rows):
                 for cell in row:
                     if cell.value != "Improved" or getattr(

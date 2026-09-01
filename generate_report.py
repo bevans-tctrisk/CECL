@@ -5006,8 +5006,12 @@ def load_impaired_data(config, snap):
     try:
         acl_df = pd.read_excel(found, sheet_name='ACL Env by Pool Mgmt Adj', header=None)
     except (ValueError, KeyError):
+        # Don't bail: a WARM can carry 'DQ Data Entry'/'CO Data Entry' tabs
+        # without an ACL Env tab.  Continue with an empty frame so the ACL
+        # parsing below no-ops and the DQ/CO migration blocks still run.
+        # See docs/pdf_migration/04_blank_charts.md.
         print(f"    'ACL Env by Pool Mgmt Adj' tab not found")
-        return result
+        acl_df = pd.DataFrame()
 
     # Search column A for key labels, read value from column K (index 10)
     for idx in range(len(acl_df)):
