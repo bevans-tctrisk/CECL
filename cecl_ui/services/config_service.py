@@ -525,6 +525,12 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             block["date_col"] = int(src["date_col"])
         if src.get("member_col") not in (None, ""):
             block["member_col"] = int(src["member_col"])
+        if dst_key == "chargeoff":
+            # Optional credit-score columns feed the CO credit-grade migration
+            # split (co_migration_split reads these); charge-off side only.
+            for _sk in ("orig_score_col", "curr_score_col"):
+                if src.get(_sk) not in (None, ""):
+                    block[_sk] = int(src[_sk])
         ma_src = src.get("member_account") or {}
         if ma_src:
             # Honour explicit suffix_length=0 (CUs whose member-number

@@ -214,6 +214,8 @@
       {% set sel_code    = cfg.get('code_col')    if cfg.get('code_col')    is not none else '' %}
       {% set sel_amount  = cfg.get('amount_col')  if cfg.get('amount_col')  is not none else '' %}
       {% set sel_date    = cfg.get('date_col')    if cfg.get('date_col')    is not none else '' %}
+      {% set sel_orig_score = cfg.get('orig_score_col') if cfg.get('orig_score_col') is not none else '' %}
+      {% set sel_curr_score = cfg.get('curr_score_col') if cfg.get('curr_score_col') is not none else '' %}
       {% set show_hdr    = cfg.get('has_header') %}
       {% set ma          = cfg.get('member_account') or {} %}
       {% set ma_mode     = ma.get('mode') or 'split' %}
@@ -355,12 +357,36 @@
               <option value="">&mdash; none &mdash;</option>
               {% for col in preview.columns %}
                 <option value="{{ col.index }}"
-                  {% if sel_date != '' and sel_date|int == col.index %}selected{% endif %}>
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          {% if kind == 'co' %}
+          <label>
+            Original credit-score column (optional)
+            <select name="{{ kind }}_orig_score_col">
+              <option value="">&mdash; none &mdash;</option>
+              {% for col in preview.columns %}
+                <option value="{{ col.index }}"
+                  {% if sel_orig_score != '' and sel_orig_score|int == col.index %}selected{% endif %}>
                   {% if show_hdr and col.header %}{{ col.header }}{% else %}{{ col.letter }}{% if col.header %} (sample: {{ col.header }}){% endif %}{% endif %}
                 </option>
               {% endfor %}
             </select>
           </label>
+          <label>
+            Credit-score-at-charge-off column (optional)
+            <select name="{{ kind }}_curr_score_col">
+              <option value="">&mdash; none &mdash;</option>
+              {% for col in preview.columns %}
+                <option value="{{ col.index }}"
+                  {% if sel_curr_score != '' and sel_curr_score|int == col.index %}selected{% endif %}>
+                  {% if show_hdr and col.header %}{{ col.header }}{% else %}{{ col.letter }}{% if col.header %} (sample: {{ col.header }}){% endif %}{% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          {% endif %}
           <label>
             Skip rows (before data)
             <input type="number" name="{{ kind }}_skip_rows" min="0"

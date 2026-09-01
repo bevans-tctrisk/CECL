@@ -9339,6 +9339,15 @@ def step_co_recov():
                     "delimiter": ma_delim,
                 },
             }
+            # Optional credit-score columns (charge-off only) feed the CO
+            # credit-grade migration split; left unset when the file has none.
+            if kind == "co":
+                cfg["orig_score_col"] = _read_int(f"{kind}_orig_score_col", None)
+                cfg["curr_score_col"] = _read_int(f"{kind}_curr_score_col", None)
+            # Preserve the chosen worksheet/tab across a mapping save.
+            _prev_sheet = (state.get(cfg_key) or {}).get("sheet")
+            if _prev_sheet:
+                cfg["sheet"] = _prev_sheet
             if cfg["code_col"] is None or cfg["amount_col"] is None:
                 flash("Code and Amount columns are required.", "error")
             else:
