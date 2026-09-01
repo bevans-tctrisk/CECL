@@ -1630,6 +1630,12 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     else:
         _dq_data = _imp.get('dq_by_status', {})
         _co_data = _imp.get('co_by_status', {})
+    # A newly onboarded CU legitimately has no DQ/CO migration source (a WARM
+    # tab or the derived split).  Render an explanatory note rather than an
+    # empty titled chart.  Key on CU-level availability, not this pool's four
+    # values, so a genuine zero pool (e.g. Construction) still draws a chart.
+    _dq_available = bool(_imp.get('dq_by_status')) or bool(_imp.get('dq_by_pool'))
+    _co_available = bool(_imp.get('co_by_status')) or bool(_imp.get('co_by_pool'))
 
     if pool_name:
         safe = re.sub(r'[^\w\s-]', '', pool_name)[:20]
@@ -2103,7 +2109,19 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     anc_dq = TwoCellAnchor()
     anc_dq._from = AnchorMarker(col=0, colOff=0, row=r_nc + 15, rowOff=0)
     anc_dq.to = AnchorMarker(col=5, colOff=0, row=r_nc + 28, rowOff=0)
-    ws.add_chart(dq_pie, anc_dq)
+    if _dq_available:
+        ws.add_chart(dq_pie, anc_dq)
+    else:
+        _dq_note = ws.cell(
+            row=r_dq + 6, column=pcol_start,
+            value=("Delinquency by credit-grade migration is not yet "
+                   "available for this credit union. It tags each delinquent "
+                   "loan by how its credit grade has moved, which requires "
+                   "credit-score history that accumulates as monthly loan "
+                   "data is collected."),
+        )
+        _dq_note.font = V10
+        _dq_note.alignment = Alignment(wrap_text=True, vertical='top')
 
     # ─── CO Data Table (cols P-R, supporting the bar chart) ───
     r_co = r_nc + 22
@@ -2181,7 +2199,22 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     anc_co = TwoCellAnchor()
     anc_co._from = AnchorMarker(col=5, colOff=0, row=r_nc + 15, rowOff=0)
     anc_co.to = AnchorMarker(col=9, colOff=0, row=r_nc + 28, rowOff=0)
-    ws.add_chart(co_bar, anc_co)
+    if _co_available:
+        ws.add_chart(co_bar, anc_co)
+    else:
+        _co_note = ws.cell(
+            row=r_co + 6, column=pcol_start,
+            value=("Charge-off credit-grade migration is not yet available "
+                   "for this credit union. This chart compares each "
+                   "charged-off loan's credit grade at origination with its "
+                   "grade at charge-off; building it requires a credit score "
+                   "for the loan from before it charged off, which "
+                   "accumulates as monthly loan data is collected. Charge-off "
+                   "totals by pool and by year are shown on the Charge-off "
+                   "History tab."),
+        )
+        _co_note.font = V10
+        _co_note.alignment = Alignment(wrap_text=True, vertical='top')
 
     # ─── Footnotes ───
     r_fn = r_nc + 29

@@ -13033,6 +13033,19 @@ def generate_report(client_name, snapshot_date=None, reports=None):
     except Exception as _dqe_exc:  # noqa: BLE001 - never block a report
         print(f"    DQ migration split skipped: {_dqe_exc}")
 
+    # ── Charge-off by credit-grade migration (fallback) ──
+    # Mirror of the DQ block above for ``co_by_status`` / ``co_by_pool``.
+    # Recovers each charged-off loan's origination and at-charge-off scores
+    # from the charge-off feed and the loan-snapshot history; refuses rather
+    # than guesses when coverage is too thin. See
+    # docs/pdf_migration/09_chargeoff_score_history.md.
+    try:
+        from co_migration_split import fill_missing_co_migration
+        fill_missing_co_migration(hist, config, snapshot_date, grades,
+                                  no_score=no_score)
+    except Exception as _coe_exc:  # noqa: BLE001 - never block a report
+        print(f"    CO migration split skipped: {_coe_exc}")
+
     # Determine which reports to generate
     if reports is None:
         rpt_cfg = config.get('reports', {})
