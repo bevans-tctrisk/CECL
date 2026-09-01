@@ -209,15 +209,15 @@ _ACL_ADJ_KEYS = [
 
 
 def build_acl_env(client_name: str, snapshot_date: str, config: dict,
-                  hist: dict | None = None) -> AclEnvPage | None:
+                  hist: dict | None = None, df: Any = None,
+                  grades: Any = None) -> AclEnvPage | None:
     """Populate the "ACL Env by Pool Mgmt Adj" page from the ACL data dicts.
 
-    Consumes ``hist['impaired']['acl_pools' | 'acl_summary' | 'acl_impaired']``
-    -- the per-pool/per-grade allowance structure ``load_impaired_data``
-    produces for WARM-fed CUs. Returns ``None`` when ``acl_pools`` is absent
-    (wizard-onboarded CUs, whose ACL env is still computed inside
-    ``report_vizo._sheet_acl_reserve``; extracting that compute to populate
-    ``acl_pools`` is the remaining Step-1a work -- this consumer is then ready).
+    Prefers the values ``report_vizo._sheet_acl_reserve`` publishes when the
+    report was composed (isolated underscore keys), then the WARM-parsed dicts,
+    and finally -- when neither is present and ``df``/``grades`` are supplied --
+    computes them standalone via ``report_vizo.compute_acl_environmental`` so
+    the page renders without the workbook being built at all.
     """
     import report_vizo as _rv
 
@@ -226,11 +226,17 @@ def build_acl_env(client_name: str, snapshot_date: str, config: dict,
     # (isolated underscore keys) -- available for every CU, wizard-onboarded
     # included -- over the WARM-parsed dicts (present only for WARM CUs).
     acl_pools = _imp.get("_acl_pools_computed") or _imp.get("acl_pools") or {}
-    if not acl_pools:
-        return None
     acl_summary = _imp.get("_acl_summary_computed") or _imp.get("acl_summary") or {}
     acl_impaired = _imp.get("_acl_impaired_computed") or _imp.get("acl_impaired") or {}
-    pool_order = list(acl_pools.keys()) or _imp.get("pool_order") or []
+    if not acl_pools and df is not None:
+        computed = _rv.compute_acl_environmental(df, grades, config, hist, snapshot_date)
+        acl_pools = computed.get("acl_pools") or {}
+        acl_summary = computed.get("acl_summary") or acl_summary
+        acl_impaired = computed.get("acl_impaired") or acl_impaired
+    if not acl_pools:
+        return None
+    pool_order = list(acl_pools.keys())
+    cu = (config or {}).get("credit_union") or client_name
     cu = (config or {}).get("credit_union") or client_name
 
     def _match(pool: str) -> dict | None:
@@ -311,7 +317,8 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
         pages.append(("risk_change.html", {"page": rc, "charts": []}, True))
     if not supplemental:
-        acl = build_acl_env(client_name, snapshot_date, config, hist)
+        acl = build_acl_env(client_name, snapshot_date, config, hist,
+                           df=df, grades=grades)
         if acl is not None:
             pages.append(("acl_env.html", {"page": acl, "charts": []}, True))
     return {"cover": cover, "pages": pages}

@@ -2852,6 +2852,36 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     _paginate_pool_blocks(ws, pool_starts, pool_ends)
 
 
+def compute_acl_environmental(df, grades, config, hist, snap):
+    """ACL environmental data (acl_pools / acl_summary / acl_impaired) as pure
+    data, with no deliverable workbook -- the standalone entry the PDF renderer
+    uses so it never depends on the .xlsx being built or read back.
+
+    Runs the single source of truth (``_sheet_acl_reserve``) against a
+    throwaway in-memory workbook, on deep COPIES of ``config`` and ``hist`` so
+    the caller's state is untouched (the sheet builder expands unfunded-
+    commitment OAC rows into config and stashes Impr-Deter totals onto hist).
+    Returns the same dict shape ``load_impaired_data`` builds for WARM CUs.
+    """
+    import copy
+    from openpyxl import Workbook
+
+    _cfg = copy.deepcopy(config) if config else {}
+    _hist = copy.deepcopy(hist) if hist else {}
+    try:
+        _sheet_acl_reserve(Workbook(), _cfg.get('credit_union', ''), snap,
+                           df, grades, _cfg, _hist)
+    except Exception as exc:  # noqa: BLE001 - never let the PDF path crash
+        print(f"  compute_acl_environmental failed: {exc}")
+        return {'acl_pools': {}, 'acl_summary': {}, 'acl_impaired': {}}
+    imp = (_hist or {}).get('impaired', {}) or {}
+    return {
+        'acl_pools': imp.get('_acl_pools_computed', {}),
+        'acl_summary': imp.get('_acl_summary_computed', {}),
+        'acl_impaired': imp.get('_acl_impaired_computed', {}),
+    }
+
+
 def _sheet_env_factor(wb, cu, snap, df, grades, config, hist):
     """Environmental Factor by Pool matching Vizo template."""
     ws = wb.create_sheet("Env Factor by Pool")
