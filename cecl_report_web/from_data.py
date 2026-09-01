@@ -19,6 +19,9 @@ import os
 from typing import Any
 
 from .model import (
+    AclEnvPage,
+    AclPoolRow,
+    AdjustmentRow,
     CoverPage,
     KeyValueRow,
     MatrixCell,
@@ -191,6 +194,102 @@ def build_risk_change(client_name: str, snapshot_date: str, df: Any,
                           summary=summary)
 
 
+_ACL_COL_HEADERS = [
+    "Current Grade", "Balance", "Specific Identification",
+    "Loan Loss Calc Balance", "ACL Base Loss Rate", "Mgmt Adj",
+    "Allowance Factor", "Allowance before Env", "Env Factor",
+    "Env Allowance", "Total Allowance",
+]
+_ACL_ADJ_KEYS = [
+    ("Total Specifically Identified Allowance", "total_spec_allow"),
+    ("Total Allowance Needed", "total_allow_needed"),
+    ("Allowance for Credit Loss Balance", "acl_balance"),
+    ("Adjustment", "adjustment"),
+]
+
+
+def build_acl_env(client_name: str, snapshot_date: str, config: dict,
+                  hist: dict | None = None) -> AclEnvPage | None:
+    """Populate the "ACL Env by Pool Mgmt Adj" page from the ACL data dicts.
+
+    Consumes ``hist['impaired']['acl_pools' | 'acl_summary' | 'acl_impaired']``
+    -- the per-pool/per-grade allowance structure ``load_impaired_data``
+    produces for WARM-fed CUs. Returns ``None`` when ``acl_pools`` is absent
+    (wizard-onboarded CUs, whose ACL env is still computed inside
+    ``report_vizo._sheet_acl_reserve``; extracting that compute to populate
+    ``acl_pools`` is the remaining Step-1a work -- this consumer is then ready).
+    """
+    import report_vizo as _rv
+
+    _imp = (hist or {}).get("impaired", {}) or {}
+    acl_pools = _imp.get("acl_pools") or {}
+    if not acl_pools:
+        return None
+    acl_summary = _imp.get("acl_summary") or {}
+    acl_impaired = _imp.get("acl_impaired") or {}
+    pool_order = _imp.get("pool_order") or list(acl_pools.keys())
+    cu = (config or {}).get("credit_union") or client_name
+
+    def _match(pool: str) -> dict | None:
+        if pool in acl_pools:
+            return acl_pools[pool]
+        lc = pool.strip().lower()
+        return next((v for k, v in acl_pools.items()
+                     if k.strip().lower() == lc), None)
+
+    pool_rows: list[AclPoolRow] = []
+    for pool in pool_order:
+        pdata = _match(pool)
+        if not pdata:
+            continue
+        pool_rows.append(AclPoolRow(pool=pool, kind="header"))
+        for g, gv in (pdata.get("grades") or {}).items():
+            if str(g).upper().startswith("HIDE"):
+                continue
+            pool_rows.append(AclPoolRow(
+                pool=g, kind="grade",
+                balance=gv.get("balance"), specific_id=gv.get("spec_id"),
+                llc_balance=gv.get("calc_bal"), base_loss_rate=gv.get("base_rate"),
+                mgmt_adj=gv.get("mgmt_adj"), allowance_factor=gv.get("factor"),
+                allowance_before_env=gv.get("allow_before")))
+        t = pdata.get("total") or {}
+        _bal, _spec = t.get("balance"), t.get("spec_id")
+        pool_rows.append(AclPoolRow(
+            pool="Total", kind="total",
+            balance=_bal, specific_id=_spec,
+            llc_balance=((_bal or 0) - (_spec or 0)) if _bal is not None else None,
+            base_loss_rate=t.get("base_rate"), mgmt_adj=t.get("mgmt_adj"),
+            allowance_factor=t.get("factor"),
+            allowance_before_env=t.get("allow_before"),
+            env_factor=t.get("env_factor"), env_allowance=t.get("env_allow"),
+            total_allowance=t.get("total_allow")))
+
+    _pb = acl_summary.get("pooled_balance")
+    _ps = acl_summary.get("pooled_spec_id")
+    pooled = AclPoolRow(
+        pool="Pooled Totals", is_total=True,
+        balance=_pb, specific_id=_ps,
+        llc_balance=((_pb or 0) - (_ps or 0)) if _pb is not None else None,
+        allowance_before_env=acl_summary.get("pooled_allow_before"),
+        env_allowance=acl_summary.get("pooled_env_allow"),
+        total_allowance=acl_summary.get("pooled_total_allow"))
+
+    impaired_rows = [AdjustmentRow(label=k, value=v)
+                     for k, v in acl_impaired.items()]
+    adjustment_rows = [
+        AdjustmentRow(label=lbl, value=acl_summary.get(key), bold=True)
+        for lbl, key in _ACL_ADJ_KEYS if key in acl_summary
+    ]
+    heading = [
+        "Allowance & Provision for Credit Loss Reserve Analysis",
+        f"For Quarter Ending {_rv._snap_display(snapshot_date)}",
+    ]
+    return AclEnvPage(
+        credit_union=cu, heading_lines=heading, col_headers=list(_ACL_COL_HEADERS),
+        pool_rows=pool_rows, pooled_totals=pooled,
+        impaired_rows=impaired_rows, adjustment_rows=adjustment_rows)
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -208,4 +307,8 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
     if df is not None and not supplemental:
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
         pages.append(("risk_change.html", {"page": rc, "charts": []}, True))
+    if not supplemental:
+        acl = build_acl_env(client_name, snapshot_date, config, hist)
+        if acl is not None:
+            pages.append(("acl_env.html", {"page": acl, "charts": []}, True))
     return {"cover": cover, "pages": pages}
