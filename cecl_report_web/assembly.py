@@ -93,7 +93,14 @@ def build_pages(report_path: str | Path, cu: str, snap: str,
     from openpyxl import load_workbook
     wb = load_workbook(report_path, read_only=True)
     pages: list[dict] = []
-    for sheet in wb.sheetnames:
+    for ws in wb.worksheets:
+        # Hidden sheets are working scratch -- ">Envir Fact Ranges" is
+        # merged into "Env Factor by Pool" and then hidden. Excel's own
+        # export skips them, so this path must too, or the client gets a
+        # page that is not meant to exist.
+        if ws.sheet_state != "visible":
+            continue
+        sheet = ws.title
         full, landscape = _render_sheet(
             Path(report_path), sheet, cu, snap, supplemental=supplemental)
         pages.append({

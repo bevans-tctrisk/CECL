@@ -17,7 +17,46 @@ from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries, get_column_letter
 
 # Excel 2016+ default series palette.
-PALETTE = ["#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47"]
+# The validated Vizo palette, shared with :mod:`chart_chassis` rather than
+# copied, so the two renderers cannot drift apart. The stock Office cycle
+# that used to live here was never brand-correct and never colour-vision
+# checked; the chassis hexes are the brand hues re-stepped to pass.
+from .chart_chassis import PALETTE, SEMANTIC  # noqa: E402
+
+
+#: The brand hexes as they appear in the workbook, mapped onto their
+#: re-stepped equivalents. A chart that carries explicit point colours from
+#: Excel would otherwise smuggle the failing originals onto the page --
+#: 0D4D5E reads gray, and 829901/FFC000 are 1.5 dE apart under deuteranopia.
+_BRAND_REMAP = {
+    "#0D4D5E": PALETTE[0], "#48A5AD": PALETTE[0],   # teal
+    "#873A3A": PALETTE[1], "#3D1A1A": PALETTE[1],   # maroon
+    "#FFC000": PALETTE[2],                          # amber
+    "#829901": PALETTE[3],                          # olive
+}
+
+
+def _restep(color):
+    """Translate a workbook colour onto the validated palette."""
+    if not color:
+        return None
+    c = str(color).strip()
+    if not c.startswith("#"):
+        c = "#" + c
+    return _BRAND_REMAP.get(c.upper(), color)
+
+
+def _semantic(name):
+    """Colour a series/slice must always carry, whatever order it appears in.
+
+    Teal always means Improved and maroon always means Deteriorated
+    (confirmed 2026-09-01). Position in the workbook decides nothing, so a
+    tab that happens to list the series the other way round still reads the
+    same way to a client.
+    """
+    if not name:
+        return None
+    return SEMANTIC.get(str(name).strip().lower())
 
 
 def _fill_hex(spPr) -> str | None:
@@ -260,7 +299,9 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
 
     def _bar_color(s, i, n, si):
         pts = s.get("point_colors") or []
-        base = s.get("color") or PALETTE[si % len(PALETTE)]
+        base = (_semantic(s.get("name")) or _restep(s.get("color"))
+                or PALETTE[si % len(PALETTE)])
+        pts = [_restep(x) for x in pts]
         distinct = {p for p in pts if p}
         if len(distinct) > 1:
             # genuinely per-point colors (e.g. green/maroon/teal points)
@@ -376,7 +417,8 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
     if multi:
         parts.append(_legend(
             [(s["name"] or f"Series {i+1}",
-              s.get("color") or PALETTE[i % len(PALETTE)])
+              _semantic(s.get("name")) or _restep(s.get("color"))
+              or PALETTE[i % len(PALETTE)])
              for i, s in enumerate(series)],
             left, top + ph + (34 if (not horizontal and ncat > 16) else 22),
             horizontal=True))
@@ -391,8 +433,13 @@ def _svg_pie(values: list[float], cats: list[str], title: str | None,
     total = sum(v for v in values if v > 0)
 
     def _col(i):
+        # Slice labels carry the meaning on a migration pie, so honour the
+        # semantic colours ahead of anything the workbook supplied.
+        sem = _semantic(cats[i] if i < len(cats) else None)
+        if sem:
+            return sem
         if colors and i < len(colors) and colors[i]:
-            return colors[i]
+            return _restep(colors[i])
         return PALETTE[i % len(PALETTE)]
 
     parts: list[str] = []
@@ -433,11 +480,60 @@ def _svg_pie(values: list[float], cats: list[str], title: str | None,
     return _wrap("".join(parts), title)
 
 
+def _to_chassis_spec(spec: dict) -> dict | None:
+    """Map a workbook chart spec onto a :mod:`chart_chassis` spec.
+
+    Returns None for archetypes the chassis does not cover yet, so the legacy
+    renderers below keep handling them.
+
+    Routed today:
+
+    * ``bar`` + ``stacked`` -> A2, the Improved/Deteriorated diverging bar.
+      The legacy ``_svg_bar`` path takes ``abs(val)`` and accumulates, so the
+      negative "Deteriorated" series ADDS to "Improved" instead of opposing
+      it across zero -- a materially wrong chart that looks plausible. The
+      chassis renderer keeps the sign.
+    * ``col`` + ``clustered`` with 2+ series -> A5, the hollow grade-balance
+      columns, which Excel ships with the value axis deleted and no labels.
+      The chassis gives it ticks, gridlines and currency formatting.
+    """
+    ctype = spec.get("type", "")
+    if "Bar" not in ctype:
+        return None
+    series = spec.get("series") or []
+    if not series:
+        return None
+    bar_dir = spec.get("bar_dir")
+    grouping = spec.get("grouping")
+    cats = series[0].get("cats") or []
+
+    common = {
+        "title": spec.get("title"),
+        "categories": cats,
+        "series": [{"name": s.get("name"),
+                    "values": s.get("values") or [],
+                    "color": None,          # chassis palette, not Excel's
+                    "filled": True}
+                   for s in series],
+    }
+    if bar_dir == "bar" and grouping == "stacked":
+        return {**common, "kind": "diverging_stacked_bar",
+                "value_format": "pct1", "width": 620}
+    if bar_dir == "col" and grouping == "clustered" and len(series) > 1:
+        return {**common, "kind": "clustered_column",
+                "value_format": "currency", "width": 560, "height": 300}
+    return None
+
+
 def render_chart_svg(spec: dict) -> str:
     """Dispatch a normalized chart spec to the right SVG renderer."""
     ctype = spec.get("type", "")
     series = spec.get("series", [])
     title = spec.get("title")
+    chassis = _to_chassis_spec(spec)
+    if chassis is not None:
+        from .chart_chassis import render as _chassis_render
+        return _chassis_render(chassis)
     if "Pie" in ctype or "Doughnut" in ctype:
         s0 = series[0] if series else {"values": [], "cats": []}
         return _svg_pie(s0.get("values", []), s0.get("cats", []), title,

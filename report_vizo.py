@@ -22,6 +22,9 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.styles.colors import Color
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
+from openpyxl.cell.cell import MergedCell
+from copy import copy
 from openpyxl.drawing.image import Image as XlImage
 from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
 
@@ -33,7 +36,7 @@ from openpyxl.worksheet.page import PageMargins
 from openpyxl.worksheet.pagebreak import Break
 from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.chart import BarChart, DoughnutChart, LineChart, PieChart, Reference
-from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.label import DataLabelList, DataLabel
 from openpyxl.chart.layout import Layout, ManualLayout
 from openpyxl.chart.series import DataPoint, Series, SeriesLabel
 from openpyxl.chart.shapes import GraphicalProperties
@@ -59,6 +62,38 @@ _WORKSPACE_BASE = os.environ.get('CECL_WORKSPACE_ROOT') or _BASE
 VIZO_TEMPLATE_PATH = os.path.join(
     _WORKSPACE_BASE, 'Sample Reports',
     'YYYY-MM CECL-Migration-WARM - Template Credit Union with Vizo.xlsx')
+
+
+def _load_workbook_resilient(path, **kwargs):
+    """load_workbook that survives transient SMB read errors on shared drives.
+
+    Reading an .xlsx directly off a network path (e.g. Z:) can raise
+    OSError [Errno 22] mid-stream. Retry, then fall back to copying the file
+    to a local temp path and reading that copy instead.
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+    from openpyxl import load_workbook as _load
+    last_exc = None
+    for _ in range(3):
+        try:
+            return _load(path, **kwargs)
+        except OSError as exc:  # transient network read failure
+            last_exc = exc
+    tmp = None
+    try:
+        fd, tmp = _tempfile.mkstemp(suffix=os.path.splitext(path)[1] or '.xlsx')
+        os.close(fd)
+        _shutil.copyfile(path, tmp)
+        return _load(tmp, **kwargs)
+    except OSError:
+        raise last_exc
+    finally:
+        if tmp and os.path.isfile(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 _VIZO_THEME_BYTES = None
 
@@ -876,8 +911,9 @@ def _sheet_report_index(wb, cu, snap, supplemental=False):
         ws['A12'].font = theme1_12
         ws['A12'].alignment = Alignment(horizontal='left', vertical='center', indent=2)
 
-        # ── Page setup: portrait, print area A1:J13 ──
+        # ── Page setup: portrait, scale to fit on one printed page ──
         ws.page_setup.orientation = 'portrait'
+        _fit_to_pages(ws, 1, 1)
         ws.print_area = 'A1:J13'
     else:
         # ══ Supplemental Report Index ══
@@ -928,10 +964,8 @@ def _sheet_report_index(wb, cu, snap, supplemental=False):
         ws['A8'].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True, indent=1)
 
         # Page setup: portrait, fit everything on one page
-        ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
         ws.page_setup.orientation = 'portrait'
-        ws.page_setup.fitToWidth = 1
-        ws.page_setup.fitToHeight = 1
+        _fit_to_pages(ws, 1, 1)
 
 
 def _sheet_introduction(wb, cu, snap):
@@ -1286,6 +1320,35 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
         )
         return Title(tx=Text(rich=RichText(p=[para])), overlay=False)
 
+    # Per-point data labels: white text reads well inside a bar, but on a bar
+    # too small to contain it the (white) label spills onto the white plot
+    # background and vanishes. For those points place the label outside the bar
+    # (columns) / at its tip (stacked bars, which Excel forbids from using
+    # outEnd) in BLACK so it stays readable.
+    T_COL = 0.22   # column shorter than this fraction of the tallest -> outside
+    T_BAR = 0.30   # stacked-bar segment shorter than this fraction of longest
+
+    def _small_indices(values, thresh):
+        vals = [abs(v or 0) for v in values]
+        mx = max(vals) if vals else 0
+        if mx <= 0:
+            return set(range(len(values)))
+        return {i for i, v in enumerate(vals) if v < thresh * mx}
+
+    def _dlbl_point(idx, pos, color, numfmt, rot=None, bold=False):
+        """Per-point data label override (position + font color)."""
+        dl = DataLabel(idx=idx)
+        dl.numFmt = numfmt
+        dl.showVal = True
+        dl.showLegendKey = False
+        dl.showCatName = False
+        dl.showSerName = False
+        dl.showPercent = False
+        dl.showBubbleSize = False
+        dl.dLblPos = pos
+        dl.txPr = _dlbl_txpr(bold=bold, rot=rot, fill_color=color)
+        return dl
+
     # ── Chart 1 : "Improved Loans" – clustered column by grade (TOP-LEFT) ──
     c1 = BarChart()
     c1.type = 'col'
@@ -1317,6 +1380,11 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
     c1.series[0].dLbls.numFmt = '0%'
     c1.series[0].dLbls.dLblPos = 'inEnd'
     c1.series[0].dLbls.txPr = _dlbl_txpr(rot=-5400000)
+    _c1_vals = [ws.cell(row=r, column=6).value for r in range(imp_first, gr_last + 1)]
+    c1.series[0].dLbls.dLbl = [
+        _dlbl_point(i, 'outEnd', '000000', '0%', rot=-5400000)
+        for i in sorted(_small_indices(_c1_vals, T_COL))
+    ]
     # Anchor offsets balance chart widths: column F is 43.29 wide vs others ~8.43,
     # so split the chart strip down the middle of column F (~17.43 width units ≈ 1209675 EMU)
     # to give all four charts equal outer width.
@@ -1358,6 +1426,11 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
     c2.series[0].dLbls.numFmt = '0%'
     c2.series[0].dLbls.dLblPos = 'inEnd'
     c2.series[0].dLbls.txPr = _dlbl_txpr(bold=True, rot=-5400000)
+    _c2_vals = [ws.cell(row=r, column=7).value for r in range(gr_first, det_last + 1)]
+    c2.series[0].dLbls.dLbl = [
+        _dlbl_point(i, 'outEnd', '000000', '0%', rot=-5400000, bold=True)
+        for i in sorted(_small_indices(_c2_vals, T_COL))
+    ]
     anc2 = TwoCellAnchor()
     anc2._from = AnchorMarker(col=5, colOff=IMPDET_MID_OFF, row=11, rowOff=0)
     anc2.to = AnchorMarker(col=10, colOff=0, row=25, rowOff=0)
@@ -1374,8 +1447,12 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
     c0.layout = Layout(
         manualLayout=ManualLayout(
             xMode='edge', yMode='edge',
-            x=0.039320822162645222, y=0.12380952380952381,
-            w=0.92135835567470958, h=0.72857142857142854,
+            # y/h: the title is drawn with overlay=1, so the plot area
+            # has to be pushed down itself to keep the title off the
+            # top row of bars. Height shrinks by the same amount so the
+            # plot still ends where it did.
+            x=0.039320822162645222, y=0.22000000000000000,
+            w=0.92135835567470958, h=0.63238095238095238,
         )
     )
     # catAx (x_axis): orientation=maxMin so the first category in the data
@@ -1408,23 +1485,44 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
     c0.set_categories(cat0)
     _remove_chart_borders(c0)
     _remove_axis_lines(c0)
-    # Series 0 = Improved → MAROON fill (per Brian's edit)
-    _set_series_fill(c0.series[0], MAROON)
+    # Series 0 = Improved → TEAL. Teal always means Improved and maroon
+    # always means Deteriorated (confirmed 2026-09-01). These two were
+    # previously swapped, which read warm for the good outcome.
+    _set_series_fill(c0.series[0], TEAL)
     c0.series[0].dLbls = DataLabelList()
     c0.series[0].dLbls.showVal = True
     c0.series[0].dLbls.dLblPos = 'inBase'
     c0.series[0].dLbls.txPr = _dlbl_txpr()
-    # Series 1 = Deteriorated → TEAL fill (per Brian's edit)
-    _set_series_fill(c0.series[1], TEAL)
+    # Series 1 = Deteriorated → MAROON.
+    _set_series_fill(c0.series[1], MAROON)
     c0.series[1].dLbls = DataLabelList()
     c0.series[1].dLbls.showVal = True
     c0.series[1].dLbls.dLblPos = 'inBase'
     c0.series[1].dLbls.txPr = _dlbl_txpr()
+    # Small segments (either series) get black labels at the bar tip so they
+    # stay readable where they overflow the tiny bar onto the white plot.
+    _c3_imp = [ws.cell(row=r, column=7).value for r in range(46, pool_last_row + 1)]
+    _c3_det = [ws.cell(row=r, column=8).value for r in range(46, pool_last_row + 1)]
+    _c3_max = max([abs(v or 0) for v in _c3_imp + _c3_det] or [0])
+
+    def _c3_small(vals):
+        if _c3_max <= 0:
+            return set(range(len(vals)))
+        return {i for i, v in enumerate(vals) if abs(v or 0) < T_BAR * _c3_max}
+
+    c0.series[0].dLbls.dLbl = [
+        _dlbl_point(i, 'inEnd', '000000', '0%') for i in sorted(_c3_small(_c3_imp))
+    ]
+    c0.series[1].dLbls.dLbl = [
+        _dlbl_point(i, 'inEnd', '000000', '0%') for i in sorted(_c3_small(_c3_det))
+    ]
     if c0.legend:
         c0.legend.position = 'b'
     anc0 = TwoCellAnchor()
-    anc0._from = AnchorMarker(col=0, colOff=0, row=25, rowOff=0)
-    anc0.to = AnchorMarker(col=5, colOff=IMPDET_MID_OFF, row=39, rowOff=0)
+    # Row 26 (not 25) leaves a blank row between the top charts and
+    # these; height is unchanged at 14 rows.
+    anc0._from = AnchorMarker(col=0, colOff=0, row=26, rowOff=0)
+    anc0.to = AnchorMarker(col=5, colOff=IMPDET_MID_OFF, row=40, rowOff=0)
     ws.add_chart(c0, anc0)
 
     # ── Chart 4 : "Net Change" – clustered bar by loan type (BOTTOM-RIGHT) ──
@@ -1439,8 +1537,12 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
     c3.layout = Layout(
         manualLayout=ManualLayout(
             xMode='edge', yMode='edge',
-            x=0.039320822162645222, y=0.12380952380952381,
-            w=0.92135835567470958, h=0.72857142857142854,
+            # y/h: the title is drawn with overlay=1, so the plot area
+            # has to be pushed down itself to keep the title off the
+            # top row of bars. Height shrinks by the same amount so the
+            # plot still ends where it did.
+            x=0.039320822162645222, y=0.22000000000000000,
+            w=0.92135835567470958, h=0.63238095238095238,
         )
     )
     # catAx (x_axis): orientation=maxMin so the first category in the data
@@ -1475,8 +1577,10 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
     c3.series[0].dLbls.dLblPos = 'outEnd'
     c3.series[0].dLbls.txPr = _dlbl_txpr(fill_color='000000')
     anc3 = TwoCellAnchor()
-    anc3._from = AnchorMarker(col=5, colOff=IMPDET_MID_OFF, row=25, rowOff=0)
-    anc3.to = AnchorMarker(col=10, colOff=0, row=39, rowOff=0)
+    # Row 26 (not 25) leaves a blank row between the top charts and
+    # these; height is unchanged at 14 rows.
+    anc3._from = AnchorMarker(col=5, colOff=IMPDET_MID_OFF, row=26, rowOff=0)
+    anc3.to = AnchorMarker(col=10, colOff=0, row=40, rowOff=0)
     ws.add_chart(c3, anc3)
 
     # ── Page setup ────────────────────────────────────────────────
@@ -2661,32 +2765,15 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     ws.cell(row=r, column=11).font = V12B
 
     # ─── Page Setup ───
-    # Greedy bin-packing: fit as many complete pool blocks per page as the
-    # printable area allows, never splitting a pool across pages.
-    # Landscape Letter @ 0.25" margins with the standard default row height
-    # comfortably prints ~55 rows on page 1; pages 2+ repeat title rows
-    # 1:5 via print_title_rows, leaving ~50 content rows.
-    PAGE1_ROWS  = 45
-    OTHER_ROWS  = 40  # = PAGE1_ROWS - 5 repeated title rows
-
-    # Row budget is the index of the last row that may appear on the
-    # current page.  Start with all of page 1 available.
-    page_bottom = PAGE1_ROWS
-    for ps, pe in zip(pool_starts, pool_ends):
-        block_end = pe + 1   # include the trailing blank row
-        if block_end > page_bottom:
-            # This pool would spill onto the next page – break before it.
-            ws.row_breaks.append(Break(id=ps - 1))
-            page_bottom = ps + OTHER_ROWS - 1
-
-    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.page_setup.orientation = 'landscape'
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
+    # Portrait, all eleven columns (A:K) on one page wide; rows flow onto as
+    # many pages as needed, broken between pool blocks.
+    ws.page_setup.orientation = 'portrait'
+    _fit_to_pages(ws, 1, 0)
     ws.page_margins = PageMargins(left=0.25, right=0.25, top=0.25, bottom=0.25,
                                   header=0.3, footer=0.3)
     ws.print_area = f'A1:K{r}'
     ws.print_title_rows = '1:5'
+    _paginate_pool_blocks(ws, pool_starts, pool_ends)
 
 
 def _sheet_env_factor(wb, cu, snap, df, grades, config, hist):
@@ -3217,10 +3304,8 @@ def _sheet_loss_factor(wb, cu, snap, df, grades, config, hist):
     # and the right-side rate summary prints on page 2.
     ws.col_breaks.append(Break(id=9))
     last_col = get_column_letter(right_start + 6)
-    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
     ws.page_setup.orientation = 'landscape'
-    ws.page_setup.fitToWidth = 0
-    ws.page_setup.fitToHeight = 2
+    _fit_to_pages(ws, 1, 2)
     ws.page_margins = PageMargins(left=0.25, right=0.25, top=0.25, bottom=0.25,
                                   header=0.3, footer=0.3)
     ws.print_area = f'A1:{last_col}{r}'
@@ -3516,20 +3601,12 @@ def _sheet_co_recov_dq(wb, cu, snap, df, config, hist):
     section_ranges.append((dq_start, r))
 
     # ── Page Setup ──
-    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.page_setup.orientation = 'landscape'
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
+    ws.page_setup.orientation = 'portrait'
+    _fit_to_pages(ws, 1, 1)
     ws.page_margins = PageMargins(left=0.25, right=0.25, top=0.25, bottom=0.25,
                                   header=0.3, footer=0.3)
     ws.print_title_rows = '1:3'
     ws.print_area = f'A1:J{r}'
-
-    # Force a single manual page break before the Net Charge offs section so
-    # page 1 = Charge offs + Recoveries, page 2 = Net Charge offs + DQ %.
-    if len(section_ranges) >= 3:
-        nl_start = section_ranges[2][0]
-        ws.row_breaks.append(Break(id=nl_start - 1))
 
 
 def _range_label(lo, hi):
@@ -4914,6 +4991,12 @@ def _apply_graduated_transparency(bc_elem, base_color, step):
             insert_at += 1
 
 
+# Anchor rows for the Impr Deter chart grid. The bottom pair sits one row
+# lower than the top pair's block ends, for white space between them.
+IMPDET_TOP_ROW = 11
+IMPDET_BOTTOM_ROW = 26
+
+
 def _normalize_impdet_anchor(anchor):
     """Force Impr Deter charts into a fixed 2x2 layout with identical extents.
 
@@ -4931,7 +5014,10 @@ def _normalize_impdet_anchor(anchor):
     from_row = int(frm.find(f'{{{_XDR_NS}}}row').text)
 
     is_left = from_col < 5
-    top_row = 11 if from_row < 25 else 25
+    # These rows are authoritative -- they override whatever _sheet_impdet
+    # anchored the charts at, so a layout change has to be made HERE as well
+    # as in the builder or it is silently normalised away.
+    top_row = IMPDET_TOP_ROW if from_row < 25 else IMPDET_BOTTOM_ROW
     bottom_row = top_row + 14
     mid_off = 1209675  # ~17.43 width units into col F (Calibri 11)
 
@@ -4988,7 +5074,12 @@ def _fix_series_common(ser_elem):
         sp = _find_elem(dlbls, 'spPr', _C_NS)
         if sp is None:
             sp = ET.Element(f'{{{_C_NS}}}spPr')
-            dlbls.insert(0, sp)
+            # spPr must follow any per-point <c:dLbl> elements per the schema.
+            insert_at = 0
+            for _i, _child in enumerate(list(dlbls)):
+                if _child.tag.split('}')[-1] == 'dLbl':
+                    insert_at = _i + 1
+            dlbls.insert(insert_at, sp)
             ET.SubElement(sp, f'{{{_A_NS}}}noFill')
             ln = ET.SubElement(sp, f'{{{_A_NS}}}ln')
             ET.SubElement(ln, f'{{{_A_NS}}}noFill')
@@ -5326,10 +5417,26 @@ def patch_impdet_charts(xlsx_path):
 
             patched_drawings = {}
             if drawing_changed:
-                ET.indent(drawing_root, space='')
-                patched_drawings[drawing_path] = ET.tostring(
-                    drawing_root, encoding='unicode', xml_declaration=True
-                )
+                # This function registers '' -> chart namespace for chart XML.
+                # The drawing's default namespace is spreadsheetDrawing, so
+                # serializing it under that mapping writes the chart reference
+                # unprefixed -- <chart r:id=.../> instead of <c:chart r:id=.../> --
+                # which binds it to the drawing namespace and makes Excel refuse
+                # to open the workbook. Register the drawing's own namespaces
+                # (crucially 'c') for this serialization, then restore.
+                ET.register_namespace('', _XDR_NS)
+                ET.register_namespace('a', _A_NS)
+                ET.register_namespace('c', _C_NS)
+                ET.register_namespace('r', _R_NS)
+                try:
+                    ET.indent(drawing_root, space='')
+                    patched_drawings[drawing_path] = ET.tostring(
+                        drawing_root, encoding='unicode', xml_declaration=True
+                    )
+                finally:
+                    ET.register_namespace('', _C_NS)
+                    ET.register_namespace('a', _A_NS)
+                    ET.register_namespace('r', _R_NS)
 
             # Resolve rIds to chart file paths
             draw_rels_path = drawing_path.replace('drawings/', 'drawings/_rels/').replace('.xml', '.xml.rels')
@@ -5671,6 +5778,787 @@ def patch_remove_chart_borders_and_axis_lines(xlsx_path):
 # COMPOSERS
 # ══════════════════════════════════════════════════════════════════
 
+# ── 2026 Vizo layout redesign: summary tabs ──────────────────────
+# The four tabs below are all views over 'ACL Env by Pool Mgmt Adj',
+# which compose_vizo_main builds first. They are written as Excel formulas
+# pointing at that sheet rather than as recomputed numbers, so a summary
+# can never disagree with the tab it summarises -- the same approach
+# SCALE's Vizo tabs take over their own calc tabs.
+# See docs/migration_layout_redesign.md.
+
+ACL_SHEET = "ACL Env by Pool Mgmt Adj"
+_ACL_REF = "'" + ACL_SHEET + "'!"
+
+
+def _parse_acl_layout(ws):
+    """Locate every block of a built 'ACL Env by Pool Mgmt Adj' sheet.
+
+    Returns row numbers (not values) so the summary tabs can reference the
+    source cells by formula. Mirrors the emission order in
+    _sheet_acl_reserve; anything it cannot find is simply absent from the
+    result, and callers degrade to omitting that block.
+    """
+    out = {"pools": [], "impaired": [], "oac": [], "totals": {}}
+    pool = None
+    section = "pools"
+    for row in ws.iter_rows(min_row=6):
+        r = row[0].row
+        a = row[0].value
+        label = str(a).strip() if a is not None else ""
+        if not label:
+            continue
+        low = label.lower()
+
+        if low.startswith("pooled totals"):
+            out["totals"]["pooled"] = r
+            pool = None
+            section = "post"
+            continue
+        if low == "impaired loans":
+            section = "impaired"
+            continue
+        if low.startswith("total specifically identified"):
+            out["totals"]["spec"] = r
+            section = "post"
+            continue
+        if low.startswith("other allowance considerations"):
+            section = "oac"
+            continue
+        if low.startswith("total other allowance considerations"):
+            out["totals"]["oac"] = r
+            section = "post"
+            continue
+        if low.startswith("total allowance needed"):
+            out["totals"]["needed"] = r
+            continue
+        if low.startswith("allowance for credit loss balance"):
+            out["totals"]["balance"] = r
+            continue
+        if low.startswith("adjustment"):
+            out["totals"]["adjustment"] = r
+            out["totals"]["adjustment_label"] = label
+            continue
+
+        if section == "impaired":
+            out["impaired"].append((label, r))
+            continue
+        if section == "oac":
+            out["oac"].append((label, r))
+            continue
+        if section != "pools":
+            continue
+
+        if label == "Total":
+            if pool is not None:
+                pool["total_row"] = r
+                out["pools"].append(pool)
+                pool = None
+            continue
+        # A pool header is a label with an empty Balance column; anything
+        # else inside a block is a grade row.
+        if row[1].value in (None, ""):
+            pool = {"name": label, "header_row": r, "grades": []}
+        elif pool is not None:
+            pool["grades"].append((label, r))
+    return out
+
+
+def _summary_title(ws, cu, snap, title):
+    """Standard three-line Vizo tab header in column A."""
+    ws.sheet_view.showGridLines = False
+    ws.cell(row=1, column=1, value=cu).font = V14B
+    ws.cell(row=2, column=1, value=title).font = V12B
+    ws.cell(row=3, column=1,
+            value="For Quarter Ending " + _snap_display(snap)).font = V10B
+
+
+def _summary_header(ws, r, labels, widths):
+    for ci, (lbl, w) in enumerate(zip(labels, widths), start=1):
+        c = ws.cell(row=r, column=ci, value=lbl)
+        c.font = HDR_FONT
+        c.fill = HDR_FILL
+        c.alignment = Alignment(horizontal='center', vertical='center',
+                                wrap_text=True)
+        c.border = THIN
+        ws.column_dimensions[get_column_letter(ci)].width = w
+    ws.row_dimensions[r].height = 30.0
+
+
+def _summary_page_setup(ws, last_row, last_col, landscape=True):
+    ws.page_setup.orientation = 'landscape' if landscape else 'portrait'
+    _fit_to_pages(ws, 1, 0)
+    ws.page_margins = PageMargins(left=0.25, right=0.25, top=0.25, bottom=0.25,
+                                  header=0.3, footer=0.3)
+    ws.print_area = 'A1:' + get_column_letter(last_col) + str(last_row)
+
+
+def _sheet_acl_summary(wb, cu, snap):
+    """ACL Summary -- one line per pool, dropping the per-grade detail.
+
+    Every figure is a live reference into 'ACL Env by Pool Mgmt Adj', so this
+    is a view of that tab rather than a second calculation of it.
+    """
+    if ACL_SHEET not in wb.sheetnames:
+        return None
+    lay = _parse_acl_layout(wb[ACL_SHEET])
+    if not lay["pools"]:
+        return None
+
+    ws = wb.create_sheet("ACL Summary")
+    _summary_title(ws, cu, snap, "Allowance for Credit Loss - Summary by Pool")
+
+    r = 5
+    _summary_header(ws, r, [
+        "Portfolio Segment", "Balance", "Specific\nIdentification",
+        "Loan Loss Calc\nBalance", "Allowance before\nEnv Factor",
+        "Env\nFactor", "Env Factor\nAllowance", "Total\nAllowance",
+    ], [34, 16, 15, 16, 17, 9, 15, 16])
+    header_row = r
+
+    # source column on the ACL tab -> destination column here
+    cols = [("B", 2), ("C", 3), ("D", 4), ("H", 5), ("I", 6), ("J", 7), ("K", 8)]
+    for p in lay["pools"]:
+        r += 1
+        c = ws.cell(row=r, column=1, value="=" + _ACL_REF + "A" + str(p["header_row"]))
+        c.font = V12
+        c.border = THIN
+        for src, dst in cols:
+            cell = ws.cell(row=r, column=dst,
+                           value="=" + _ACL_REF + src + str(p["total_row"]))
+            cell.font = V12
+            cell.border = THIN
+            cell.number_format = PCT if src == "I" else ACCT
+
+    if "pooled" in lay["totals"]:
+        r += 1
+        pr = lay["totals"]["pooled"]
+        c = ws.cell(row=r, column=1, value="Pooled Totals")
+        c.font = V12B
+        c.fill = TOT_FILL
+        c.border = THIN
+        for src, dst in cols:
+            if src == "I":          # no meaningful pooled env factor
+                cell = ws.cell(row=r, column=dst)
+            else:
+                cell = ws.cell(row=r, column=dst,
+                               value="=" + _ACL_REF + src + str(pr))
+                cell.number_format = ACCT
+            cell.font = V12B
+            cell.fill = TOT_FILL
+            cell.border = THIN
+
+    state = {"r": r}
+
+    def _line(label, src_row, bold=False, fill=None):
+        state["r"] += 1
+        rr = state["r"]
+        c = ws.cell(row=rr, column=1, value=label)
+        c.font = V12B if bold else V12
+        if fill:
+            c.fill = fill
+        v = ws.cell(row=rr, column=8, value="=" + _ACL_REF + "K" + str(src_row))
+        v.font = V12B if bold else V12
+        v.number_format = ACCT
+        if fill:
+            v.fill = fill
+
+    if lay["impaired"]:
+        state["r"] += 2
+        ws.cell(row=state["r"], column=1, value="Impaired Loans").font = V12B
+        ws.cell(row=state["r"], column=8, value="Allowance").font = V12B
+        for label, src_row in lay["impaired"]:
+            _line(label, src_row)
+    if "spec" in lay["totals"]:
+        _line("Total Specifically Identified Allowance",
+              lay["totals"]["spec"], bold=True)
+    if lay["oac"]:
+        state["r"] += 2
+        ws.cell(row=state["r"], column=1,
+                value="Other Allowance Considerations").font = V12B
+        ws.cell(row=state["r"], column=8, value="Allowance").font = V12B
+        for label, src_row in lay["oac"]:
+            _line(label, src_row)
+        if "oac" in lay["totals"]:
+            _line("Total Other Allowance Considerations",
+                  lay["totals"]["oac"], bold=True)
+
+    state["r"] += 1
+    for key, label, bold in (
+        ("needed", "Total Allowance Needed", True),
+        ("balance", "Allowance for Credit Loss Balance as of " + str(snap), False),
+        ("adjustment", lay["totals"].get("adjustment_label", "Adjustment"), True),
+    ):
+        if key in lay["totals"]:
+            _line(label, lay["totals"][key], bold=bold,
+                  fill=TOT_FILL if key == "adjustment" else None)
+
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+    _summary_page_setup(ws, state["r"], 8)
+    return ws
+
+
+def _sheet_mgmt_adj_summary(wb, cu, snap):
+    """Mgmt Adj Summary -- every management and environmental adjustment
+    applied, and what each one is worth in dollars.
+
+    Grade rows appear only where a management adjustment was actually made
+    (column F non-zero on the source tab); a pool carries its Total line
+    whenever it has any adjustment, since the environmental factor is
+    applied pool-wide rather than per grade.
+    """
+    if ACL_SHEET not in wb.sheetnames:
+        return None
+    src_ws = wb[ACL_SHEET]
+    lay = _parse_acl_layout(src_ws)
+    if not lay["pools"]:
+        return None
+
+    ws = wb.create_sheet("Mgmt Adj Summary")
+    _summary_title(ws, cu, snap, "Management & Environmental Adjustments")
+
+    r = 5
+    _summary_header(ws, r, [
+        "Portfolio Segment", "Grade", "Balance", "ACL Base\nLoss Rate",
+        "Mgmt\nAdj", "Allowance\nFactor", "Allowance before\nEnv Factor",
+        "Env\nFactor", "Env Factor\nAllowance",
+    ], [34, 14, 16, 12, 11, 12, 17, 9, 15])
+    header_row = r
+
+    def _val(row, col):
+        v = src_ws[col + str(row)].value
+        return v if isinstance(v, (int, float)) else 0.0
+
+    any_row = False
+    for p in lay["pools"]:
+        adj_grades = [(g, gr) for g, gr in p["grades"] if _val(gr, "F")]
+        env_factor = _val(p["total_row"], "I")
+        if not adj_grades and not env_factor:
+            continue
+        any_row = True
+        r += 1
+        c = ws.cell(row=r, column=1,
+                    value="=" + _ACL_REF + "A" + str(p["header_row"]))
+        c.font = V12B
+        c.fill = ALT_FILL
+        for ci in range(2, 10):
+            ws.cell(row=r, column=ci).fill = ALT_FILL
+
+        for grade, grow in adj_grades:
+            r += 1
+            ws.cell(row=r, column=2,
+                    value="=" + _ACL_REF + "A" + str(grow)).font = V12
+            for src, dst, fmt in (("B", 3, ACCT), ("E", 4, PCT4),
+                                  ("F", 5, PCT4), ("G", 6, PCT4),
+                                  ("H", 7, ACCT)):
+                cell = ws.cell(row=r, column=dst,
+                               value="=" + _ACL_REF + src + str(grow))
+                cell.font = V12
+                cell.number_format = fmt
+                cell.border = THIN
+
+        # Pool total line carries the environmental factor and its dollars.
+        r += 1
+        ws.cell(row=r, column=2, value="Total").font = V12B
+        for src, dst, fmt in (("B", 3, ACCT), ("H", 7, ACCT),
+                              ("I", 8, PCT), ("J", 9, ACCT)):
+            cell = ws.cell(row=r, column=dst,
+                           value="=" + _ACL_REF + src + str(p["total_row"]))
+            cell.font = V12B
+            cell.number_format = fmt
+            cell.fill = TOT_FILL
+            cell.border = THIN
+
+    if not any_row:
+        ws.cell(row=6, column=1,
+                value="No management or environmental adjustments were applied "
+                      "this period.").font = V12
+        _summary_page_setup(ws, 6, 9)
+        return ws
+
+    if "pooled" in lay["totals"]:
+        pr = lay["totals"]["pooled"]
+        r += 2
+        c = ws.cell(row=r, column=1, value="Pooled Totals")
+        c.font = V12B
+        c.fill = TOT_FILL
+        for src, dst, fmt in (("B", 3, ACCT), ("H", 7, ACCT), ("J", 9, ACCT)):
+            cell = ws.cell(row=r, column=dst,
+                           value="=" + _ACL_REF + src + str(pr))
+            cell.font = V12B
+            cell.number_format = fmt
+            cell.fill = TOT_FILL
+            cell.border = THIN
+        for ci in (2, 4, 5, 6, 8):
+            ws.cell(row=r, column=ci).fill = TOT_FILL
+
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+    _summary_page_setup(ws, r, 9)
+    return ws
+
+
+def _sheet_impaired_loans(wb, cu, snap):
+    """Impaired Loans -- the specifically identified allowance, by category
+    and by pool. The Migration analogue of SCALE's ' Impaired Loans-Vizo'.
+    """
+    if ACL_SHEET not in wb.sheetnames:
+        return None
+    src_ws = wb[ACL_SHEET]
+    lay = _parse_acl_layout(src_ws)
+    if not lay["impaired"] and not lay["pools"]:
+        return None
+
+    ws = wb.create_sheet("Impaired Loans")
+    _summary_title(ws, cu, snap, "Impaired Loans - ASC 310-10")
+
+    r = 5
+    _summary_header(ws, r, ["Impairment Category", "Allowance"], [42, 20])
+    for label, src_row in lay["impaired"]:
+        r += 1
+        ws.cell(row=r, column=1, value=label).font = V12
+        ws.cell(row=r, column=1).border = THIN
+        c = ws.cell(row=r, column=2, value="=" + _ACL_REF + "K" + str(src_row))
+        c.font = V12
+        c.number_format = ACCT
+        c.border = THIN
+    if "spec" in lay["totals"]:
+        r += 1
+        c = ws.cell(row=r, column=1,
+                    value="Total Specifically Identified Allowance")
+        c.font = V12B
+        c.fill = TOT_FILL
+        c.border = THIN
+        v = ws.cell(row=r, column=2,
+                    value="=" + _ACL_REF + "K" + str(lay["totals"]["spec"]))
+        v.font = V12B
+        v.fill = TOT_FILL
+        v.number_format = ACCT
+        v.border = THIN
+
+    # Balances lifted out of the pooled calculation, by pool.
+    def _spec(p):
+        v = src_ws["C" + str(p["total_row"])].value
+        return v if isinstance(v, (int, float)) else 0.0
+
+    pools_with_spec = [p for p in lay["pools"] if _spec(p)]
+    if pools_with_spec:
+        r += 2
+        ws.cell(row=r, column=1,
+                value="Specific Identification by Pool").font = V12B
+        r += 1
+        _summary_header(ws, r, ["Portfolio Segment", "Specific Identification"],
+                        [42, 20])
+        for p in pools_with_spec:
+            r += 1
+            c = ws.cell(row=r, column=1,
+                        value="=" + _ACL_REF + "A" + str(p["header_row"]))
+            c.font = V12
+            c.border = THIN
+            v = ws.cell(row=r, column=2,
+                        value="=" + _ACL_REF + "C" + str(p["total_row"]))
+            v.font = V12
+            v.number_format = ACCT
+            v.border = THIN
+        if "pooled" in lay["totals"]:
+            r += 1
+            c = ws.cell(row=r, column=1, value="Pooled Totals")
+            c.font = V12B
+            c.fill = TOT_FILL
+            c.border = THIN
+            v = ws.cell(row=r, column=2,
+                        value="=" + _ACL_REF + "C"
+                              + str(lay["totals"]["pooled"]))
+            v.font = V12B
+            v.fill = TOT_FILL
+            v.number_format = ACCT
+            v.border = THIN
+
+    _summary_page_setup(ws, r, 2, landscape=False)
+    return ws
+
+
+def _sheet_summary_variance(wb, cu, snap, config):
+    """Summary Variance -- current vs. prior ACL, and the change between them.
+
+    Laid out to match SCALE's 'Executive Summary-Vizo' exactly: a centred
+    three-line title, then Current / Prior / Change blocks, each opened by a
+    teal (accent1) band carrying the block's period, over the same four
+    measures. The grid is fixed -- rows 10-13 current, 16-19 prior, 22-25
+    change -- so the Change block can subtract row-for-row the way SCALE does.
+
+    Current figures are live references into 'ACL Env by Pool Mgmt Adj'.
+    Prior figures come from the previous quarter's workbook and so are written
+    as static values, read through the same loader the Change Analysis tab
+    uses so the two tabs cannot disagree about which report "prior" means.
+    """
+    if ACL_SHEET not in wb.sheetnames:
+        return None
+    lay = _parse_acl_layout(wb[ACL_SHEET])
+    tot = lay["totals"]
+    if "needed" not in tot:
+        return None
+
+    prior, prior_snap = None, None
+    try:
+        from change_analysis import _find_prior_report, _parse_acl_sheet
+        import openpyxl as _oxl
+        # Resolve the reports folder exactly the way change_analysis does,
+        # so this tab and the Change Analysis tab can never disagree about
+        # which workbook is 'prior'. The config keys are an override for
+        # tests; production has neither and relies on CECL_WORKSPACE_ROOT.
+        rpt_dir = (config.get('report_dir') or config.get('output_dir')
+                   or os.path.join(
+                       os.environ.get('CECL_WORKSPACE_ROOT')
+                       or os.path.dirname(os.path.abspath(__file__)),
+                       'Reports'))
+        safe_cu = cu.replace(' ', '_').replace('/', '-')
+        path, prior_snap = _find_prior_report(rpt_dir, safe_cu, "Vizo_Model", snap)
+        if path:
+            pwb = _oxl.load_workbook(path, data_only=True)
+            if ACL_SHEET in pwb.sheetnames:
+                prior = _parse_acl_sheet(pwb[ACL_SHEET])["totals"]
+            pwb.close()
+    except Exception as _e:  # noqa: BLE001
+        print("  Summary Variance: prior report unavailable (" + str(_e) + ")")
+
+    ws = wb.create_sheet("Summary Variance")
+    ws.sheet_view.showGridLines = False
+
+    # SCALE's column frame: narrow gutters either side of label + value.
+    for col, width in (('A', 8.4), ('B', 42.0), ('C', 18.1), ('D', 8.4)):
+        ws.column_dimensions[col].width = width
+
+    BAND = PatternFill('solid', fgColor=Color(theme=4))     # accent1 teal
+    F_BAND = Font(name='Calibri', bold=True, size=16, color=Color(theme=0))
+    F_TITLE = Font(name='Calibri', bold=True, size=16)
+    F_BODY = Font(name='Calibri', size=16)
+    DATE_FMT = 'm/d/yyyy'
+
+    def _to_date(value):
+        if not value:
+            return None
+        try:
+            return datetime.strptime(str(value)[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+
+    # ── centred three-line title ──
+    for row, text in ((1, "CECL Allowances for Credit Losses (ACL) Calculation"),
+                      (2, "Prepared For " + str(cu)),
+                      (3, "Quarter Ended ")):
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        c = ws.cell(row=row, column=1, value=text)
+        c.font = F_TITLE
+        c.alignment = Alignment(horizontal='center')
+        ws.row_dimensions[row].height = 21.0
+    # strftime has no portable no-pad directive, so format m/d/yyyy by hand.
+    snap_dt = _to_date(snap)
+    snap_text = ("%d/%d/%d" % (snap_dt.month, snap_dt.day, snap_dt.year)
+                 if snap_dt else _snap_display(snap))
+    ws.cell(row=3, column=1, value="Quarter Ended " + snap_text)
+
+    def _band(row, text, period=None):
+        """Teal block header spanning the label and value columns."""
+        for col in (2, 3):
+            cell = ws.cell(row=row, column=col)
+            cell.fill = BAND
+            cell.font = F_BAND
+        ws.cell(row=row, column=2, value=text).alignment = Alignment(
+            horizontal='left', vertical='center')
+        if period is not None:
+            p = ws.cell(row=row, column=3, value=period)
+            p.number_format = DATE_FMT
+            p.alignment = Alignment(horizontal='right', vertical='center')
+        # SCALE sets band rows shorter than the measure rows beneath them.
+        ws.row_dimensions[row].height = 15.75
+
+    # (label, key on the ACL tab totals, key in the parsed prior totals)
+    MEASURES = [
+        ("Total Expected Losses on Loans", "needed", "total_allow_needed"),
+        ("Current ACL Balance", "balance", "acl_balance"),
+        ("Adjustment", "adjustment", "adjustment"),
+        ("ACL/Total Loans", "ratio", "ratio"),
+    ]
+    CUR_TOP, PRIOR_TOP, CHG_TOP = 10, 16, 22
+
+    def _measure_label(row, label):
+        c = ws.cell(row=row, column=2, value=label)
+        c.font = F_BODY
+        ws.row_dimensions[row].height = 21.0
+
+    def _fmt_for(key):
+        return PCT if key == "ratio" else ACCT2
+
+    _band(7, "Executive Summary")
+    ws.row_dimensions[8].height = 6.0
+
+    # ── Current ──
+    _band(9, "Current ACL", snap_dt)
+    for i, (label, key, _pk) in enumerate(MEASURES):
+        row = CUR_TOP + i
+        _measure_label(row, label)
+        if key == "ratio":
+            formula = ("=IFERROR(" + _ACL_REF + "K" + str(tot["needed"]) + "/"
+                       + _ACL_REF + "B" + str(tot["pooled"]) + ',"")') \
+                if "pooled" in tot else None
+        else:
+            formula = ("=" + _ACL_REF + "K" + str(tot[key])) if key in tot else None
+        c = ws.cell(row=row, column=3, value=formula)
+        c.font = F_BODY
+        c.number_format = _fmt_for(key)
+
+    # ── Prior ──
+    _band(15, "Prior ACL", _to_date(prior_snap))
+    for i, (label, key, pkey) in enumerate(MEASURES):
+        row = PRIOR_TOP + i
+        _measure_label(row, label)
+        value = None
+        if prior:
+            if key == "ratio":
+                if prior.get("pooled_balance"):
+                    value = prior.get("total_allow_needed", 0) / prior["pooled_balance"]
+            else:
+                value = prior.get(pkey)
+        c = ws.cell(row=row, column=3, value=value)
+        c.font = F_BODY
+        c.number_format = _fmt_for(key)
+
+    # ── Change ──
+    _band(21, "Change")
+    for i, (label, key, _pk) in enumerate(MEASURES):
+        row = CHG_TOP + i
+        _measure_label(row, label)
+        cur, pri = CUR_TOP + i, PRIOR_TOP + i
+        c = ws.cell(row=row, column=3,
+                    value="=IF(C" + str(pri) + '="","",C' + str(cur)
+                          + "-C" + str(pri) + ")")
+        c.font = F_BODY
+        c.number_format = _fmt_for(key)
+
+    last = CHG_TOP + len(MEASURES) - 1
+    if not prior:
+        last += 2
+        n = ws.cell(row=last, column=2,
+                    value="No prior report is available for comparison - this "
+                          "is the earliest report on file for this credit union.")
+        n.font = Font(name='Calibri', size=11, italic=True)
+        n.alignment = Alignment(wrap_text=True, vertical='top')
+        ws.merge_cells(start_row=last, start_column=2, end_row=last, end_column=3)
+        ws.row_dimensions[last].height = 30.0
+
+    ws.page_setup.orientation = 'portrait'
+    _fit_to_pages(ws, 1, 1)
+    ws.page_margins = PageMargins(left=0.5, right=0.5, top=0.6, bottom=0.6,
+                                  header=0.3, footer=0.3)
+    ws.print_area = 'A1:D' + str(last)
+    return ws
+
+
+# Rows of content that fit on one page of the ACL tab. Portrait Letter at
+# 0.25" margins, scaled so A:K fits one page wide: the squeeze that buys the
+# width also shrinks the rows, so a portrait page holds noticeably more rows
+# than the landscape layout this replaced (which used 45/40).
+# Deliberately a little under capacity -- a manual break can only move a page
+# boundary earlier, never stop Excel breaking naturally mid-pool.
+ACL_PAGE1_ROWS = 72
+ACL_OTHER_ROWS = 67   # = ACL_PAGE1_ROWS - 5 repeated title rows (1:5)
+
+
+def _paginate_pool_blocks(ws, pool_starts, pool_ends,
+                          page1_rows=ACL_PAGE1_ROWS,
+                          other_rows=ACL_OTHER_ROWS):
+    """Break pages between pool blocks so no pool is split across pages.
+
+    Greedy: keep filling the current page until the next pool would not fit
+    whole, then break before it. Existing breaks are cleared first, so this is
+    safe to re-run after a page-setup change.
+    """
+    ws.row_breaks.brk = []
+    page_bottom = page1_rows
+    for ps, pe in zip(pool_starts, pool_ends):
+        block_end = pe + 1   # include the trailing blank row
+        if block_end > page_bottom:
+            ws.row_breaks.append(Break(id=ps - 1))
+            page_bottom = ps + other_rows - 1
+    return len(ws.row_breaks.brk)
+
+
+def _fit_to_pages(ws, wide=1, tall=1):
+    """Force a sheet to print at a fixed page count.
+
+    Setting fitToWidth/fitToHeight alone is not enough: if the sheet also
+    carries an explicit zoom (page_setup.scale), Excel honours the zoom and
+    ignores fit-to-page, which is how tabs that declare 'one page' still
+    spill sideways in the PDF. Clearing scale is the part that matters.
+
+    ``tall=0`` means "as many pages as needed" (width still constrained).
+    """
+    ws.page_setup.fitToWidth = wide
+    ws.page_setup.fitToHeight = tall
+    ws.page_setup.scale = None
+    pr = ws.sheet_properties.pageSetUpPr
+    if pr is None:
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    else:
+        pr.fitToPage = True
+
+
+# The cover is the report's face page and carries no page number.
+_NO_PAGE_NUMBER = {"Vizo Cover"}
+
+
+def _add_page_numbers(wb, skip=None):
+    """Stamp "Page N of M" in the footer of every visible sheet.
+
+    Excel treats a whole-workbook PDF export as a single print job, so &P
+    and &N run continuously across tabs instead of restarting per sheet --
+    which is what makes the numbers usable in the delivered PDF. SCALE does
+    the same via PAGE_NUM_TABS in cecl_ui/services/scale/vizo_layout.py.
+    """
+    skip = _NO_PAGE_NUMBER if skip is None else skip
+    stamped = []
+    for ws in wb.worksheets:
+        if ws.title in skip or ws.sheet_state != "visible":
+            continue
+        ws.oddFooter.right.text = "Page &P of &N"
+        stamped.append(ws.title)
+    return stamped
+
+
+ENV_FACTOR_SHEET = "Env Factor by Pool"
+ENV_RANGES_SHEET = ">Envir Fact Ranges"
+
+
+def _merge_env_ranges_into_factor(wb, gap: int = 3) -> bool:
+    """Append the Environmental Factor Ranges block below the Env Factor by
+    Pool table so the two read as one tab, then hide the source sheet.
+
+    Part of the 2026 Vizo layout redesign (docs/migration_layout_redesign.md);
+    SCALE received the same merge on its own template. The source sheet is
+    hidden rather than deleted so cell references into it keep resolving --
+    the same reason SCALE keeps 'Envir Factor Ranges-Vizo' alive via
+    _ALWAYS_HIDDEN_SHEETS in cecl_ui/services/scale/runner.py.
+
+    The destination's column widths win: the ranges block is written into the
+    Env Factor table's existing columns rather than carrying its own (its A/H
+    gutters would otherwise crush the pool-name column). Row heights and
+    merges are carried over so the wrapped description paragraphs still fit.
+
+    Idempotent -- a second call detects the block and does nothing.
+    """
+    if ENV_FACTOR_SHEET not in wb.sheetnames or ENV_RANGES_SHEET not in wb.sheetnames:
+        return False
+    dst = wb[ENV_FACTOR_SHEET]
+    src = wb[ENV_RANGES_SHEET]
+
+    rows = [c.row for row in dst.iter_rows() for c in row if c.value is not None]
+    if not rows:
+        return False
+    last = max(rows)
+
+    # Already merged? The ranges title only ever appears in the appended block.
+    for row in dst.iter_rows(min_row=6):
+        for c in row:
+            if c.value == "Environmental Factor Ranges":
+                return False
+
+    src_rows = [c.row for row in src.iter_rows() for c in row if c.value is not None]
+    if not src_rows:
+        return False
+    shift = last + gap - min(src_rows)
+
+    # The ranges sheet repeats the CU name as its own title. Once the block is
+    # part of Env Factor by Pool that name is already on the tab (A1), so drop
+    # the row and close the gap -- SCALE's merged tab reads the same way.
+    cu_name = dst["A1"].value
+    skip = set()
+    for r in sorted(set(src_rows)):
+        vals = [c.value for c in src[r] if c.value is not None]
+        if len(vals) == 1 and vals[0] == cu_name:
+            skip.add(r)
+
+    def _dest_row(r: int) -> int:
+        return r + shift - sum(1 for k in skip if k < r)
+
+    for row in src.iter_rows():
+        for c in row:
+            if isinstance(c, MergedCell) or c.row in skip:
+                continue
+            if c.value is None and not c.has_style:
+                continue
+            new = dst.cell(row=_dest_row(c.row), column=c.column, value=c.value)
+            if c.has_style:
+                new.font = copy(c.font)
+                new.fill = copy(c.fill)
+                new.border = copy(c.border)
+                new.alignment = copy(c.alignment)
+                new.number_format = c.number_format
+
+    for rng in list(src.merged_cells.ranges):
+        lo_c, lo_r, hi_c, hi_r = range_boundaries(str(rng))
+        if all(r in skip for r in range(lo_r, hi_r + 1)):
+            continue
+        dst.merge_cells(start_row=_dest_row(lo_r), start_column=lo_c,
+                        end_row=_dest_row(hi_r), end_column=hi_c)
+
+    for r_idx, dim in src.row_dimensions.items():
+        if dim.height is not None and r_idx not in skip:
+            dst.row_dimensions[_dest_row(r_idx)].height = dim.height
+
+    # The tab is now much longer than _sheet_env_factor left it, and it
+    # had no print area at all -- without this the appended block drifts
+    # across extra pages in the PDF.
+    dst.print_area = 'A1:H' + str(_dest_row(max(src_rows)))
+    _fit_to_pages(dst, 1, 0)
+
+    src.sheet_state = "hidden"
+    return True
+
+
+# Approved Vizo main tab order (docs/migration_layout_redesign.md).
+# "Risk Chg *" is a wildcard slot: the CU-dependent per-pool Risk Change
+# sheets keep their build order and land there as a group.
+_VIZO_MAIN_ORDER = (
+    "Vizo Cover",
+    "Report Index",
+    "Summary Variance",
+    "Impr Deter",
+    "Risk Change Total",
+    "Risk Chg *",
+    "ACL Env by Pool Mgmt Adj",
+    "Change Analysis",
+    "Impaired Loans",
+    "ACL Summary",
+    "Mgmt Adj Summary",
+    "Env Factor by Pool",
+    ">Envir Fact Ranges",
+    "Display HIst Bal",
+    "Display CO-Recov-DQ",
+    "Introduction-Vizo",
+    "Executive Summary-Vizo",
+)
+
+
+def _reorder_vizo_main(wb):
+    """Put the main Vizo workbook in the approved tab order.
+
+    Idempotent, and tolerant of tabs that are not built for a given CU: a
+    name absent from the workbook is skipped, and any sheet not named in
+    _VIZO_MAIN_ORDER keeps its relative build order and is appended.
+    """
+    names = list(wb.sheetnames)
+    fixed = {n for n in _VIZO_MAIN_ORDER if n != "Risk Chg *"}
+    pool_tabs = [n for n in names
+                 if n.startswith("Risk Chg ") and n not in fixed]
+    ordered = []
+    for slot in _VIZO_MAIN_ORDER:
+        if slot == "Risk Chg *":
+            ordered.extend(pool_tabs)
+        elif slot in names:
+            ordered.append(slot)
+    ordered += [n for n in names if n not in ordered]
+    wb._sheets = [wb[n] for n in ordered]
+
+
 def compose_vizo_main(client, snap, df, config, grades, hist=None):
     """Build complete Vizo-format main CECL Credit Migration workbook."""
     cu = config['credit_union']
@@ -5728,11 +6616,17 @@ def compose_vizo_main(client, snap, df, config, grades, hist=None):
     _sheet_loss_factor(wb, cu, snap, df, grades, config, hist)
     _sheet_co_recov_dq(wb, cu, snap, df, config, hist)
 
-    # Insert Introduction-Vizo and Executive Summary-Vizo tabs from template
+    # Insert Introduction-Vizo and Executive Summary-Vizo tabs from a
+    # dedicated narrative template ("Vizo Narrative Tabs - Template.xlsx").
+    # This small 2-tab file holds the approved appendix verbiage and is the
+    # single edit point for that text. Falls back to the full master
+    # template when the narrative file is absent.
     from openpyxl import load_workbook
-    template_path = os.path.join(_WORKSPACE_BASE, 'Sample Reports', 'YYYY-MM CECL-Migration-WARM - Template Credit Union with Vizo.xlsx')
+    _narrative_path = os.path.join(_WORKSPACE_BASE, 'Sample Reports', 'Vizo Narrative Tabs - Template.xlsx')
+    _master_path = os.path.join(_WORKSPACE_BASE, 'Sample Reports', 'YYYY-MM CECL-Migration-WARM - Template Credit Union with Vizo.xlsx')
+    template_path = _narrative_path if os.path.exists(_narrative_path) else _master_path
     if os.path.exists(template_path):
-        template_wb = load_workbook(template_path)
+        template_wb = _load_workbook_resilient(template_path)
         for tab_name in ["Introduction-Vizo", "Executive Summary-Vizo"]:
             if tab_name in template_wb.sheetnames:
                 tmpl_ws = template_wb[tab_name]
@@ -5792,25 +6686,33 @@ def compose_vizo_main(client, snap, df, config, grades, hist=None):
                     new_ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
                     new_ws.page_setup.fitToWidth = 1
                     new_ws.page_setup.fitToHeight = 1
-        # Move the new tabs to just after 'Display CO-Recov-DQ'
-        try:
-            target_idx = wb.sheetnames.index('Display CO-Recov-DQ')
-            for offset, tab_name in enumerate(["Introduction-Vizo", "Executive Summary-Vizo"], start=1):
-                if tab_name in wb.sheetnames:
-                    current_idx = wb.sheetnames.index(tab_name)
-                    desired_idx = target_idx + offset
-                    wb.move_sheet(tab_name, offset=desired_idx - current_idx)
-        except ValueError:
-            pass
+        # Final position of these two is set by _reorder_vizo_main.
 
     _sheet_env_ranges(wb, cu, snap, hist)
+    # Fold the ranges block into 'Env Factor by Pool' and hide the source.
+    _merge_env_ranges_into_factor(wb)
 
-    # Change Analysis (period-over-period) — always last.
+    # Summary tabs (2026 layout redesign). Built after every tab they
+    # reference, since each is a formula view over 'ACL Env by Pool
+    # Mgmt Adj' rather than a recalculation.
+    _sheet_summary_variance(wb, cu, snap, config)
+    _sheet_impaired_loans(wb, cu, snap)
+    _sheet_acl_summary(wb, cu, snap)
+    _sheet_mgmt_adj_summary(wb, cu, snap)
+
+    # Change Analysis (period-over-period). Built last so it can read every
+    # other tab; _reorder_vizo_main then moves it to its display position
+    # directly after 'ACL Env by Pool Mgmt Adj'.
     try:
         from change_analysis import append_change_analysis
         append_change_analysis(wb, cu, snap, config, "Vizo_Model")
     except Exception as _ce:  # noqa: BLE001
         print(f"  Change Analysis sheet skipped: {_ce}")
+
+    _reorder_vizo_main(wb)
+    # Footers last: every tab exists and the order is settled, so &P of &N
+    # numbers the report the way it will actually print.
+    _add_page_numbers(wb)
 
     safe_cu = cu.replace(' ', '_').replace('/', '-')
     fname = f"{snap}_CECL_Migration_{safe_cu}_Vizo_Model.xlsx"
@@ -5830,6 +6732,8 @@ def compose_vizo_supp(client, snap, df, config, grades, hist=None):
     _sheet_detail_co_hist(wb, cu, snap, config, hist)
     _sheet_bal_adjust(wb, cu, snap, df, grades, config, hist)
     _sheet_appendix_supp(wb)
+    # Appendix_Supplemental is incomplete; hide it until finished.
+    wb["Appendix_Supplemental"].sheet_state = "hidden"
 
     # Move Historical Trends Balance tab to after Report Index (2)
     trend_idx = wb.sheetnames.index("> Historical Trends Balance")
