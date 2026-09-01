@@ -70,11 +70,17 @@ MAX_NOT_REPORTED_SHARE = 0.75
 # A charge-off whose original score was never supplied is classified
 # ``Unchanged`` under the WARM's ``original = current`` gap-fill convention --
 # the same convention ``import_data`` applies to live loans and the Risk Change
-# matrix displays.  That is defensible per loan, but a chart whose bars are
-# mostly that assumption asserts "credit did not deteriorate before these loans
-# charged off", which is a specific claim nobody measured.  At least this share
-# of the charge-off dollars must carry a genuinely measured pair of scores.
-MIN_MEASURED_SHARE = 0.25
+# matrix displays.
+#
+# This module used to REFUSE a chart whose dollars were mostly that
+# assumption. Product call, 2026-09-01: where the current score is the
+# original, the loan should read Unchanged -- that is the answer, not a
+# coverage failure, and it is what the Risk Change matrix beside the chart
+# already shows for the same loan. Set a share in (0, 1] to reinstate the
+# refusal; 0.0 disables it. ``measured_share`` is still computed and still
+# reported in the diagnostics, so a chart built mostly of gap-fill remains
+# visible to an analyst without being withheld from the client.
+MIN_MEASURED_SHARE = 0.0
 
 # Provenances that represent two independently sourced scores.  ``co_file``
 # is both scores off the charge-off feed; ``row_pair`` is the origination /
@@ -469,6 +475,21 @@ def load_chargeoff_loans(config):
         errors="coerce") + pd.offsets.MonthEnd(0)
     out["co_date"] = row_date.fillna(fallback)
     out["date_source"] = ["row" if pd.notna(d) else "filename" for d in row_date]
+
+    # A charge-off must never be counted twice. Several credit unions
+    # re-ship a CUMULATIVE charge-off file every quarter, so the same
+    # write-off arrives once per quarter folder it appears in: Utah
+    # Community FCU lands 2,409 duplicate rows worth $35,096,486 out of
+    # $226,686,588 -- 15.5% of its charge-offs counted more than once.
+    # Identity is the write-off itself (account, date, loan code,
+    # amount), not the file it arrived in, so a genuine second charge-off
+    # on the same loan for a different amount or date still counts.
+    key = [c for c in ("account", "co_date", "code", "amount")
+           if c in out.columns]
+    before = len(out)
+    out = out.drop_duplicates(subset=key, keep="first")
+    if len(out) != before:
+        out.attrs["duplicates_dropped"] = before - len(out)
     return out[cols], files
 
 
@@ -486,8 +507,12 @@ def normalize_account(value):
     literal string misses AND the normalized form is unambiguous within the
     credit union, so it can never merge two real accounts.
     """
-    digits = re.sub(r"\D", "", str(value or ""))
-    return digits.lstrip("0")
+    from cecl_ui.services.coercion import digits_only
+    # digits_only drops a trailing Excel ``.0`` before stripping non-digits.
+    # Without that, Utah's WARM account 313235957340.0 normalised to the
+    # 13-digit 3132359573400 and could never meet the 12-digit account in
+    # monthly_loan_data: 0 of 115,366 joined.
+    return digits_only(value).lstrip("0")
 
 
 def load_score_history(credit_union, engine=None):
@@ -551,6 +576,119 @@ def build_alias_index(history):
             continue
         counts.setdefault(key, []).append(acct)
     return {k: v[0] for k, v in counts.items() if len(v) == 1}
+
+
+def _member_key(account):
+    """Member portion of a loan account key: ``12345-07`` -> ``12345``."""
+    s = str(account or "").strip()
+    for sep in ("-", "_", " "):
+        if sep in s:
+            s = s.split(sep, 1)[0]
+            break
+    return normalize_account(s)
+
+
+def merge_warm_history(history, config, resolve=None, verbose=True):
+    """Fold the WARM's archived ``Mmm-YY`` tabs into a snapshot history.
+
+    ``load_score_history`` reads ``monthly_loan_data``, where for most credit
+    unions a single dated credit pull is applied identically at every import.
+    A loan's score therefore never moves and the lookback recovers nothing the
+    charge-off feed did not already hold: across 34 credit unions, Test NOVA
+    has 79 monthly snapshots over 8 years and 95.7% of loans never move a
+    point; Mountain has none at all.
+
+    The WARM archives two tab families that DO move -- see
+    ``docs/pdf_migration/09_chargeoff_score_history.md``:
+
+    ``Mmm-YY Data``
+        the quarterly loan extract, loan-level, carrying both scores already
+        banded and reaching back to 2022-12 -- three years before
+        ``monthly_loan_data`` begins. Merged directly.
+    ``Mmm-YY Credit Pull``
+        a genuine bureau pull, but keyed by MEMBER rather than by loan. It
+        supplies the score at charge-off ONLY, never the original: across a
+        WARM's multi-loan members 9.3% differ on the current score but 0.0%
+        differ on the original, which says the WARM's 'original' is itself
+        pull-derived. Broadcasting it would manufacture agreement rather than
+        observe it, so these rows land with ``original = 0`` and
+        ``recover_scores`` reads them as unknown.
+
+    Loan-level always wins: a member pull only fills a date at which that
+    account has no loan-level row. Mutates and returns ``history``.
+    """
+    meta = {"available": False, "loan_rows": 0, "pull_rows": 0,
+            "matched_accounts": 0, "new_accounts": 0}
+    try:
+        import co_warm_history as _W
+    except ImportError as exc:  # noqa: BLE001
+        meta["error"] = f"co_warm_history unavailable: {exc}"
+        return history, meta
+    try:
+        loan_hist, member_hist, wmeta = _W.load_warm_tabs(
+            config, resolve=resolve, verbose=verbose)
+    except Exception as exc:  # noqa: BLE001 - a missing WARM is normal
+        meta["error"] = str(exc)[:200]
+        return history, meta
+    if not loan_hist and not member_hist:
+        meta["error"] = "no Mmm-YY tabs found"
+        return history, meta
+    meta["available"] = True
+    meta["warm"] = {k: wmeta.get(k) for k in
+                    ("files", "loan_accounts", "members")}
+
+    norm_to_literal = {}
+    for acct in history:
+        k = normalize_account(acct)
+        if k:
+            norm_to_literal.setdefault(k, acct)
+
+    for w_acct, rows in loan_hist.items():
+        k = normalize_account(w_acct)
+        if not k:
+            continue
+        target = norm_to_literal.get(k)
+        if target is None:
+            target = w_acct
+            norm_to_literal[k] = w_acct
+            meta["new_accounts"] += 1
+        else:
+            meta["matched_accounts"] += 1
+        dest = history.setdefault(target, [])
+        seen = {r[0] for r in dest}
+        for when, cur, orig in rows:
+            if when in seen:
+                continue
+            dest.append((when, int(cur or 0), int(orig or 0)))
+            meta["loan_rows"] += 1
+        dest.sort(key=lambda r: r[0])
+
+    by_member = {}
+    for acct in history:
+        mk = _member_key(acct)
+        if mk:
+            by_member.setdefault(mk, []).append(acct)
+    for mem, rows in member_hist.items():
+        accts = by_member.get(normalize_account(mem))
+        if not accts:
+            continue
+        for acct in accts:
+            dest = history.setdefault(acct, [])
+            seen = {r[0] for r in dest}
+            for when, score in rows:
+                if when in seen:
+                    continue
+                try:
+                    sc = int(score)
+                except (TypeError, ValueError):
+                    continue
+                if sc <= 0:
+                    continue
+                # original deliberately left unknown -- see docstring.
+                dest.append((when, sc, 0))
+                meta["pull_rows"] += 1
+            dest.sort(key=lambda r: r[0])
+    return history, meta
 
 
 def recover_scores(account, co_date, history, alias=None):
@@ -685,6 +823,10 @@ def derive_co_by_migration(config, snapshot_date, grades, no_score=None,
 
     if history is None:
         history = load_score_history(config["credit_union"], engine=engine)
+        # Path A: the WARM carries score history the extracts do not.
+        history, warm_meta = merge_warm_history(history, config,
+                                                verbose=verbose)
+        diag["warm"] = warm_meta
     diag["history_accounts"] = len(history)
     alias = build_alias_index(history)
 
@@ -800,7 +942,7 @@ def derive_co_by_migration(config, snapshot_date, grades, no_score=None,
                   f"snapshots are needed before this chart can be honest.")
         return {}, {}, diag
 
-    if measured_share < MIN_MEASURED_SHARE:
+    if MIN_MEASURED_SHARE > 0 and measured_share < MIN_MEASURED_SHARE:
         diag["status"] = "refused_mostly_assumed"
         if verbose:
             print(f"    *** CO migration split REFUSED: only "

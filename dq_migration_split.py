@@ -47,30 +47,8 @@ def _coerce_days(val):
     into ``600``.  Loan extracts routinely come back as float64 columns
     whenever a single row is blank, so a digits-only strip is unsafe here.
     """
-    if val is None:
-        return None
-    if isinstance(val, bool):
-        return None
-    if isinstance(val, (int, float)):
-        try:
-            f = float(val)
-        except (TypeError, ValueError):
-            return None
-        return None if math.isnan(f) else f
-    s = str(val).strip()
-    if not s or s.lower() in ('nan', 'none', 'null', '-', 'na', 'n/a'):
-        return None
-    try:
-        return float(s.replace(',', '').replace('$', ''))
-    except ValueError:
-        pass
-    m = re.search(r'-?\d+(?:\.\d+)?', s)
-    if not m:
-        return None
-    try:
-        return float(m.group())
-    except ValueError:
-        return None
+    from cecl_ui.services.coercion import coerce_number
+    return coerce_number(val)
 
 
 def _label_sets(config, grades, no_score):

@@ -34,6 +34,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from cecl_ui.services.coercion import digits_only
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,12 +53,7 @@ def _digits(v: Any) -> str:
     non-digit characters so ``19238``, ``19238.0`` and ``'19238-'`` all
     collapse to the comparable digit string ``'19238'``.
     """
-    if v is None:
-        return ""
-    s = str(v).strip()
-    if s.endswith(".0"):
-        s = s[:-2]
-    return "".join(ch for ch in s if ch.isdigit())
+    return digits_only(v)
 
 
 def _to_float(v: Any) -> float | None:
