@@ -222,12 +222,15 @@ def build_acl_env(client_name: str, snapshot_date: str, config: dict,
     import report_vizo as _rv
 
     _imp = (hist or {}).get("impaired", {}) or {}
-    acl_pools = _imp.get("acl_pools") or {}
+    # Prefer the values report_vizo._sheet_acl_reserve computes and publishes
+    # (isolated underscore keys) -- available for every CU, wizard-onboarded
+    # included -- over the WARM-parsed dicts (present only for WARM CUs).
+    acl_pools = _imp.get("_acl_pools_computed") or _imp.get("acl_pools") or {}
     if not acl_pools:
         return None
-    acl_summary = _imp.get("acl_summary") or {}
-    acl_impaired = _imp.get("acl_impaired") or {}
-    pool_order = _imp.get("pool_order") or list(acl_pools.keys())
+    acl_summary = _imp.get("_acl_summary_computed") or _imp.get("acl_summary") or {}
+    acl_impaired = _imp.get("_acl_impaired_computed") or _imp.get("acl_impaired") or {}
+    pool_order = list(acl_pools.keys()) or _imp.get("pool_order") or []
     cu = (config or {}).get("credit_union") or client_name
 
     def _match(pool: str) -> dict | None:

@@ -2391,6 +2391,10 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     pool_starts = []
     pool_ends = []
     _bal_detail = _imp.get('pool_bal_detail', {})
+    # Captured as each row renders: the fully-resolved ACL values as a data
+    # dict (same shape load_impaired_data builds for WARM CUs), so the PDF
+    # renderer consumes numbers instead of screen-scraping this sheet.
+    computed_acl_pools = {}
 
     # Build unified pool list in WARM order, including WARM-only pools
     risk_rated_flags = _imp.get('risk_rated', {})
@@ -2569,6 +2573,13 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
                 r += 1
                 pool_grade_balance_sum += balance or 0
                 pool_grade_spec_id_sum += specific_id or 0
+                computed_acl_pools.setdefault(
+                    pool, {'grades': {}, 'total': {}})['grades'][g] = {
+                    'balance': balance, 'spec_id': specific_id,
+                    'calc_bal': calc_bal, 'base_rate': base_rate,
+                    'mgmt_adj': mgmt_adj, 'factor': factor,
+                    'allow_before': allow_before,
+                }
 
             # Pool total row – use sum of per-grade allowances we computed above
             _is_brr = _is_brr_pool(pool, brr_pool_lcs)
@@ -2619,6 +2630,14 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             ws.cell(row=r, column=10).font = V12B
             ws.cell(row=r, column=11, value=total_allow).number_format = ACCT
             ws.cell(row=r, column=11).font = V12B
+            computed_acl_pools.setdefault(
+                pool, {'grades': {}, 'total': {}})['total'] = {
+                'balance': total_balance, 'spec_id': total_spec_id,
+                'calc_bal': total_calc_bal,
+                'allow_before': pool_allow_before_out,
+                'env_factor': env_factor, 'env_allow': env_allow,
+                'total_allow': total_allow,
+            }
             pool_ends.append(r)   # last printed row of this pool block
             r += 2
         else:
@@ -2693,6 +2712,14 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             ws.cell(row=r, column=10).font = V12B
             ws.cell(row=r, column=11, value=nrr_total_allow).number_format = ACCT
             ws.cell(row=r, column=11).font = V12B
+            computed_acl_pools.setdefault(
+                pool, {'grades': {}, 'total': {}})['total'] = {
+                'balance': nrr_balance, 'spec_id': nrr_spec_id,
+                'calc_bal': nrr_calc_bal, 'base_rate': nrr_base_rate,
+                'mgmt_adj': nrr_mgmt_adj, 'factor': nrr_factor,
+                'allow_before': nrr_allow_before, 'env_factor': nrr_env_factor,
+                'env_allow': nrr_env_allow, 'total_allow': nrr_total_allow,
+            }
             pool_ends.append(r)   # last printed row of this pool block
             r += 2
 
@@ -2762,6 +2789,22 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     total_allow_needed = pooled_total_allow + total_spec_allow + oac_total
     acl_bal = acl_summary.get('acl_balance', config.get('acl_balance', 0))
     adjustment = total_allow_needed - acl_bal
+    # Publish the fully-rendered ACL environmental values as a data dict so
+    # the PDF renderer (cecl_report_web.from_data.build_acl_env) consumes
+    # numbers instead of screen-scraping this sheet. Isolated underscore keys:
+    # nothing else reads them, so the workbook output is unaffected.
+    if isinstance(_imp, dict):
+        _imp['_acl_pools_computed'] = computed_acl_pools
+        _imp['_acl_summary_computed'] = {
+            'pooled_balance': pooled_balance, 'pooled_spec_id': pooled_spec_id,
+            'pooled_allow_before': grand_allow_before,
+            'pooled_env_allow': grand_env_allow,
+            'pooled_total_allow': pooled_total_allow,
+            'total_spec_allow': total_spec_allow,
+            'total_allow_needed': total_allow_needed,
+            'acl_balance': acl_bal, 'adjustment': adjustment,
+        }
+        _imp['_acl_impaired_computed'] = dict(acl_impaired)
 
     r += 1
     ws.cell(row=r, column=1, value="Total Specifically Identified Allowance").font = V12B
