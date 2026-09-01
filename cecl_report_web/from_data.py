@@ -18,7 +18,14 @@ import datetime as _dt
 import os
 from typing import Any
 
-from .model import CoverPage
+from .model import (
+    CoverPage,
+    KeyValueRow,
+    MatrixCell,
+    MatrixRow,
+    RiskChangeMatrix,
+    RiskChangePage,
+)
 
 
 def _snap_parts(snapshot_date: str) -> tuple[int, int, int]:
@@ -93,19 +100,112 @@ def build_cover(client_name: str, snapshot_date: str, config: dict,
     )
 
 
+def _cell_state(i: int, j: int, cur_grade: str, orig_grade: str,
+                no_score: str, n_top: int) -> str:
+    """Improved / deteriorated / plain, computed from grade ORDERING.
+
+    Mirrors ``report_vizo._sheet_risk_change`` exactly -- the state that the
+    workbook encodes in the cell fill is derived here from position instead:
+    a current grade worse than original deteriorates, unless the original is
+    among the top ``n_top`` grades and the drop is a single band (the WARM
+    "top grades need a 2+ drop" rule). Not-Reported never migrates.
+    """
+    if cur_grade == no_score or orig_grade == no_score:
+        return "plain"
+    if i > j:  # current grade ranked below original -> potential deterioration
+        if j < n_top and (i - j) < 2:
+            return "plain"
+        return "deteriorated"
+    if i < j:  # current grade ranked above original -> improvement
+        return "improved"
+    return "plain"
+
+
+def build_risk_change(client_name: str, snapshot_date: str, df: Any,
+                      config: dict, grades: Any,
+                      hist: dict | None = None) -> RiskChangePage:
+    """Populate the "Risk Change Total" page from the loan frame.
+
+    Reuses the report engine's own compute (``cecl_engine.risk_change_matrix``
+    plus report_vizo's grade helpers) so the numbers are identical to the
+    workbook; the improved/deteriorated state is computed from grade ordering,
+    not read from a cell fill.
+    """
+    import report_vizo as _rv
+    from cecl_engine import risk_change_matrix
+
+    no_score = (config or {}).get("no_score_label", "Not Reported")
+    n_top = int((config or {}).get("top_grades_double_drop", 3))
+    gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
+    matrix = risk_change_matrix(df, grades, no_score)
+    rng = _rv._grade_ranges(grades, no_score)
+    total = float(df["current_balance"].sum())
+    cu = (config or {}).get("credit_union") or client_name
+
+    def _mv(cur: str, og: str) -> float:
+        return float(_rv._matrix_val(matrix, cur, og) or 0.0)
+
+    col_totals = {og: sum(_mv(g2, og) for g2 in gl) for og in gl}
+
+    def _build(is_pct: bool) -> RiskChangeMatrix:
+        rows: list[MatrixRow] = []
+        for i, g in enumerate(gl):
+            cells: list[MatrixCell] = []
+            rtotal = 0.0
+            for j, og in enumerate(gl):
+                v = _mv(g, og)
+                rtotal += v
+                val = (v / col_totals[og] if col_totals[og] else 0.0) if is_pct else v
+                cells.append(MatrixCell(
+                    value=val, state=_cell_state(i, j, g, og, no_score, n_top),
+                    is_pct=is_pct))
+            tot = (rtotal / total if total else 0.0) if is_pct else rtotal
+            rows.append(MatrixRow(
+                label=g, range_label=rng.get(g, ""), cells=cells,
+                total=MatrixCell(value=tot, is_pct=is_pct, bold=True)))
+        # Grand Total row: column sums ($) / 100% (pct).
+        gt_cells = [MatrixCell(value=(1.0 if is_pct else col_totals[og]),
+                               is_pct=is_pct, bold=True) for og in gl]
+        rows.append(MatrixRow(
+            label="Grand Total", range_label="", cells=gt_cells,
+            total=MatrixCell(value=(1.0 if is_pct else total),
+                             is_pct=is_pct, bold=True)))
+        return RiskChangeMatrix(
+            corner=("% Current Grade" if is_pct else "$ Current Grade"),
+            col_headers=list(gl), rows=rows, is_pct=is_pct)
+
+    _imp = (hist or {}).get("impaired", {}) or {}
+    bal_adj = float(_imp.get("total_balance_adjustment", 0.0) or 0.0)
+    tip = _imp.get("total_in_portfolio") or (total + bal_adj)
+    summary = [
+        KeyValueRow(label="Balance Adjustment", value=bal_adj),
+        KeyValueRow(label="Total in Portfolio", value=float(tip)),
+    ]
+    heading = [
+        "Executive Summary Total Loans",
+        "Risk Change By Credit Score",
+        f"For Quarter Ending {_rv._snap_display(snapshot_date)}",
+    ]
+    return RiskChangePage(credit_union=cu, heading_lines=heading,
+                          matrices=[_build(False), _build(True)],
+                          summary=summary)
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
     """Build the render-ready page set from report data.
 
     Returns ``{"cover": CoverPage, "pages": [ (template, ctx, landscape), ... ]}``.
-    Only the cover is populated today; further archetypes (Risk Change, ACL
-    Env, Impr Deter) are added here incrementally, each reusing the report
-    engine's own pure compute functions.
+    Archetypes are added here incrementally (cover, Risk Change so far), each
+    reusing the report engine's own pure compute functions.
     """
     cover = build_cover(client_name, snapshot_date, config,
                         supplemental=supplemental)
     pages: list[tuple[str, dict, bool]] = [
         ("cover.html", {"cover": cover}, False),
     ]
+    if df is not None and not supplemental:
+        rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
+        pages.append(("risk_change.html", {"page": rc, "charts": []}, True))
     return {"cover": cover, "pages": pages}
