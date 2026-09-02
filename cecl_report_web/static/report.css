@@ -188,17 +188,23 @@ tfoot { display: table-footer-group; }
 .mig-table .r { text-align: right; font-variant-numeric: tabular-nums; }
 .by-pool { margin-left: 3.3in; }   /* sits at Excel col F */
 
-/* ---- Risk Change migration matrices ---- */
-.risk-change { font-size: 11pt; }
+/* ---- Risk Change migration matrices ----
+   Each Risk Change page (Total + one per risk-rated pool) carries both the $
+   and % matrices plus three charts; kept compact so the whole tab fits on a
+   single landscape page, matching the workbook's fit-to-one-page tabs. */
+.risk-change { font-size: 8.5pt; }
+.risk-change .rpt-header { margin-bottom: 0.08in; }
+.risk-change .rpt-cu { font-size: 12pt; }
+.risk-change .rpt-subhead { font-size: 10pt; }
 
 .rc-matrix {
   border-collapse: collapse;
-  margin: 0.15in auto 0.3in auto;
+  margin: 0.05in auto 0.06in auto;
   table-layout: fixed;
 }
 .rc-matrix th, .rc-matrix td {
   border: 0.5px solid #ffffff;
-  padding: 3pt 6pt;
+  padding: 1pt 5pt;
   white-space: nowrap;
 }
 /* Header cells: dark teal, white, bold, centered (matches #0D4D5E). */
@@ -221,14 +227,26 @@ tfoot { display: table-footer-group; }
 
 .rc-summary {
   border-collapse: collapse;
-  margin: 0.1in auto 0.2in auto;
+  margin: 0.03in auto 0.06in auto;
 }
 .rc-summary .hd {
   background: #0D4D5E; color: #fff; font-weight: 700;
-  text-align: left; padding: 3pt 8pt;
+  text-align: left; padding: 2pt 8pt;
 }
 .rc-summary .num {
-  text-align: right; font-variant-numeric: tabular-nums; padding: 3pt 8pt;
+  text-align: right; font-variant-numeric: tabular-nums; padding: 2pt 8pt;
+}
+
+/* Three charts in a row beneath the matrices, sized to finish the page. */
+.rc-charts {
+  display: flex; gap: 0.3in; justify-content: center;
+  align-items: flex-start; margin-top: 0.06in;
+}
+.rc-chart-cell {
+  flex: 0 1 auto; display: flex; justify-content: center;
+}
+.rc-chart-cell svg.chart {
+  height: 1.6in; width: auto; max-width: 100%;
 }
 
 /* ---- ACL Env by Pool (allowance calculation) ---- */

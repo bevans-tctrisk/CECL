@@ -48,8 +48,8 @@
   {% endfor %}
 
   {% if charts %}
-  <div class="charts-grid">
-    {% for svg in charts %}<div class="chart-cell">{{ svg | safe }}</div>{% endfor %}
+  <div class="rc-charts">
+    {% for svg in charts %}<div class="rc-chart-cell">{{ svg | safe }}</div>{% endfor %}
   </div>
   {% endif %}
 

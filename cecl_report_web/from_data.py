@@ -140,8 +140,11 @@ def _cell_state(i: int, j: int, cur_grade: str, orig_grade: str,
 
 def build_risk_change(client_name: str, snapshot_date: str, df: Any,
                       config: dict, grades: Any,
-                      hist: dict | None = None) -> RiskChangePage:
-    """Populate the "Risk Change Total" page from the loan frame.
+                      hist: dict | None = None,
+                      pool_name: str | None = None) -> RiskChangePage:
+    """Populate a Risk Change page from the loan frame -- the total portfolio
+    when ``pool_name`` is None, otherwise a single pool (pass the pool-filtered
+    ``df``). One page per matrix set, mirroring the workbook's Risk Change tabs.
 
     Reuses the report engine's own compute (``cecl_engine.risk_change_matrix``
     plus report_vizo's grade helpers) so the numbers are identical to the
@@ -192,16 +195,26 @@ def build_risk_change(client_name: str, snapshot_date: str, df: Any,
             col_headers=list(gl), rows=rows, is_pct=is_pct)
 
     _imp = (hist or {}).get("impaired", {}) or {}
-    bal_adj = float(_imp.get("total_balance_adjustment", 0.0) or 0.0)
-    tip = _imp.get("total_in_portfolio") or (total + bal_adj)
+    if pool_name:
+        bal_adj = float((_imp.get("balance_adjustments") or {}).get(
+            pool_name, 0.0) or 0.0)
+        tip = total + bal_adj
+        heading = [
+            "Risk Change By Credit Score",
+            pool_name,
+            f"For Quarter Ending {_rv._snap_display(snapshot_date)}",
+        ]
+    else:
+        bal_adj = float(_imp.get("total_balance_adjustment", 0.0) or 0.0)
+        tip = _imp.get("total_in_portfolio") or (total + bal_adj)
+        heading = [
+            "Executive Summary Total Loans",
+            "Risk Change By Credit Score",
+            f"For Quarter Ending {_rv._snap_display(snapshot_date)}",
+        ]
     summary = [
         KeyValueRow(label="Balance Adjustment", value=bal_adj),
         KeyValueRow(label="Total in Portfolio", value=float(tip)),
-    ]
-    heading = [
-        "Executive Summary Total Loans",
-        "Risk Change By Credit Score",
-        f"For Quarter Ending {_rv._snap_display(snapshot_date)}",
     ]
     return RiskChangePage(credit_union=cu, heading_lines=heading,
                           matrices=[_build(False), _build(True)],
@@ -1512,10 +1525,26 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        if df is not None else [])
         pages.append(("impr_deter.html", {"page": impd, "charts": impd_charts}, True))
     if df is not None and not supplemental:
+        import report_vizo as _rv
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
         rc_charts = render_chart_specs(
             risk_change_ncc_chart(df, grades, config) + risk_change_charts(hist))
         pages.append(("risk_change.html", {"page": rc, "charts": rc_charts}, True))
+        # One page per risk-rated pool, mirroring the workbook's Risk Chg tabs.
+        _rr = ((hist or {}).get("impaired", {}) or {}).get("risk_rated", {})
+        for _pool in _rv._ordered_pools(df, hist):
+            if not _rr.get(_pool, True):
+                continue
+            _pdf = df[df["loan_pool"] == _pool]
+            if _pdf.empty:
+                continue
+            _prc = build_risk_change(client_name, snapshot_date, _pdf, config,
+                                     grades, hist, pool_name=_pool)
+            _pcharts = render_chart_specs(
+                risk_change_ncc_chart(_pdf, grades, config)
+                + risk_change_charts(hist, _pool))
+            pages.append(("risk_change.html",
+                          {"page": _prc, "charts": _pcharts}, True))
     if not supplemental:
         acl = build_acl_env(client_name, snapshot_date, config, hist,
                            df=df, grades=grades)
