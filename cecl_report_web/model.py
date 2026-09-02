@@ -17,6 +17,25 @@ from typing import Any
 
 
 @dataclass
+class ChartSpec:
+    """A chart described as DATA, so a page carries its charts instead of
+    pulling them back out of a workbook.
+
+    ``kind`` is semantic; the adapter in :mod:`cecl_report_web.from_data`
+    maps it onto the normalized dict :func:`cecl_report_web.charts.render_chart_svg`
+    consumes. ``series`` entries are ``{"name": str, "values": [float],
+    "colors": [hex]}`` -- ``colors`` are per-slice for pie/doughnut and
+    per-series for bar/column.
+    """
+
+    kind: str  # 'pie' | 'doughnut' | 'bar_h' | 'column' | 'diverging_bar'
+    title: str | None = None
+    categories: list[str] = field(default_factory=list)
+    series: list[dict] = field(default_factory=list)
+    value_format: str | None = None  # 'pct' | 'currency' | None
+
+
+@dataclass
 class CoverPage:
     """The report cover (mirrors ``sheet_cover_vizo``)."""
 

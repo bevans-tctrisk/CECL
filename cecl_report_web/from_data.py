@@ -22,6 +22,7 @@ from .model import (
     AclEnvPage,
     AclPoolRow,
     AdjustmentRow,
+    ChartSpec,
     CoverPage,
     ImprDeterPage,
     KeyValueRow,
@@ -341,6 +342,95 @@ def build_impr_deter(client_name: str, snapshot_date: str, config: dict,
         heading_lines=heading, cecl_adjustment=cecl)
 
 
+# ── Charts (rendered from data via cecl_report_web.charts) ───────────
+# Migration-status slice colours, matching report_vizo's DQ pie / CO bar /
+# Net-Credit-Change doughnut (olive / maroon / teal / gold).
+_MIG_LABELS = ("Improved", "Deteriorated", "Unchanged", "Not Reported")
+_MIG_COLORS = ("829901", "873A3A", "0D4D5E", "FFC000")
+_NCC_COLORS = ("829901", "873A3A", "0D4D5E")
+
+
+def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
+    """Adapt a semantic ChartSpec to the dict charts.render_chart_svg consumes."""
+    lbl_fmt = "0.0%" if cs.value_format == "pct" else None
+    if cs.kind in ("pie", "doughnut"):
+        s0 = cs.series[0] if cs.series else {}
+        ctype = "DoughnutChart" if cs.kind == "doughnut" else "PieChart"
+        return {
+            "type": ctype, "title": cs.title,
+            "series": [{
+                "name": s0.get("name"), "values": s0.get("values") or [],
+                "cats": list(cs.categories),
+                "point_colors": s0.get("colors"),
+                "label_fmt": lbl_fmt, "show_labels": True,
+            }],
+        }
+    bar_dir = "bar" if cs.kind in ("bar_h", "diverging_bar") else "col"
+    grouping = "stacked" if cs.kind == "diverging_bar" else "clustered"
+    return {
+        "type": "BarChart", "bar_dir": bar_dir, "grouping": grouping,
+        "title": cs.title,
+        "series": [{
+            "name": s.get("name"), "values": s.get("values") or [],
+            "cats": list(cs.categories),
+            "point_colors": s.get("colors"),
+            "color": (s.get("colors") or [None])[0], "filled": True,
+            "label_fmt": lbl_fmt, "show_labels": True,
+        } for s in cs.series],
+    }
+
+
+def render_chart_specs(specs: list[ChartSpec]) -> list[str]:
+    """Render a list of ChartSpecs to inline SVG strings."""
+    from .charts import render_chart_svg
+    out: list[str] = []
+    for cs in specs:
+        try:
+            out.append(render_chart_svg(_chartspec_to_render_dict(cs)))
+        except Exception:  # noqa: BLE001 - a bad chart must not sink the page
+            continue
+    return out
+
+
+def _mig_status_series(data: dict, use_pct: bool = True) -> list[float] | None:
+    """[Improved, Deteriorated, Unchanged, Not Reported] from a status dict."""
+    if not data:
+        return None
+    key = "pct" if use_pct else "balance"
+    vals = [float((data.get(l) or {}).get(key) or 0.0) for l in _MIG_LABELS]
+    return vals if any(vals) else None
+
+
+def risk_change_charts(hist: dict | None, pool_name: str | None = None) -> list[ChartSpec]:
+    """DQ pie + CO bar for a Risk Change tab, from the migration-status dicts."""
+    _imp = (hist or {}).get("impaired", {}) or {}
+    if pool_name:
+        pl = pool_name.strip().lower()
+        dq = next((v for k, v in (_imp.get("dq_by_pool") or {}).items()
+                   if k.strip().lower() == pl), {})
+        co = next((v for k, v in (_imp.get("co_by_pool") or {}).items()
+                   if k.strip().lower() == pl), {})
+    else:
+        dq = _imp.get("dq_by_status") or {}
+        co = _imp.get("co_by_status") or {}
+    specs: list[ChartSpec] = []
+    dq_vals = _mig_status_series(dq)
+    if dq_vals is not None:
+        specs.append(ChartSpec(
+            kind="pie", title="Delinquency by Credit Grade Migration",
+            categories=list(_MIG_LABELS),
+            series=[{"name": "DQ", "values": dq_vals, "colors": list(_MIG_COLORS)}],
+            value_format="pct"))
+    co_vals = _mig_status_series(co)
+    if co_vals is not None:
+        specs.append(ChartSpec(
+            kind="bar_h", title="Charge off by Credit Grade Migration",
+            categories=list(_MIG_LABELS),
+            series=[{"name": "CO", "values": co_vals, "colors": list(_MIG_COLORS)}],
+            value_format="pct"))
+    return specs
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -357,7 +447,8 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
     ]
     if df is not None and not supplemental:
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
-        pages.append(("risk_change.html", {"page": rc, "charts": []}, True))
+        rc_charts = render_chart_specs(risk_change_charts(hist))
+        pages.append(("risk_change.html", {"page": rc, "charts": rc_charts}, True))
     if not supplemental:
         impd = build_impr_deter(client_name, snapshot_date, config, hist,
                                df=df, grades=grades)
