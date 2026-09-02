@@ -23,6 +23,7 @@ from .model import (
     AclPoolRow,
     AdjustmentRow,
     CoverPage,
+    ImprDeterPage,
     KeyValueRow,
     MatrixCell,
     MatrixRow,
@@ -299,6 +300,47 @@ def build_acl_env(client_name: str, snapshot_date: str, config: dict,
         impaired_rows=impaired_rows, adjustment_rows=adjustment_rows)
 
 
+def build_impr_deter(client_name: str, snapshot_date: str, config: dict,
+                     hist: dict | None = None, df: Any = None,
+                     grades: Any = None) -> ImprDeterPage:
+    """Populate the "Impr Deter" page's CECL Adjustment box from data.
+
+    The four headline allowance figures are exactly the ACL summary the ACL
+    Env page already computes, so the box ties out to that tab. Reuses the
+    published/computed ``acl_summary`` (standalone-computes it when absent).
+    The improved/deteriorated charts are added once the ChartSpec node lands.
+    """
+    import report_vizo as _rv
+
+    _imp = (hist or {}).get("impaired", {}) or {}
+    acl_summary = _imp.get("_acl_summary_computed") or _imp.get("acl_summary") or {}
+    if not acl_summary.get("total_allow_needed") and df is not None:
+        acl_summary = (_rv.compute_acl_environmental(
+            df, grades, config, hist, snapshot_date).get("acl_summary")
+            or acl_summary)
+
+    cu = (config or {}).get("credit_union") or client_name
+    adj = float(acl_summary.get("adjustment") or 0.0)
+    adj_label = ("Adjustment (Underfunded)" if adj >= 0
+                 else "Adjustment (Overfunded)")
+    cecl = [
+        KeyValueRow(label="Total Specifically Identified Allowance",
+                    value=acl_summary.get("total_spec_allow")),
+        KeyValueRow(label="Total Allowance Needed",
+                    value=acl_summary.get("total_allow_needed")),
+        KeyValueRow(label=f"Allowance for Credit Loss Balance as of {snapshot_date}",
+                    value=acl_summary.get("acl_balance")),
+        KeyValueRow(label=adj_label, value=adj),
+    ]
+    heading = [
+        "CECL Adjustment & Improved/Deteriorated",
+        f"For Quarter Ending {_rv._snap_display(snapshot_date)}",
+    ]
+    return ImprDeterPage(
+        credit_union=cu, period_ending=str(snapshot_date)[:10],
+        heading_lines=heading, cecl_adjustment=cecl)
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -317,6 +359,9 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
         pages.append(("risk_change.html", {"page": rc, "charts": []}, True))
     if not supplemental:
+        impd = build_impr_deter(client_name, snapshot_date, config, hist,
+                               df=df, grades=grades)
+        pages.append(("impr_deter.html", {"page": impd, "charts": []}, False))
         acl = build_acl_env(client_name, snapshot_date, config, hist,
                            df=df, grades=grades)
         if acl is not None:

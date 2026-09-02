@@ -124,3 +124,8 @@ dist/
 
 # ---- Report / template backups (local only) ----
 *.bak.*
+
+# ---- Local dev render / scratch artifacts ----
+/_*.png
+/_*.pdf
+*.pkl
