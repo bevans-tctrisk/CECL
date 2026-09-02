@@ -191,7 +191,7 @@
       ACL Funding Worksheet</label>
     <label><input type="checkbox" name="vizo_pdf"
         {% if cfg.reports is defined and cfg.reports.get('vizo_pdf', False) %}checked{% endif %}>
-      Vizo Migration PDF <span class="help">(needs Vizo)</span></label>
+      Vizo Migration PDF <span class="help">(standalone or with Vizo)</span></label>
 
     <div class="btn-row">
       <a class="btn btn-secondary" href="{{ url_for('run.select_cu') }}">&larr; CU list</a>

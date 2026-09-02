@@ -13056,33 +13056,27 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         reports = [k for k, v in rpt_cfg.items() if v]
     if not reports:
         reports = ['tct']  # default fallback
-    # The Vizo PDF is a rendering of the Vizo workbook -- requesting it implies
-    # the Vizo report, so selecting it alone still produces output.
-    if 'vizo_pdf' in reports and 'vizo' not in reports:
-        reports = list(reports) + ['vizo']
 
     os.makedirs(RPT_DIR, exist_ok=True)
     saved = []
     failed_integrity = []
 
-    # Optional data-driven PDF alongside the Vizo workbook. Snapshot pristine
+    # The Vizo PDF and ACL sidecar are rendered from data (not the workbook),
+    # so they run whether or not the Vizo workbook is produced -- 'vizo_pdf'
+    # alone is a PDF-only run that never writes the .xlsx. Snapshot pristine
     # inputs BEFORE the loop mutates config/hist (OAC expansion, Impr-Deter
-    # stashes) so the from-data recompute starts clean. Enabled by the config
-    # flag OR by 'vizo_pdf' appearing in the requested reports list.
-    _want_vizo_pdf = ('vizo' in reports
-                      and (bool(config.get('reports', {}).get('vizo_pdf'))
-                           or 'vizo_pdf' in reports))
-    # The ACL sidecar is written on EVERY vizo run so future quarters can diff
-    # against it without opening this workbook.
-    _want_vizo_sidecar = 'vizo' in reports
-    if _want_vizo_pdf or _want_vizo_sidecar:
+    # stashes) so the from-data recompute starts clean.
+    _want_pdf = 'vizo_pdf' in reports
+    _pdf_only = _want_pdf and 'vizo' not in reports
+    _vizo_data = ('vizo' in reports) or _want_pdf
+    if _vizo_data:
         import copy as _copy
         _pdf_config = _copy.deepcopy(config)
         _pdf_hist = _copy.deepcopy(hist)
 
     for rpt_type in reports:
         if rpt_type == 'vizo_pdf':
-            continue  # a modifier on the 'vizo' report, not a tab of its own
+            continue  # rendered from data after the loop, not a workbook tab
         try:
             if rpt_type == 'tct':
                 wb, fname = compose_tct_new(client_name, snapshot_date, df, config, grades, hist)
@@ -13122,39 +13116,6 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 except Exception as e:
                     print(f"  Warning: Chart patching failed: {e}")
 
-            if rpt_type == 'vizo' and _want_vizo_pdf:
-                try:
-                    from cecl_report_web.assembly import (
-                        render_report_pdf_from_data)
-                    pdf_bytes = render_report_pdf_from_data(
-                        client_name, snapshot_date, _pdf_config,
-                        grades=grades, hist=_pdf_hist, df=df)
-                    pdf_path = os.path.join(
-                        RPT_DIR, fname.rsplit('.xlsx', 1)[0] + '.pdf')
-                    with open(pdf_path, 'wb') as _pf:
-                        _pf.write(pdf_bytes)
-                    print(f"  Saved vizo PDF: {pdf_path}")
-                    saved.append(pdf_path)
-                except Exception as _pdf_exc:  # noqa: BLE001
-                    print(f"  Warning: vizo PDF generation failed: {_pdf_exc}")
-
-            if rpt_type == 'vizo' and _want_vizo_sidecar:
-                try:
-                    from cecl_report_web import acl_store
-                    from cecl_report_web import from_data as _fd
-                    from report_vizo import compute_acl_environmental
-                    _env = compute_acl_environmental(
-                        df, grades, _pdf_config, _pdf_hist, snapshot_date)
-                    if _env.get('acl_pools'):
-                        _shape = _fd._acl_current_shape(
-                            _env['acl_pools'], _env['acl_summary'],
-                            _env['acl_impaired'])
-                        acl_store.write_acl_snapshot(
-                            RPT_DIR, cu, snapshot_date, _shape)
-                        print(f"  Wrote ACL sidecar for {snapshot_date}")
-                except Exception as _sc_exc:  # noqa: BLE001
-                    print(f"  ACL sidecar skipped: {_sc_exc}")
-
             # Integrity gate. On 2026-08-31 a namespace bug in
             # patch_impdet_charts produced workbooks Excel refused to open,
             # and nothing caught it -- openpyxl loaded them fine and the zip
@@ -13181,6 +13142,42 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             log_report_generation(client_name, cu, snapshot_date, rpt_type, None, success=False)
             import traceback
             traceback.print_exc()
+
+    # Vizo PDF + ACL sidecar -- rendered from data, so they run whether or not
+    # the workbook was produced (a PDF-only run never touches the .xlsx). Uses
+    # the pristine pre-loop snapshot of config/hist.
+    if _vizo_data:
+        _safe_cu = cu.replace(' ', '_').replace('/', '-')
+        _vbase = f"{snapshot_date}_CECL_Migration_{_safe_cu}_Vizo_Model"
+        try:
+            from cecl_report_web import acl_store
+            from cecl_report_web import from_data as _fd
+            from report_vizo import compute_acl_environmental
+            _env = compute_acl_environmental(
+                df, grades, _pdf_config, _pdf_hist, snapshot_date)
+            if _env.get('acl_pools'):
+                _shape = _fd._acl_current_shape(
+                    _env['acl_pools'], _env['acl_summary'], _env['acl_impaired'])
+                acl_store.write_acl_snapshot(RPT_DIR, cu, snapshot_date, _shape)
+                print(f"  Wrote ACL sidecar for {snapshot_date}")
+        except Exception as _sc_exc:  # noqa: BLE001
+            print(f"  ACL sidecar skipped: {_sc_exc}")
+        if _want_pdf:
+            try:
+                from cecl_report_web.assembly import render_report_pdf_from_data
+                pdf_bytes = render_report_pdf_from_data(
+                    client_name, snapshot_date, _pdf_config,
+                    grades=grades, hist=_pdf_hist, df=df)
+                pdf_path = os.path.join(RPT_DIR, _vbase + '.pdf')
+                with open(pdf_path, 'wb') as _pf:
+                    _pf.write(pdf_bytes)
+                print(f"  Saved vizo PDF{' (PDF only)' if _pdf_only else ''}: "
+                      f"{pdf_path}")
+                saved.append(pdf_path)
+                log_report_generation(client_name, cu, snapshot_date,
+                                      'vizo_pdf', pdf_path, success=True)
+            except Exception as _pdf_exc:  # noqa: BLE001
+                print(f"  Warning: vizo PDF generation failed: {_pdf_exc}")
 
     if saved:
         print(f"\n  {len(saved)} report(s) saved to {RPT_DIR}")
