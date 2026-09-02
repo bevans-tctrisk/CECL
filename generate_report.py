@@ -13061,6 +13061,16 @@ def generate_report(client_name, snapshot_date=None, reports=None):
     saved = []
     failed_integrity = []
 
+    # Optional data-driven PDF alongside the Vizo workbook. Snapshot pristine
+    # inputs BEFORE the loop mutates config/hist (OAC expansion, Impr-Deter
+    # stashes) so the from-data recompute starts clean.
+    _want_vizo_pdf = ('vizo' in reports
+                      and bool(config.get('reports', {}).get('vizo_pdf')))
+    if _want_vizo_pdf:
+        import copy as _copy
+        _pdf_config = _copy.deepcopy(config)
+        _pdf_hist = _copy.deepcopy(hist)
+
     for rpt_type in reports:
         try:
             if rpt_type == 'tct':
@@ -13100,6 +13110,22 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                     print(f"  Patched charts in {fname}")
                 except Exception as e:
                     print(f"  Warning: Chart patching failed: {e}")
+
+            if rpt_type == 'vizo' and _want_vizo_pdf:
+                try:
+                    from cecl_report_web.assembly import (
+                        render_report_pdf_from_data)
+                    pdf_bytes = render_report_pdf_from_data(
+                        client_name, snapshot_date, _pdf_config,
+                        grades=grades, hist=_pdf_hist, df=df)
+                    pdf_path = os.path.join(
+                        RPT_DIR, fname.rsplit('.xlsx', 1)[0] + '.pdf')
+                    with open(pdf_path, 'wb') as _pf:
+                        _pf.write(pdf_bytes)
+                    print(f"  Saved vizo PDF: {pdf_path}")
+                    saved.append(pdf_path)
+                except Exception as _pdf_exc:  # noqa: BLE001
+                    print(f"  Warning: vizo PDF generation failed: {_pdf_exc}")
 
             # Integrity gate. On 2026-08-31 a namespace bug in
             # patch_impdet_charts produced workbooks Excel refused to open,
