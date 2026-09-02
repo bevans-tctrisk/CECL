@@ -745,6 +745,90 @@ def build_exec_summary_narrative(client_name: str, config: dict) -> NarrativePag
             "improved and deteriorated loan totals by portfolio segment."))])
 
 
+def build_env_factor(client_name: str, snapshot_date: str, config: dict,
+                     hist: dict | None = None, df: Any = None,
+                     grades: Any = None) -> TablePage | None:
+    """Environmental Factor by Pool: the economic-stress index inputs and the
+    per-pool Net Credit / Delinquency / Economic Stress scores that combine
+    into each pool's environmental factor -- computed from data, not the .xlsx.
+    """
+    import report_vizo as _rv
+
+    if df is None:
+        return None
+    cfg = config or {}
+    cu = cfg.get("credit_union") or client_name
+    ed = cfg.get("economic_data", {}) or {}
+    _imp = (hist or {}).get("impaired", {}) or {}
+    if _imp.get("economic_data"):
+        ed = _imp["economic_data"]
+    econ_stress = _rv._eco_stress(cfg, ed_override=ed)
+    ncc_r, dq_r, es_r = _rv._env_ranges(hist)
+    pools = _rv._ordered_pools(df, hist)
+    if not pools:
+        return None
+    dq_var = _rv._pool_dq_variance(pools, hist, snapshot_date)
+    risk_rated_map = _imp.get("risk_rated", {})
+
+    pop = ed.get("population", 1) or 1
+    state_cols = ["State", "Unemployment Rate", "Foreclosures per Person",
+                  "Bankruptcies", "Population"]
+    state_rows = [[
+        TableCell(ed.get("state", ""), "text", align="left"),
+        TableCell(ed.get("unemployment_rate", 0), "pct2"),
+        TableCell(ed.get("foreclosures", 0), "currency"),
+        TableCell(ed.get("bankruptcies", 0), "currency"),
+        TableCell(pop, "currency"),
+    ]]
+    bk_pct = (ed.get("bankruptcies", 0) / pop) if pop else 0
+    fc_pct = (ed.get("foreclosures", 0) / pop) if pop else 0
+    county_cols = ["County", "Unemployment Rate", "Bankruptcy %",
+                   "Foreclosure %", "Economic Stress Index"]
+    county_rows = [[
+        TableCell(ed.get("county", ""), "text", align="left"),
+        TableCell(ed.get("unemployment_rate", 0), "pct2"),
+        TableCell(bk_pct, "pct2"),
+        TableCell(fc_pct, "pct2"),
+        TableCell(econ_stress / 100.0, "pct2"),
+    ]]
+
+    pool_cols = ["Portfolio Segment", "Net Credit Change", "Net Credit Score",
+                 "Delinquency Variance from Ave.", "Delinquency Score",
+                 "Economic Stress Actual", "Economic Stress Score",
+                 "Environmental Factor"]
+    pool_rows: list[list[TableCell]] = []
+    for pool in pools:
+        pdf = df[df["loan_pool"] == pool]
+        is_rr = risk_rated_map.get(pool, True)
+        ncc_pct = _rv._ncc(pdf, grades, cfg)[2] if is_rr else 0.0
+        ncc_score = _rv._score(ncc_pct * 100, ncc_r) / 100.0
+        dqv = dq_var.get(pool, 0)
+        dq_score = _rv._score(dqv * 100, dq_r) / 100.0
+        es_score = _rv._score(econ_stress, es_r) / 100.0
+        env_f = ncc_score + dq_score + es_score
+        pool_rows.append([
+            TableCell(pool, "text", align="left"),
+            TableCell(ncc_pct, "pct2", align="center"),
+            TableCell(ncc_score, "pct2", align="center"),
+            TableCell(dqv, "pct2", align="center"),
+            TableCell(dq_score, "pct2", align="center"),
+            TableCell(econ_stress / 100.0, "pct2", align="center"),
+            TableCell(es_score, "pct2", align="center"),
+            TableCell(env_f, "pct2", align="center"),
+        ])
+
+    return TablePage(
+        credit_union=cu,
+        title="Environmental Factor for PLL",
+        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        sections=[
+            TableSection(title="Economic Stress Index Calculation",
+                         columns=state_cols, rows=state_rows),
+            TableSection(columns=county_cols, rows=county_rows),
+            TableSection(columns=pool_cols, rows=pool_rows),
+        ])
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -774,6 +858,10 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                            df=df, grades=grades)
         if acl is not None:
             pages.append(("acl_env.html", {"page": acl, "charts": []}, True))
+        env = build_env_factor(client_name, snapshot_date, config, hist,
+                               df=df, grades=grades)
+        if env is not None:
+            pages.append(("table_page.html", {"page": env}, True))
         acl_sum = build_acl_summary(client_name, snapshot_date, config, hist,
                                     df=df, grades=grades)
         if acl_sum is not None:
