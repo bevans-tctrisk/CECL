@@ -141,3 +141,63 @@ def render_report_pdf(report_path: str | Path, cu: str, snap: str,
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()
+
+
+# ── From-data assembly (no workbook) ─────────────────────────────────
+
+def build_pages_from_data(client_name: str, snapshot_date: str, config: dict,
+                          grades=None, hist: dict | None = None, df=None,
+                          *, supplemental: bool = False) -> list[dict]:
+    """Render every modelled page from report DATA (not a workbook).
+
+    Uses :func:`cecl_report_web.from_data.build_report_model`, so the PDF is
+    built without the ``.xlsx`` being generated or read.
+    """
+    from . import from_data as FD
+    model = FD.build_report_model(
+        client_name, snapshot_date, config, grades=grades, hist=hist, df=df,
+        supplemental=supplemental)
+    pages: list[dict] = []
+    for template, ctx, landscape in model["pages"]:
+        pages.append({"full": R.render_html(template, **ctx),
+                      "landscape": landscape})
+    return pages
+
+
+def render_report_html_from_data(client_name: str, snapshot_date: str,
+                                 config: dict, grades=None,
+                                 hist: dict | None = None, df=None,
+                                 *, supplemental: bool = False) -> str:
+    """One self-contained HTML doc with every modelled page (browser preview)."""
+    pages = build_pages_from_data(
+        client_name, snapshot_date, config, grades, hist, df,
+        supplemental=supplemental)
+    css = R.load_css()
+    body = "\n".join(_fragment(p["full"]) for p in pages)
+    cu = (config or {}).get("credit_union") or client_name
+    return (
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        f"<title>{cu} \u2014 CECL Report {snapshot_date}</title>"
+        f"<style>{css}</style></head><body>{body}</body></html>"
+    )
+
+
+def render_report_pdf_from_data(client_name: str, snapshot_date: str,
+                                config: dict, grades=None,
+                                hist: dict | None = None, df=None,
+                                *, supplemental: bool = False) -> bytes:
+    """Full multi-page PDF built from data, each page in its own orientation."""
+    from pypdf import PdfWriter, PdfReader
+
+    pages = build_pages_from_data(
+        client_name, snapshot_date, config, grades, hist, df,
+        supplemental=supplemental)
+    writer = PdfWriter()
+    for p in pages:
+        reader = PdfReader(io.BytesIO(
+            R.render_pdf(p["full"], landscape=p["landscape"])))
+        for pg in reader.pages:
+            writer.add_page(pg)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
