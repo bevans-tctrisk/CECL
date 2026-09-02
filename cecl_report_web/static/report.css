@@ -201,6 +201,7 @@ tfoot { display: table-footer-group; }
   border-collapse: collapse;
   margin: 0.05in auto 0.06in auto;
   table-layout: fixed;
+  width: 100%;
 }
 .rc-matrix th, .rc-matrix td {
   border: 0.5px solid #ffffff;
@@ -213,6 +214,7 @@ tfoot { display: table-footer-group; }
   color: #ffffff;
   font-weight: 700;
   text-align: center;
+  white-space: normal;
 }
 .rc-matrix .hd.rowlabel { text-align: left; }
 .rc-matrix .num {
