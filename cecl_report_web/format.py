@@ -96,7 +96,7 @@ def tcell(cell) -> str:
         return ""
     return {
         "currency": acct0, "currency2": acct2,
-        "pct": pct0, "pct1": pct1, "pct2": pct2,
+        "pct": pct0, "pct1": pct1, "pct2": pct2, "pct4": pct4,
     }.get(fmt, lambda x: str(x))(v)
 
 

@@ -613,6 +613,73 @@ def build_acl_summary(client_name: str, snapshot_date: str, config: dict,
         sections=sections)
 
 
+def build_mgmt_adj_summary(client_name: str, snapshot_date: str, config: dict,
+                           hist: dict | None = None, df: Any = None,
+                           grades: Any = None) -> TablePage | None:
+    """Mgmt Adj Summary: per-pool the grades that carry a management adjustment
+    plus the pool's environmental factor -- from the ACL Env data."""
+    import report_vizo as _rv
+
+    acl_pools, acl_summary, _ = _acl_data(config, snapshot_date, hist, df, grades)
+    if not acl_pools:
+        return None
+    cu = (config or {}).get("credit_union") or client_name
+    heading = [f"For Quarter Ending {_rv._snap_display(snapshot_date)}"]
+    title = "Management & Environmental Adjustments"
+
+    def blank() -> TableCell:
+        return TableCell(None)
+
+    cols = ["Portfolio Segment", "Grade", "Balance", "ACL Base Loss Rate",
+            "Mgmt Adj", "Allowance Factor", "Allowance before Env Factor",
+            "Env Factor", "Env Factor Allowance"]
+    rows: list[list[TableCell]] = []
+    any_adj = False
+    for pool, pdata in acl_pools.items():
+        grades_d = pdata.get("grades") or {}
+        total = pdata.get("total") or {}
+        adj_grades = [(g, gv) for g, gv in grades_d.items()
+                      if (gv.get("mgmt_adj") or 0)]
+        env_factor = total.get("env_factor") or 0
+        if not adj_grades and not env_factor:
+            continue
+        any_adj = True
+        rows.append([TableCell(pool, "text", bold=True, align="left")]
+                    + [blank() for _ in range(8)])
+        for g, gv in adj_grades:
+            rows.append([
+                blank(), TableCell(g, "text", align="left"),
+                TableCell(gv.get("balance"), "currency"),
+                TableCell(gv.get("base_rate"), "pct4"),
+                TableCell(gv.get("mgmt_adj"), "pct4"),
+                TableCell(gv.get("factor"), "pct4"),
+                TableCell(gv.get("allow_before"), "currency"), blank(), blank()])
+        rows.append([
+            blank(), TableCell("Total", "text", bold=True, align="left"),
+            TableCell(total.get("balance"), "currency", bold=True),
+            blank(), blank(), blank(),
+            TableCell(total.get("allow_before"), "currency", bold=True),
+            TableCell(total.get("env_factor"), "pct", bold=True),
+            TableCell(total.get("env_allow"), "currency", bold=True)])
+
+    if not any_adj:
+        return TablePage(
+            credit_union=cu, title=title, heading_lines=heading,
+            sections=[TableSection(rows=[[TableCell(
+                "No management or environmental adjustments were applied "
+                "this period.", "text", align="left")]])])
+
+    rows.append([
+        TableCell("Pooled Totals", "text", bold=True, align="left"), blank(),
+        TableCell(acl_summary.get("pooled_balance"), "currency", bold=True),
+        blank(), blank(), blank(),
+        TableCell(acl_summary.get("pooled_allow_before"), "currency", bold=True),
+        blank(),
+        TableCell(acl_summary.get("pooled_env_allow"), "currency", bold=True)])
+    return TablePage(credit_union=cu, title=title, heading_lines=heading,
+                     sections=[TableSection(columns=cols, rows=rows)])
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -646,4 +713,8 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                     df=df, grades=grades)
         if acl_sum is not None:
             pages.append(("table_page.html", {"page": acl_sum}, True))
+        mgmt = build_mgmt_adj_summary(client_name, snapshot_date, config, hist,
+                                      df=df, grades=grades)
+        if mgmt is not None:
+            pages.append(("table_page.html", {"page": mgmt}, True))
     return {"cover": cover, "pages": pages}
