@@ -32,6 +32,8 @@ from .model import (
     NarrativeSection,
     RiskChangeMatrix,
     RiskChangePage,
+    SummaryVarianceBlock,
+    SummaryVariancePage,
     TableCell,
     TablePage,
     TableSection,
@@ -1303,9 +1305,11 @@ _NO_PRIOR_NOTE = ("No prior report is available for comparison - this is the "
 
 def build_summary_variance(client_name: str, snapshot_date: str, config: dict,
                            hist: dict | None = None, df: Any = None,
-                           grades: Any = None) -> TablePage | None:
-    """Summary Variance: Current / Prior / Change over four ACL measures."""
-    import report_vizo as _rv
+                           grades: Any = None) -> SummaryVariancePage | None:
+    """Summary Variance -- the SCALE 'Executive Summary-Vizo' banded card:
+    a centred 3-line title over Current / Prior / Change blocks of the four
+    ACL measures."""
+    from . import format as _fmt
 
     if df is None:
         return None
@@ -1317,41 +1321,50 @@ def build_summary_variance(client_name: str, snapshot_date: str, config: dict,
     cur = _acl_current_shape(acl_pools, acl_summary, acl_impaired)
     prior, prior_snap = _load_prior_acl(cu, snapshot_date, config)
 
+    def _md(snap):
+        s = str(snap)[:10]
+        try:
+            y, m, d = s.split("-")
+            return f"{int(m)}/{int(d)}/{int(y)}"
+        except Exception:  # noqa: BLE001
+            return s
+
     def _ratio(t):
         pb = t.get("pooled_balance") or 0
         return (t.get("total_allow_needed", 0) / pb) if pb else None
 
     labels = ["Total Expected Losses on Loans", "Current ACL Balance",
               "Adjustment", "ACL/Total Loans"]
-    fmts = ["currency2", "currency2", "currency2", "pct2"]
+
+    def _measures(vals):
+        out = []
+        for i, v in enumerate(vals):
+            if v is None:
+                out.append("")
+            else:
+                out.append(_fmt.pct2(v) if i == 3 else _fmt.acct2(v))
+        return list(zip(labels, out))
+
     ct = cur["totals"]
     cur_vals = [ct["total_allow_needed"], ct["acl_balance"], ct["adjustment"],
                 _ratio(ct)]
-
-    def _section(title, vals):
-        rows = [[TableCell(lbl, "text", align="left"), TableCell(v, f)]
-                for lbl, v, f in zip(labels, vals, fmts)]
-        return TableSection(title=title, columns=["Measure", "Value"], rows=rows)
-
-    sections = [_section(f"Current ACL - {_rv._snap_display(snapshot_date)}",
-                         cur_vals)]
-    notes: list[str] = []
+    blocks = [SummaryVarianceBlock("Current ACL", _md(snapshot_date),
+                                   _measures(cur_vals))]
+    note = ""
     if prior:
         pt = prior["totals"]
         prior_vals = [pt.get("total_allow_needed", 0), pt.get("acl_balance", 0),
                       pt.get("adjustment", 0), _ratio(pt)]
         change_vals = [(c - p) if (c is not None and p is not None) else None
                        for c, p in zip(cur_vals, prior_vals)]
-        sections.append(_section(f"Prior ACL - {_rv._snap_display(prior_snap)}",
-                                 prior_vals))
-        sections.append(_section("Change", change_vals))
+        blocks.append(SummaryVarianceBlock("Prior ACL", _md(prior_snap),
+                                           _measures(prior_vals)))
+        blocks.append(SummaryVarianceBlock("Change", "", _measures(change_vals)))
     else:
-        notes.append(_NO_PRIOR_NOTE)
+        note = _NO_PRIOR_NOTE
 
-    return TablePage(
-        credit_union=cu, title="Summary Variance",
-        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
-        sections=sections, notes=notes)
+    return SummaryVariancePage(credit_union=cu, quarter_ended=_md(snapshot_date),
+                               blocks=blocks, note=note)
 
 
 def build_change_analysis(client_name: str, snapshot_date: str, config: dict,
@@ -1488,6 +1501,11 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
     if not supplemental:
         pages.append(("narrative.html",
                       {"page": build_report_index(client_name, config)}, False))
+        if df is not None:
+            var = build_summary_variance(client_name, snapshot_date, config, hist,
+                                         df=df, grades=grades)
+            if var is not None:
+                pages.append(("summary_variance.html", {"page": var}, False))
     if df is not None and not supplemental:
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
         rc_charts = render_chart_specs(
@@ -1527,10 +1545,6 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                         df=df, grades=grades)
         if impaired is not None:
             pages.append(("table_page.html", {"page": impaired}, False))
-        var = build_summary_variance(client_name, snapshot_date, config, hist,
-                                     df=df, grades=grades)
-        if var is not None:
-            pages.append(("table_page.html", {"page": var}, False))
         chg = build_change_analysis(client_name, snapshot_date, config, hist,
                                     df=df, grades=grades)
         if chg is not None:

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Summary Variance — {{ page.credit_union }}{% endblock %}
+{% block body %}
+<section class="page summary-variance-page">
+
+  <div class="sv-title">CECL Allowances for Credit Losses (ACL) Calculation</div>
+  <div class="sv-title">Prepared For {{ page.credit_union }}</div>
+  <div class="sv-title sv-title-sub">Quarter Ended {{ page.quarter_ended }}</div>
+
+  <div class="sv-band sv-band-section"><span>Executive Summary</span></div>
+
+  {% for block in page.blocks %}
+  <div class="sv-band">
+    <span class="sv-band-label">{{ block.label }}</span>
+    {% if block.period %}<span class="sv-band-period">{{ block.period }}</span>{% endif %}
+  </div>
+  <table class="sv-measures">
+    {% for lbl, val in block.measures %}
+    <tr><td class="sv-m-label">{{ lbl }}</td><td class="sv-m-value">{{ val }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endfor %}
+
+  {% if page.note %}<p class="sv-note">{{ page.note }}</p>{% endif %}
+
+</section>
+{% endblock %}

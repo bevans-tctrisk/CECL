@@ -291,3 +291,23 @@ class NarrativePage:
     sections: list[NarrativeSection] = field(default_factory=list)
 
 
+@dataclass
+class SummaryVarianceBlock:
+    """One Current / Prior / Change block on the Summary Variance card."""
+
+    label: str
+    period: str
+    measures: list = field(default_factory=list)  # [(label, formatted value)]
+
+
+@dataclass
+class SummaryVariancePage:
+    """SCALE 'Executive Summary-Vizo' banded card: a centred 3-line title over
+    Current / Prior / Change blocks of the four ACL measures."""
+
+    credit_union: str
+    quarter_ended: str
+    blocks: list = field(default_factory=list)  # [SummaryVarianceBlock]
+    note: str = ""
+
+

@@ -53,6 +53,31 @@ tfoot { display: table-footer-group; }
   margin: 2pt 0 8pt; padding-left: 16pt; font-size: 10.5pt; line-height: 1.45;
 }
 .table-page .tbl-notes li { margin: 0 0 3pt; }
+
+/* ---- Summary Variance (SCALE 'Executive Summary-Vizo' banded card) ---- */
+.summary-variance-page { text-align: center; }
+.summary-variance-page .sv-title {
+  font-size: 16pt; font-weight: 700; margin: 3pt 0; color: #000;
+}
+.summary-variance-page .sv-title-sub { margin-bottom: 4pt; }
+.summary-variance-page .sv-band {
+  display: flex; justify-content: space-between; align-items: center;
+  width: 5.6in; margin: 12pt auto 0; padding: 5pt 12pt;
+  background: #0D4D5E; color: #fff; font-weight: 700; font-size: 13pt;
+}
+.summary-variance-page .sv-band-section { justify-content: center; margin-top: 22pt; }
+.summary-variance-page .sv-measures {
+  width: 5.6in; margin: 0 auto; border-collapse: collapse; font-size: 13pt;
+}
+.summary-variance-page .sv-measures td { padding: 4pt 12pt; }
+.summary-variance-page .sv-m-label { text-align: left; }
+.summary-variance-page .sv-m-value {
+  text-align: right; font-variant-numeric: tabular-nums;
+}
+.summary-variance-page .sv-note {
+  width: 5.6in; margin: 16pt auto 0; font-size: 10pt; font-style: italic;
+  color: #555; text-align: left;
+}
 .data-table {
   width: 100%; border-collapse: collapse; margin-bottom: 8pt;
   font-size: 10.5pt;
