@@ -48,6 +48,7 @@
         </label>
       </div>
       <div>
+        {% if state.model != 'scale' %}
         <label>Report period (YYYY-MM)
           <input type="month" name="report_period"
                  value="{{ state.report_period }}"
@@ -59,6 +60,7 @@
             balance-sheet when running March). Leave blank to always
             use the latest available data.</span>
         </label>
+        {% endif %}
       </div>
       <div>
         <label>State
@@ -84,6 +86,15 @@
       </div>
     </div>
 
+    {% if state.model == 'scale' %}
+    <p class="muted" style="margin-top:14px; padding:12px; border:1px dashed #888; border-radius:6px;">
+      <strong>SCALE setup:</strong> report data comes from the NCUA&nbsp;5300
+      (Solr) filings &mdash; no raw-data folder scan is needed here. Enter the
+      CU identity above and click <strong>Next</strong> to pick the Solr
+      source and reporting period. You'll upload the Impaired&nbsp;Loans file
+      on a later step; Management Adjustments have their own step too.
+    </p>
+    {% else %}
     {# Auto-configure: add one or more raw-data folders, click Scan, and the
        wizard classifies every file across all of them, decides whether a
        WARM workbook is available, and auto-derives column mappings, pool
@@ -250,6 +261,7 @@
         </details>
       {% endif %}
     </div>
+    {% endif %}
     {% endif %}
 
     <div class="btn-row">

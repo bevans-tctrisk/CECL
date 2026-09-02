@@ -70,6 +70,18 @@
             the impact relative to the baseline.</div>
         </span>
       </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
+        <input type="checkbox" name="acl_funding"
+               {% if state.reports.get('acl_funding', True) %}checked{% endif %}>
+        <span>
+          <strong>ACL Funding Worksheet</strong>
+          <div class="help">Standalone workbook that helps the credit union
+            fund the Allowance between quarterly reports. Lists the report
+            month plus the next two months with the Total Allowance Needed,
+            current ACL balance, adjustment, and adjusted balance.</div>
+        </span>
+      </label>
     </fieldset>
 
     <div class="btn-row">

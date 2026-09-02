@@ -118,6 +118,12 @@ def _state() -> dict[str, Any]:
     if STATE_KEY not in session:
         session[STATE_KEY] = _default_state()
     _strip_legacy_pool_map_stubs(session[STATE_KEY])
+    # Self-heal: sessions/drafts saved before economic_data existed (or
+    # adopted from a raw YAML config) can lack this key, which breaks the
+    # Step 1 / Step 7 templates that read state.economic_data.*.
+    ed = session[STATE_KEY].setdefault("economic_data", {})
+    for _k, _v in _default_state()["economic_data"].items():
+        ed.setdefault(_k, _v)
     return session[STATE_KEY]
 
 
@@ -352,6 +358,7 @@ def _default_state() -> dict[str, Any]:
             "vizo_supp": False,
             "impdet": False,
             "mgmt_adj_napkin": True,
+            "acl_funding": True,
         },
         # sample file analysis (populated by sample step)
         "sample": None,  # type: dict | None
@@ -728,7 +735,13 @@ def _wizard_ctx(active: str) -> dict[str, Any]:
                 flash(f"Recovered from adopted config: {_m}", "success")
     except Exception:  # noqa: BLE001
         pass
-    if st.get("_auto_scan_completed") or (st.get("autoderive") or {}).get("ok"):
+    # SCALE drafts have their own short, self-contained step flow and do
+    # not use the Migration auto-scan / human-in-the-loop gate system, so
+    # the badge/remaining-items computation (which is all Migration-model
+    # checks) is skipped entirely for them.
+    if (st.get("model") != "scale"
+            and (st.get("_auto_scan_completed")
+                 or (st.get("autoderive") or {}).get("ok"))):
         try:
             from cecl_ui.services import auto_setup
             # Proactive self-heal: stale drafts saved before the
@@ -1036,6 +1049,10 @@ def start_warm_choice():
     comparison. This endpoint is kept so existing links resolve; it simply
     forwards to the Identity step.
     """
+    # Start a brand-new Migration setup from a clean slate so a prior CU's
+    # data can't bleed into this one.
+    session.pop(STATE_KEY, None)
+    session.modified = True
     return redirect(url_for("setup.step1_identity"))
 
 
@@ -1134,6 +1151,12 @@ def step1_identity():
             # fields are persisted before the scan runs.
             action = (request.form.get("action") or "").strip().lower()
             if action == "scan_folder":
+                # SCALE draws its data from the NCUA 5300 (Solr), not a
+                # raw-data folder scan, so skip the Migration auto-scan
+                # entirely and go straight to the SCALE Solr step.
+                if state.get("model") == "scale":
+                    _save_state(state)
+                    return redirect(url_for("scale_setup.step_solr"))
                 folders = state.get("raw_data_folders") or []
                 if not folders:
                     flash(
@@ -4406,7 +4429,7 @@ def _read_co_recov_column_form(kind: str) -> dict[str, Any]:
     suffix_len = max(0, min(9, suffix_len))
     delim = _val("member_account_delimiter") or "-"
 
-    return {
+    result: dict[str, Any] = {
         "loan_code":     _val("loan_code_col"),
         "amount":        _val("amount_col"),
         "date":          _val("date_col"),
@@ -4418,6 +4441,14 @@ def _read_co_recov_column_form(kind: str) -> dict[str, Any]:
             "delimiter": delim,
         },
     }
+    # Worksheet/tab override for single-workbook CO+Recov files (both on
+    # separate tabs of one workbook). Only include the key when the form
+    # actually carried the field so a mapping form that omits it (e.g. the
+    # monthly-files card) doesn't wipe a previously-chosen tab.
+    _sheet_raw = request.form.get(f"{prefix}_sheet")
+    if _sheet_raw is not None:
+        result["sheet"] = _sheet_raw.strip()
+    return result
 
 
 def _refresh_co_recov_inspect(
@@ -4451,7 +4482,10 @@ def _refresh_co_recov_inspect(
         state.pop(inspect_key, None)
         _save_state(state)
         return
-    res = monthly_co_recov_aggregator.inspect_file(Path(path_str))
+    saved_sheet = (state.get(columns_key) or {}).get("sheet") or None
+    res = monthly_co_recov_aggregator.inspect_file(
+        Path(path_str), sheet=saved_sheet
+    )
     state[inspect_key] = res
 
     # Seed mapping on first upload (or force) using the suggested headers.
@@ -4475,6 +4509,8 @@ def _refresh_co_recov_inspect(
             "loan_suffix":   (existing.get("loan_suffix")
                               or suggested.get("account") or ""),
             "member_account": ma,
+            # Preserve the user's tab choice across a re-seed.
+            "sheet":         existing.get("sheet", ""),
         }
     else:
         # Backfill any individual fields that are still blank from the
@@ -8017,6 +8053,8 @@ def step3_historical():
 
         elif action == "save_co_columns":
             cols = _read_co_recov_column_form("co")
+            if "sheet" not in cols and (state.get("co_columns") or {}).get("sheet"):
+                cols["sheet"] = state["co_columns"]["sheet"]
             state["co_columns"] = cols
             sig = (state.get("co_active_signature") or "").strip()
             if sig:
@@ -8032,6 +8070,8 @@ def step3_historical():
 
         elif action == "save_recov_columns":
             cols = _read_co_recov_column_form("recov")
+            if "sheet" not in cols and (state.get("recov_columns") or {}).get("sheet"):
+                cols["sheet"] = state["recov_columns"]["sheet"]
             state["recov_columns"] = cols
             sig = (state.get("recov_active_signature") or "").strip()
             if sig:
@@ -8234,6 +8274,30 @@ def step3_historical():
         elif action == "reinspect_recov_monthly":
             _refresh_co_recov_inspect(state, "recov", force=True)
             flash("Re-inspected the first recoveries file.", "success")
+
+        elif action in ("set_co_sheet", "set_recov_sheet"):
+            _kind = "co" if action == "set_co_sheet" else "recov"
+            _cols_key = "co_columns" if _kind == "co" else "recov_columns"
+            chosen = (request.form.get(f"{_kind}_sheet") or "").strip()
+            cols = dict(state.get(_cols_key) or {})
+            cols["sheet"] = chosen
+            state[_cols_key] = cols
+            # Re-inspect against the chosen tab so the header pickers and
+            # suggestions reflect that tab (force re-seeds the columns since
+            # a different tab usually has a different layout).
+            _refresh_co_recov_inspect(state, _kind, force=True)
+            label = "charge-off" if _kind == "co" else "recoveries"
+            if chosen:
+                flash(
+                    f"Reading the {label} workbook from the "
+                    f"\u201c{chosen}\u201d tab.",
+                    "success",
+                )
+            else:
+                flash(
+                    f"Auto-detecting the {label} tab (densest sheet).",
+                    "success",
+                )
 
         elif action == "scan_co_monthly_folder":
             folder_str = (request.form.get("co_monthly_folder") or "").strip()
@@ -8687,9 +8751,10 @@ def step3_historical():
             code_header = (
                 (state.get(cols_key) or {}).get("loan_code") or ""
             ).strip() or None
+            saved_sheet = (state.get(cols_key) or {}).get("sheet") or None
             try:
                 return monthly_co_recov_aggregator.extract_distinct_loan_codes(
-                    p, code_header
+                    p, code_header, sheet=saved_sheet
                 )
             except Exception:  # noqa: BLE001
                 return []
@@ -8792,6 +8857,21 @@ def step3_historical():
         recov_history_view, pool_map_for_agg
     )
 
+    # Worksheet/tab names for the single-workbook CO & Recov uploads, so the
+    # column-mapping card can offer a tab picker when charge-offs and
+    # recoveries live on separate tabs of one workbook.
+    def _sheet_names_for(list_key: str) -> list[str]:
+        files = (state.get("hist_scan") or {}).get(list_key) or []
+        if not files:
+            return []
+        p = Path((files[0].get("path") or "").strip())
+        if not p.exists():
+            return []
+        return monthly_co_recov_aggregator.list_sheet_names(p)
+
+    co_sheet_names = _sheet_names_for("co_files")
+    recov_sheet_names = _sheet_names_for("recov_files")
+
     return render_template(
         "setup/step3_historical.html",
         pool_suggestions=_DEFAULT_POOL_SUGGESTIONS,
@@ -8800,6 +8880,8 @@ def step3_historical():
         co_history_view=co_history_view_pool or co_history_view,
         recov_history_view=recov_history_view_pool or recov_history_view,
         matrix_view=view_mode,
+        co_sheet_names=co_sheet_names,
+        recov_sheet_names=recov_sheet_names,
         solr_canonical_map=solr_5300_backfill.load_canonical_map(),
         co_canonical_map=solr_5300_co_backfill.load_canonical_map(),
         recov_canonical_map=solr_5300_recov_backfill.load_canonical_map(),
@@ -9299,6 +9381,44 @@ def step_co_recov():
                 _save_state(state)
             return redirect(url_for("setup.step_co_recov"))
 
+        elif action in ("set_sample_co_sheet", "set_sample_recov_sheet"):
+            kind = "co" if action == "set_sample_co_sheet" else "recov"
+            cfg_key = "co_columns" if kind == "co" else "recov_columns"
+            list_key = "co_files" if kind == "co" else "recov_files"
+            chosen = (request.form.get(f"{kind}_sheet") or "").strip()
+            cfg = dict(state.get(cfg_key) or {})
+            cfg["sheet"] = chosen
+            # A different tab usually has a different column layout, so drop
+            # the old index picks and re-seed suggestions from the new tab.
+            for _k in ("member_col", "account_col", "code_col",
+                       "amount_col", "date_col", "orig_score_col",
+                       "curr_score_col"):
+                cfg.pop(_k, None)
+            files = (state.get("sample_uploads") or {}).get(list_key) or []
+            if files:
+                try:
+                    sug = co_recov_parser._suggest_columns(
+                        files[-1]["path"], sheet=(chosen or None)
+                    )
+                    for _k, _v in sug.items():
+                        cfg[_k] = _v
+                except Exception:  # noqa: BLE001
+                    pass
+            state[cfg_key] = cfg
+            _save_state(state)
+            label = "charge-off" if kind == "co" else "recoveries"
+            if chosen:
+                flash(
+                    f"Reading the {label} file from the \u201c{chosen}\u201d tab.",
+                    "success",
+                )
+            else:
+                flash(
+                    f"Reading the {label} file from all tabs (auto).",
+                    "success",
+                )
+            return redirect(url_for("setup.step_co_recov"))
+
         elif action in ("save_co_columns", "save_recov_columns"):
             kind = "co" if action == "save_co_columns" else "recov"
             cfg_key = "co_columns" if kind == "co" else "recov_columns"
@@ -9568,9 +9688,25 @@ def step_co_recov():
     co_files = su.get("co_files") or []
     recov_files = su.get("recov_files") or []
 
-    co_preview = (co_recov_parser.inspect_file(co_files[-1]["path"])
+    # Worksheet/tab names of the loaded workbook(s) so the file section can
+    # offer a tab picker (e.g. reuse the charge-off workbook for recoveries
+    # and point this side at its “Recoveries” tab).
+    co_sheet_names = (
+        monthly_co_recov_aggregator.list_sheet_names(Path(co_files[-1]["path"]))
+        if co_files else []
+    )
+    recov_sheet_names = (
+        monthly_co_recov_aggregator.list_sheet_names(
+            Path(recov_files[-1]["path"]))
+        if recov_files else []
+    )
+
+    co_preview = (co_recov_parser.inspect_file(
+                      co_files[-1]["path"], sheet=(co_cfg.get("sheet") or None))
                   if co_files else None)
-    recov_preview = (co_recov_parser.inspect_file(recov_files[-1]["path"])
+    recov_preview = (co_recov_parser.inspect_file(
+                        recov_files[-1]["path"],
+                        sheet=(recov_cfg.get("sheet") or None))
                      if recov_files else None)
 
     co_validation = (co_recov_parser.validate_codes(state, "co")
@@ -9588,6 +9724,8 @@ def step_co_recov():
         co_preview=co_preview, recov_preview=recov_preview,
         co_validation=co_validation, recov_validation=recov_validation,
         pool_choices=pool_choices,
+        co_sheet_names=co_sheet_names,
+        recov_sheet_names=recov_sheet_names,
         files_used=_co_recov_files_used(state),
         **_wizard_ctx("co_recov"),
     )
@@ -13780,6 +13918,7 @@ def step9_reports():
             "vizo_supp": request.form.get("vizo_supp") == "on",
             "impdet":    request.form.get("impdet") == "on",
             "mgmt_adj_napkin": request.form.get("mgmt_adj_napkin") == "on",
+            "acl_funding": request.form.get("acl_funding") == "on",
         }
         if not any(sel.values()):
             flash(
@@ -13843,6 +13982,7 @@ def _build_review_summary(state: dict[str, Any]) -> dict[str, Any]:
         ("Vizo Supplemental", reports.get("vizo_supp")),
         ("Improved/Deteriorated", reports.get("impdet")),
         ("Management Adj Worksheet", reports.get("mgmt_adj_napkin")),
+        ("ACL Funding Worksheet", reports.get("acl_funding")),
     ) if on]
 
     return {

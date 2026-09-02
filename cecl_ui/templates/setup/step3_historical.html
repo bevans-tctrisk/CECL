@@ -2616,6 +2616,28 @@
             {{ co_ins_sw.error }}
           </div>
         {% endif %}
+        {% if co_sheet_names and co_sheet_names|length > 1 %}
+          <form method="post" style="margin-top:8px;">
+            <label style="display:block; max-width:420px;">
+              Worksheet / tab to read
+              <span class="muted">(this workbook has multiple tabs)</span>
+              <select name="co_sheet" onchange="this.form.submit()">
+                <option value="">Auto-detect (densest tab)</option>
+                {% for sn in co_sheet_names %}
+                  <option value="{{ sn }}"
+                    {% if co_cols_sw.get('sheet') == sn %}selected{% endif %}>
+                    {{ sn }}
+                  </option>
+                {% endfor %}
+              </select>
+            </label>
+            <input type="hidden" name="action" value="set_co_sheet">
+            <p class="muted" style="font-size:12px; margin:4px 0 0 0;">
+              Pick the tab that holds charge-offs when charge-offs and
+              recoveries are on separate tabs of the same workbook.
+            </p>
+          </form>
+        {% endif %}
         <form method="post" style="margin-top:8px;">
           <div style="display:grid;
                       grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
@@ -3684,6 +3706,28 @@
             <div class="flash error" style="margin-top:6px;">
               {{ recov_ins_sw.error }}
             </div>
+          {% endif %}
+          {% if recov_sheet_names and recov_sheet_names|length > 1 %}
+            <form method="post" style="margin-top:8px;">
+              <label style="display:block; max-width:420px;">
+                Worksheet / tab to read
+                <span class="muted">(this workbook has multiple tabs)</span>
+                <select name="recov_sheet" onchange="this.form.submit()">
+                  <option value="">Auto-detect (densest tab)</option>
+                  {% for sn in recov_sheet_names %}
+                    <option value="{{ sn }}"
+                      {% if recov_cols_sw.get('sheet') == sn %}selected{% endif %}>
+                      {{ sn }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
+              <input type="hidden" name="action" value="set_recov_sheet">
+              <p class="muted" style="font-size:12px; margin:4px 0 0 0;">
+                Pick the tab that holds recoveries when charge-offs and
+                recoveries are on separate tabs of the same workbook.
+              </p>
+            </form>
           {% endif %}
           <form method="post" style="margin-top:8px;">
             <div style="display:grid;

@@ -575,6 +575,32 @@
     </button>
   </form>
 
+  {% if co_sheet_names and co_sheet_names|length > 1 %}
+    <form method="post" style="margin-top:12px; padding:10px 12px;
+          border:1px solid #cfe5cf; border-radius:6px; background:#f4faf4;">
+      <label style="display:block; max-width:440px;">
+        <strong>Worksheet / tab to read</strong>
+        <span class="muted">(this workbook has multiple tabs)</span>
+        <select name="co_sheet" onchange="this.form.submit()"
+                style="width:100%; margin-top:4px;">
+          <option value="">Auto-detect (densest tab)</option>
+          {% for sn in co_sheet_names %}
+            <option value="{{ sn }}"
+              {% if co_cfg.get('sheet') == sn %}selected{% endif %}>{{ sn }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <input type="hidden" name="action" value="set_sample_co_sheet">
+      <p class="muted" style="font-size:12px; margin:6px 0 0 0;">
+        Pick the tab that holds charge-offs when charge-offs and recoveries
+        share one workbook. The preview &amp; column mapping below refresh to
+        that tab.
+      </p>
+      <noscript><button class="btn btn-secondary" type="submit"
+                style="margin-top:6px;">Apply</button></noscript>
+    </form>
+  {% endif %}
+
   {{ co_recov_scan_results(state.get('co_scan_data_sample'),
                             'charge-off',
                             'clear_sample_co_scan',
@@ -677,6 +703,31 @@
         Scan Folder for Recoveries Files
       </button>
     </form>
+
+    {% if recov_sheet_names and recov_sheet_names|length > 1 %}
+      <form method="post" style="margin-top:12px; padding:10px 12px;
+            border:1px solid #cfe5cf; border-radius:6px; background:#f4faf4;">
+        <label style="display:block; max-width:440px;">
+          <strong>Worksheet / tab to read</strong>
+          <span class="muted">(this workbook has multiple tabs)</span>
+          <select name="recov_sheet" onchange="this.form.submit()"
+                  style="width:100%; margin-top:4px;">
+            <option value="">Auto-detect (densest tab)</option>
+            {% for sn in recov_sheet_names %}
+              <option value="{{ sn }}"
+                {% if recov_cfg.get('sheet') == sn %}selected{% endif %}>{{ sn }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <input type="hidden" name="action" value="set_sample_recov_sheet">
+        <p class="muted" style="font-size:12px; margin:6px 0 0 0;">
+          Reusing the charge-off workbook? Pick its <strong>Recoveries</strong>
+          tab here — the preview &amp; column mapping below refresh to that tab.
+        </p>
+        <noscript><button class="btn btn-secondary" type="submit"
+                  style="margin-top:6px;">Apply</button></noscript>
+      </form>
+    {% endif %}
 
     {{ co_recov_scan_results(state.get('recov_scan_data_sample'),
                               'recoveries',
