@@ -229,14 +229,16 @@ tfoot { display: table-footer-group; }
 
 .rc-summary {
   border-collapse: collapse;
-  margin: 0.03in auto 0.06in auto;
+  margin: 0.03in 0 0.06in 0;
+  width: 100%;
 }
 .rc-summary .hd {
   background: #0D4D5E; color: #fff; font-weight: 700;
   text-align: left; padding: 2pt 8pt;
+  width: 1%; white-space: nowrap;   /* title hugs its text, not a column */
 }
 .rc-summary .num {
-  text-align: right; font-variant-numeric: tabular-nums; padding: 2pt 8pt;
+  text-align: right; font-variant-numeric: tabular-nums; padding: 2pt 5pt;
 }
 
 /* Three charts in a row beneath the matrices, sized to finish the page. */
