@@ -30,6 +30,9 @@ from .model import (
     MatrixRow,
     RiskChangeMatrix,
     RiskChangePage,
+    TableCell,
+    TablePage,
+    TableSection,
 )
 
 
@@ -210,6 +213,24 @@ _ACL_ADJ_KEYS = [
 ]
 
 
+def _acl_data(config: dict, snapshot_date: str, hist: dict | None,
+              df: Any, grades: Any) -> tuple[dict, dict, dict]:
+    """(acl_pools, acl_summary, acl_impaired): the values report_vizo publishes,
+    then the WARM-parsed dicts, then a standalone compute when df/grades exist."""
+    import report_vizo as _rv
+
+    _imp = (hist or {}).get("impaired", {}) or {}
+    acl_pools = _imp.get("_acl_pools_computed") or _imp.get("acl_pools") or {}
+    acl_summary = _imp.get("_acl_summary_computed") or _imp.get("acl_summary") or {}
+    acl_impaired = _imp.get("_acl_impaired_computed") or _imp.get("acl_impaired") or {}
+    if not acl_pools and df is not None:
+        computed = _rv.compute_acl_environmental(df, grades, config, hist, snapshot_date)
+        acl_pools = computed.get("acl_pools") or {}
+        acl_summary = computed.get("acl_summary") or acl_summary
+        acl_impaired = computed.get("acl_impaired") or acl_impaired
+    return acl_pools, acl_summary, acl_impaired
+
+
 def build_acl_env(client_name: str, snapshot_date: str, config: dict,
                   hist: dict | None = None, df: Any = None,
                   grades: Any = None) -> AclEnvPage | None:
@@ -223,18 +244,8 @@ def build_acl_env(client_name: str, snapshot_date: str, config: dict,
     """
     import report_vizo as _rv
 
-    _imp = (hist or {}).get("impaired", {}) or {}
-    # Prefer the values report_vizo._sheet_acl_reserve computes and publishes
-    # (isolated underscore keys) -- available for every CU, wizard-onboarded
-    # included -- over the WARM-parsed dicts (present only for WARM CUs).
-    acl_pools = _imp.get("_acl_pools_computed") or _imp.get("acl_pools") or {}
-    acl_summary = _imp.get("_acl_summary_computed") or _imp.get("acl_summary") or {}
-    acl_impaired = _imp.get("_acl_impaired_computed") or _imp.get("acl_impaired") or {}
-    if not acl_pools and df is not None:
-        computed = _rv.compute_acl_environmental(df, grades, config, hist, snapshot_date)
-        acl_pools = computed.get("acl_pools") or {}
-        acl_summary = computed.get("acl_summary") or acl_summary
-        acl_impaired = computed.get("acl_impaired") or acl_impaired
+    acl_pools, acl_summary, acl_impaired = _acl_data(
+        config, snapshot_date, hist, df, grades)
     if not acl_pools:
         return None
     pool_order = list(acl_pools.keys())
@@ -542,6 +553,66 @@ def impr_deter_charts(df: Any, grades: Any, config: dict,
     return specs
 
 
+def build_acl_summary(client_name: str, snapshot_date: str, config: dict,
+                      hist: dict | None = None, df: Any = None,
+                      grades: Any = None) -> TablePage | None:
+    """ACL Summary: one line per pool (the pool Total rows), pooled totals, and
+    the impaired/adjustment lines -- a view of the ACL Env data."""
+    import report_vizo as _rv
+
+    acl_pools, acl_summary, acl_impaired = _acl_data(
+        config, snapshot_date, hist, df, grades)
+    if not acl_pools:
+        return None
+    cu = (config or {}).get("credit_union") or client_name
+
+    cols = ["Portfolio Segment", "Balance", "Specific Identification",
+            "Loan Loss Calc Balance", "Allowance before Env Factor",
+            "Env Factor", "Env Factor Allowance", "Total Allowance"]
+    rows: list[list[TableCell]] = []
+    for pool, pdata in acl_pools.items():
+        t = pdata.get("total") or {}
+        bal, spec = t.get("balance"), t.get("spec_id")
+        calc = t.get("calc_bal")
+        if calc is None and bal is not None:
+            calc = (bal or 0) - (spec or 0)
+        rows.append([
+            TableCell(pool, "text", align="left"),
+            TableCell(bal, "currency"), TableCell(spec, "currency2"),
+            TableCell(calc, "currency"), TableCell(t.get("allow_before"), "currency"),
+            TableCell(t.get("env_factor"), "pct"),
+            TableCell(t.get("env_allow"), "currency"),
+            TableCell(t.get("total_allow"), "currency"),
+        ])
+    pb, ps = acl_summary.get("pooled_balance"), acl_summary.get("pooled_spec_id")
+    rows.append([
+        TableCell("Pooled Totals", "text", bold=True, align="left"),
+        TableCell(pb, "currency", bold=True), TableCell(ps, "currency2", bold=True),
+        TableCell(((pb or 0) - (ps or 0)) if pb is not None else None, "currency", bold=True),
+        TableCell(acl_summary.get("pooled_allow_before"), "currency", bold=True),
+        TableCell(None), TableCell(acl_summary.get("pooled_env_allow"), "currency", bold=True),
+        TableCell(acl_summary.get("pooled_total_allow"), "currency", bold=True),
+    ])
+    sections = [TableSection(columns=cols, rows=rows)]
+
+    adj_rows: list[list[TableCell]] = []
+    for k, v in (acl_impaired or {}).items():
+        adj_rows.append([TableCell(k, "text", align="left"), TableCell(v, "currency")])
+    for lbl, key in _ACL_ADJ_KEYS:
+        if key in acl_summary:
+            adj_rows.append([TableCell(lbl, "text", bold=True, align="left"),
+                             TableCell(acl_summary.get(key), "currency", bold=True)])
+    if adj_rows:
+        sections.append(TableSection(
+            title="Impaired Loans & Adjustment", rows=adj_rows))
+
+    return TablePage(
+        credit_union=cu,
+        title="Allowance for Credit Loss - Summary by Pool",
+        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        sections=sections)
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -571,4 +642,8 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                            df=df, grades=grades)
         if acl is not None:
             pages.append(("acl_env.html", {"page": acl, "charts": []}, True))
+        acl_sum = build_acl_summary(client_name, snapshot_date, config, hist,
+                                    df=df, grades=grades)
+        if acl_sum is not None:
+            pages.append(("table_page.html", {"page": acl_sum}, True))
     return {"cover": cover, "pages": pages}

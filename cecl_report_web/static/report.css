@@ -42,6 +42,28 @@ tr { break-inside: avoid; }
 thead { display: table-header-group; }
 tfoot { display: table-footer-group; }
 
+/* ---- Generic table page (ACL Summary, Mgmt Adj, Impaired, ...) ---- */
+.table-page .tbl-section-title {
+  font-size: 12pt; font-weight: 700; color: #0D4D5E;
+  margin: 12pt 0 3pt;
+}
+.data-table {
+  width: 100%; border-collapse: collapse; margin-bottom: 8pt;
+  font-size: 10.5pt;
+}
+.data-table th {
+  background: #0D4D5E; color: #fff; font-weight: 700;
+  padding: 4pt 6pt; text-align: center; vertical-align: middle;
+  border: 0.5pt solid #0D4D5E;
+}
+.data-table td {
+  padding: 2.5pt 6pt; border: 0.5pt solid #cfd8dc;
+}
+.data-table td.left { text-align: left; }
+.data-table td.right { text-align: right; }
+.data-table td.center { text-align: center; }
+.data-table td.b { font-weight: 700; }
+
 /* ---- Cover page (mirrors sheet_cover_vizo: centered, 2 logos) ---- */
 .cover-page {
   text-align: center;

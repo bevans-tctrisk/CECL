@@ -47,6 +47,7 @@ def _env() -> Environment:
     env.filters["pct2"] = _fmt.pct2
     env.filters["pct4"] = _fmt.pct4
     env.filters["mcell"] = _fmt.mcell
+    env.filters["tcell"] = _fmt.tcell
     return env
 
 

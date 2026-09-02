@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} — {{ page.credit_union }}{% endblock %}
+{% block body %}
+<section class="page table-page">
+
+  <header class="rpt-header">
+    <div class="rpt-cu">{{ page.credit_union }}</div>
+    <div class="rpt-subhead">{{ page.title }}</div>
+    {% for line in page.heading_lines %}
+    <div class="rpt-subhead">{{ line }}</div>
+    {% endfor %}
+  </header>
+
+  {% for sec in page.sections %}
+  {% if sec.title %}<h3 class="tbl-section-title">{{ sec.title }}</h3>{% endif %}
+  <table class="data-table">
+    {% if sec.columns %}
+    <thead>
+      <tr>{% for col in sec.columns %}<th>{{ col }}</th>{% endfor %}</tr>
+    </thead>
+    {% endif %}
+    <tbody>
+      {% for row in sec.rows %}
+      <tr>
+        {% for cell in row %}
+        <td class="{{ cell.align }}{% if cell.bold %} b{% endif %}">{{ cell | tcell }}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endfor %}
+
+</section>
+{% endblock %}

@@ -237,3 +237,37 @@ class ReportModel:
     # generic bag so we can add pages without churning this class while
     # the schema stabilizes.
     pages: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TableCell:
+    """One cell of a generic table page. ``fmt`` drives display formatting."""
+
+    value: Any = None
+    fmt: str = "text"  # text | currency | currency2 | pct | pct1 | pct2
+    bold: bool = False
+    align: str = "right"  # left | right | center
+
+
+@dataclass
+class TableSection:
+    """A titled block of a TablePage: optional column headers + data rows."""
+
+    columns: list[str] = field(default_factory=list)  # "" = blank header cell
+    rows: list[list[TableCell]] = field(default_factory=list)
+    title: str | None = None
+
+
+@dataclass
+class TablePage:
+    """A generic titled, sectioned table page.
+
+    Backs the workbook's table-only tabs (ACL Summary, Mgmt Adj Summary,
+    Impaired Loans, ...) with real data instead of the cell-copying grid.
+    """
+
+    credit_union: str
+    title: str
+    heading_lines: list[str] = field(default_factory=list)
+    sections: list[TableSection] = field(default_factory=list)
+

@@ -86,6 +86,21 @@ def mcell(cell) -> str:
     return pct2(cell.value) if getattr(cell, "is_pct", False) else acct0(cell.value)
 
 
+def tcell(cell) -> str:
+    """Render a TableCell (generic TablePage) using its ``fmt`` field."""
+    if cell is None:
+        return ""
+    v = getattr(cell, "value", None)
+    fmt = getattr(cell, "fmt", "text")
+    if v is None or v == "":
+        return ""
+    return {
+        "currency": acct0, "currency2": acct2,
+        "pct": pct0, "pct1": pct1, "pct2": pct2,
+    }.get(fmt, lambda x: str(x))(v)
+
+
+
 import re as _re
 from datetime import date as _date, datetime as _datetime
 
