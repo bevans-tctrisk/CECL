@@ -112,3 +112,15 @@ Thumbs.db
 # ---- Build / dist ----
 build/
 dist/
+
+# ---- Recovery / investigation scaffolding (local only, not versioned) ----
+/_RECOVERY_*
+/_recovered_functions.py
+/_derive_disasm.txt
+/_utah_bsmap.json
+/_utah_probe.py
+/_verify_recovery.py
+/generate_report.RECOVER.pyc.bak
+
+# ---- Report / template backups (local only) ----
+*.bak.*
