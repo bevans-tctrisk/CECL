@@ -188,8 +188,8 @@ tfoot { display: table-footer-group; }
   border: 0.5px solid #d9d9d9;
 }
 /* Migration states read straight from the workbook fills. */
-.rc-matrix .improved     { background: #829901; color: #ffffff; }
-.rc-matrix .deteriorated { background: #873A3A; color: #ffffff; }
+.rc-matrix .improved     { background: #6E8A00; color: #ffffff; }
+.rc-matrix .deteriorated { background: #B4453F; color: #ffffff; }
 .rc-matrix .total.b { font-weight: 700; }
 
 .rc-summary {

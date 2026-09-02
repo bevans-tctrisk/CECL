@@ -108,13 +108,12 @@ PALETTE = [
     "#6E8A00",  # 4 olive   (brand 829901)
 ]
 
-#: Semantic assignment for the migration-direction charts. NOTE: the Excel
-#: originals fill the series *named* "Improved" with MAROON and
-#: "Deteriorated" with TEAL ("per Brian's edit"). That is inverted against
-#: every reading convention -- cool/positive for the good outcome, warm for
-#: the bad one -- so the port uses the semantic mapping and flags the change.
+#: Semantic assignment for the migration-direction charts. "Improved" is the
+#: brand olive (829901 -> re-stepped PALETTE[3]) and "Deteriorated" the brand
+#: maroon, matching the risk-change matrix, the DQ/CO pies and the Net Credit
+#: Change doughnut so one hue means one thing across every page.
 SEMANTIC = {
-    "improved": PALETTE[0],
+    "improved": PALETTE[3],
     "deteriorated": PALETTE[1],
     "unchanged": "#9A9A93",
 }

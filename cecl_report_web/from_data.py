@@ -358,9 +358,17 @@ def build_impr_deter(client_name: str, snapshot_date: str, config: dict,
 # ── Charts (rendered from data via cecl_report_web.charts) ───────────
 # Migration-status slice colours, matching report_vizo's DQ pie / CO bar /
 # Net-Credit-Change doughnut (olive / maroon / teal / gold).
+# Single semantic migration palette, shared by every chart AND the matrix/table
+# CSS (.rc-matrix .improved/.deteriorated) so "Improved" is olive everywhere,
+# "Deteriorated" maroon, "Unchanged"/"Net" neutral teal, "Not Reported" gold.
+_C_IMPROVED = "829901"
+_C_DETERIORATED = "873A3A"
+_C_UNCHANGED = "0D4D5E"
+_C_NOT_REPORTED = "FFC000"
+_C_NET = "0D4D5E"
 _MIG_LABELS = ("Improved", "Deteriorated", "Unchanged", "Not Reported")
-_MIG_COLORS = ("829901", "873A3A", "0D4D5E", "FFC000")
-_NCC_COLORS = ("829901", "873A3A", "0D4D5E")
+_MIG_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED, _C_NOT_REPORTED)
+_NCC_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED)
 
 
 def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
@@ -535,22 +543,22 @@ def impr_deter_charts(df: Any, grades: Any, config: dict,
     if chart_grades:
         specs.append(ChartSpec(
             kind="column", title="Improved Loans", categories=chart_grades,
-            series=[{"name": "Improved", "values": imp_pct_g, "colors": ["0D4D5E"]}],
+            series=[{"name": "Improved", "values": imp_pct_g, "colors": [_C_IMPROVED]}],
             value_format="pct"))
         specs.append(ChartSpec(
             kind="column", title="Deteriorated Loans", categories=chart_grades,
-            series=[{"name": "Deteriorated", "values": det_pct_g, "colors": ["873A3A"]}],
+            series=[{"name": "Deteriorated", "values": det_pct_g, "colors": [_C_DETERIORATED]}],
             value_format="pct"))
     if names:
         specs.append(ChartSpec(
             kind="diverging_bar", title="Improved / Deteriorated Loans",
             categories=names,
-            series=[{"name": "Improved", "values": p_imp, "colors": ["0D4D5E"]},
-                    {"name": "Deteriorated", "values": p_det, "colors": ["873A3A"]}],
+            series=[{"name": "Improved", "values": p_imp, "colors": [_C_IMPROVED]},
+                    {"name": "Deteriorated", "values": p_det, "colors": [_C_DETERIORATED]}],
             value_format="pct"))
         specs.append(ChartSpec(
             kind="bar_h", title="Net Change", categories=names,
-            series=[{"name": "Net", "values": p_net, "colors": ["829901"]}],
+            series=[{"name": "Net", "values": p_net, "colors": [_C_NET]}],
             value_format="pct"))
     return specs
 
