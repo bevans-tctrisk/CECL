@@ -13056,6 +13056,10 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         reports = [k for k, v in rpt_cfg.items() if v]
     if not reports:
         reports = ['tct']  # default fallback
+    # The Vizo PDF is a rendering of the Vizo workbook -- requesting it implies
+    # the Vizo report, so selecting it alone still produces output.
+    if 'vizo_pdf' in reports and 'vizo' not in reports:
+        reports = list(reports) + ['vizo']
 
     os.makedirs(RPT_DIR, exist_ok=True)
     saved = []
