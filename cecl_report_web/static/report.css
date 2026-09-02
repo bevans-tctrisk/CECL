@@ -204,7 +204,7 @@ tfoot { display: table-footer-group; }
   width: 100%;
 }
 .rc-matrix th, .rc-matrix td {
-  border: 0.5px solid #d9d9d9;
+  border: none;
   padding: 1pt 5pt;
   white-space: nowrap;
 }
@@ -220,7 +220,6 @@ tfoot { display: table-footer-group; }
 .rc-matrix .num {
   text-align: right;
   font-variant-numeric: tabular-nums;
-  border: 0.5px solid #d9d9d9;
 }
 /* Migration states read straight from the workbook fills. */
 .rc-matrix .improved     { background: #6E8A00; color: #ffffff; }

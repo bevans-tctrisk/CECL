@@ -13170,6 +13170,12 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             except Exception as e:  # noqa: BLE001
                 print(f"  Warning: integrity check could not run: {e}")
 
+        except PermissionError as e:
+            # Almost always the workbook is open in Excel, locking the file.
+            print(f"  ERROR generating {rpt_type}: the report file is open "
+                  f"(likely in Excel) and could not be saved -- close it and "
+                  f"run again. [{e}]")
+            log_report_generation(client_name, cu, snapshot_date, rpt_type, None, success=False)
         except Exception as e:
             print(f"  ERROR generating {rpt_type}: {e}")
             log_report_generation(client_name, cu, snapshot_date, rpt_type, None, success=False)
