@@ -181,35 +181,60 @@ def reimport_period(client_short_name: str, period: str) -> dict[str, Any]:
         pats += import_data._compile_file_patterns(
             (e or {}).get("file_pattern"), label=(e or {}).get("label", "?"))
 
-    # Find files under the source whose snapshot resolves to the target AND
-    # match a loan pattern.
-    matches: list[str] = []
-    seen_names: set[str] = set()
-    for root, _dirs, files in os.walk(source):
-        for fn in files:
-            if fn.startswith("~$"):
-                continue
-            full = os.path.join(root, fn)
-            rel = os.path.relpath(full, source)
-            if pats and not import_data._patterns_match_any(pats, fn, rel):
-                continue
-            # Honor date_source='path': some cores deliver a loan file whose
-            # name carries no date (e.g. Symitar 'AIRESLOANS.xlsx') but the
-            # dated folder does. Resolve the snapshot from the relative path
-            # in that case, mirroring import_data.import_from_folder.
-            date_src = rel if str(config.get("date_source", "filename")).lower() == "path" else fn
-            try:
-                snap = import_data.extract_snapshot_date(date_src, config)
-            except Exception:  # noqa: BLE001
-                snap = None
-            if snap == target:
-                if fn in seen_names:
-                    continue  # avoid basename collisions when staging
-                seen_names.add(fn)
-                matches.append(full)
+    # Find files whose snapshot resolves to the target AND match a loan
+    # pattern. Search the primary source folder first; if it yields nothing
+    # fall back to the CU's Archive and Raw_Uploads folders. This matters
+    # because ``process_client`` moves each imported file into
+    # ``Archive/<short>/`` after a successful import, so the current
+    # quarter's loan file is no longer under ``loan_source_folder`` when an
+    # on-demand re-import runs (e.g. after a Balance Adjustment pool remap).
+    search_dirs: list[str] = []
+    for d in (
+        source,
+        os.path.join(import_data.ARCHIVE_FOLDER, client_short_name),
+        os.path.join(import_data.UPLOAD_FOLDER, client_short_name),
+        import_data.UPLOAD_FOLDER,
+    ):
+        if d and os.path.isdir(d) and d not in search_dirs:
+            search_dirs.append(d)
+
+    matches: list[tuple[str, str]] = []  # (full_path, base_dir it was found under)
+    used_source = source
+    for base in search_dirs:
+        found: list[tuple[str, str]] = []
+        seen_names: set[str] = set()
+        for root, _dirs, files in os.walk(base):
+            for fn in files:
+                if fn.startswith("~$"):
+                    continue
+                full = os.path.join(root, fn)
+                rel = os.path.relpath(full, base)
+                if pats and not import_data._patterns_match_any(pats, fn, rel):
+                    continue
+                # Honor date_source='path': some cores deliver a loan file
+                # whose name carries no date (e.g. Symitar 'AIRESLOANS.xlsx')
+                # but the dated folder does. Resolve the snapshot from the
+                # relative path in that case.
+                date_src = rel if str(config.get("date_source", "filename")).lower() == "path" else fn
+                try:
+                    snap = import_data.extract_snapshot_date(date_src, config)
+                except Exception:  # noqa: BLE001
+                    snap = None
+                if snap == target:
+                    if fn in seen_names:
+                        continue  # avoid basename collisions when staging
+                    seen_names.add(fn)
+                    found.append((full, base))
+        # First folder that yields matches wins — keeps a single-source
+        # semantics and avoids importing the same period from two places.
+        if found:
+            matches = found
+            used_source = base
+            break
     if not matches:
         return {"ok": False, "period": target, "source_folder": source,
-                "error": f"No loan files for {target} found under {source}."}
+                "error": (f"No loan files for {target} found under {source} "
+                          "(or the CU's Archive / Raw_Uploads folders).")}
 
     tmp = tempfile.mkdtemp(prefix=f"cecl_reimport_{client_short_name}_")
     try:
@@ -217,9 +242,9 @@ def reimport_period(client_short_name: str, period: str) -> dict[str, Any]:
         # preserve the dated subfolder so the import step can resolve the date
         # too; otherwise stage flat (filename carries the date).
         stage_by_path = str(config.get("date_source", "filename")).lower() == "path"
-        for src in matches:
+        for src, base in matches:
             if stage_by_path:
-                dst = os.path.join(tmp, os.path.relpath(src, source))
+                dst = os.path.join(tmp, os.path.relpath(src, base))
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
             else:
                 dst = os.path.join(tmp, os.path.basename(src))
@@ -245,8 +270,8 @@ def reimport_period(client_short_name: str, period: str) -> dict[str, Any]:
         row_count = 0
 
     return {"ok": True, "period": target, "cu": cu_name,
-            "source_folder": source,
-            "files": [os.path.basename(m) for m in matches],
+            "source_folder": used_source,
+            "files": [os.path.basename(m) for m, _base in matches],
             "files_processed": int(files_processed or 0),
             "rows": row_count}
 

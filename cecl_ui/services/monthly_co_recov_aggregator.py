@@ -91,11 +91,12 @@ def file_layout_signature(path: Path) -> str:
 
 def _resolve_overrides_for_file(
     state: dict[str, Any], kind: str, path: Path
-) -> tuple[str | None, str | None, str | None, dict[str, str]]:
-    """Return ``(code_header, amount_header, date_header, code_map)`` for
-    one file, preferring the per-layout mapping (keyed by the file's
+) -> tuple[str | None, str | None, str | None, dict[str, str], str | None]:
+    """Return ``(code_header, amount_header, date_header, code_map, sheet)``
+    for one file, preferring the per-layout mapping (keyed by the file's
     header signature) over the shared default.  ``code_map`` translates
     raw loan codes into pool names; empty when the user hasn't set one.
+    ``sheet`` is the worksheet/tab the user chose (None = auto-detect).
     """
     cols_key = "co_columns" if kind == "co" else "recov_columns"
     layout_cols_key = (
@@ -111,6 +112,13 @@ def _resolve_overrides_for_file(
     code_header = (overrides.get("loan_code") or "").strip() or None
     amount_header = (overrides.get("amount") or "").strip() or None
     date_header = (overrides.get("date") or "").strip() or None
+    # A per-layout mapping can pin its own tab; fall back to the shared
+    # ``{kind}_columns`` sheet so single-workbook uploads still route.
+    sheet = (
+        (overrides.get("sheet") or "").strip()
+        or (shared.get("sheet") or "").strip()
+        or None
+    )
     # The Loan Code Mapping step (wizard step 3) writes a single
     # ``state["pool_map"]`` dict shared by every consumer
     # (generate_report, step4_pools, etc.). Per-layout
@@ -131,7 +139,7 @@ def _resolve_overrides_for_file(
         vs = str(v).strip()
         if ks and vs:
             code_map[ks] = vs
-    return code_header, amount_header, date_header, code_map
+    return code_header, amount_header, date_header, code_map, sheet
 
 
 def parse_loan_code_map_file(path: Path) -> dict[str, Any]:
@@ -216,15 +224,17 @@ def parse_loan_code_map_file(path: Path) -> dict[str, Any]:
 
 
 def extract_distinct_loan_codes(
-    path: Path, code_header: str | None, *, limit: int = 200
+    path: Path, code_header: str | None, *, limit: int = 200,
+    sheet: str | None = None,
 ) -> list[str]:
     """Return up to ``limit`` distinct loan codes found in ``path`` for the
     Loan Code column ``code_header`` (header-name match, case- and
     whitespace-insensitive).  Falls back to the auto-detected code column
-    when ``code_header`` is empty.  Empty list on parse failure.
+    when ``code_header`` is empty.  ``sheet`` pins which tab to read.
+    Empty list on parse failure.
     """
     try:
-        raw = _read_rows(path)
+        raw = _read_rows(path, sheet=sheet)
     except Exception:  # noqa: BLE001
         return []
     if not raw:
@@ -253,12 +263,40 @@ def extract_distinct_loan_codes(
     return sorted(seen.keys())
 
 
-def _read_rows(path: Path) -> list[list[Any]]:
+def list_sheet_names(path: Path) -> list[str]:
+    """Return the worksheet/tab names of an Excel workbook.
+
+    Empty list for CSV files or when the workbook can't be opened. Used by
+    the wizard's CO/Recovery step to let the user pick which tab to read
+    when a single workbook holds charge-offs and recoveries on separate
+    tabs (auto-detection reads only the densest tab).
+    """
+    ext = path.suffix.lower()
+    if ext == ".csv":
+        return []
+    try:
+        if ext == ".xls":
+            import xlrd  # type: ignore
+
+            wb = xlrd.open_workbook(str(path), on_demand=True)
+            return [str(n) for n in wb.sheet_names()]
+        from openpyxl import load_workbook
+
+        wb = load_workbook(path, read_only=True, data_only=True)
+        return [str(n) for n in wb.sheetnames]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _read_rows(path: Path, sheet: str | None = None) -> list[list[Any]]:
     """Return all sheet rows as a list of lists. CSV or XLSX/XLSM/XLS.
 
-    For multi-sheet workbooks, picks the worksheet with the most
-    non-blank cells — prevents an empty leading sheet from masking
-    the real data tab.
+    When ``sheet`` names a worksheet in the workbook (case-insensitive), only
+    that tab is read — this is how a CU whose charge-offs and recoveries live
+    on separate tabs of one workbook tells us which tab feeds each side.
+    When ``sheet`` is empty or not found, falls back to picking the worksheet
+    with the most non-blank cells (prevents an empty leading sheet from
+    masking the real data tab).
     """
     ext = path.suffix.lower()
     if ext == ".csv":
@@ -270,11 +308,20 @@ def _read_rows(path: Path) -> list[list[Any]]:
                 out.append(list(row))
         return out
 
+    want = (sheet or "").strip().lower()
+
     if ext == ".xls":
         # Legacy BIFF format — openpyxl can't read these. Use xlrd.
         import xlrd  # type: ignore
 
         wb_xls = xlrd.open_workbook(str(path))
+        if want:
+            for sh in wb_xls.sheets():
+                if str(sh.name).strip().lower() == want:
+                    return [
+                        list(sh.row_values(r)) if sh.row_values(r) else []
+                        for r in range(sh.nrows)
+                    ]
         best_rows_xls: list[list[Any]] = []
         best_score_xls = -1
         for sh in wb_xls.sheets():
@@ -294,6 +341,13 @@ def _read_rows(path: Path) -> list[list[Any]]:
     from openpyxl import load_workbook
 
     wb = load_workbook(path, read_only=True, data_only=True)
+    if want:
+        for ws in wb.worksheets:
+            if str(ws.title).strip().lower() == want:
+                return [
+                    list(r) if r else []
+                    for r in ws.iter_rows(values_only=True)
+                ]
     best_rows: list[list[Any]] = []
     best_score = -1
     for ws in wb.worksheets:
@@ -405,9 +459,10 @@ def _pick_column_by_name(headers: list[str], name: str) -> int | None:
     return None
 
 
-def inspect_file(path: Path) -> dict[str, Any]:
+def inspect_file(path: Path, sheet: str | None = None) -> dict[str, Any]:
     """Peek at a CO/Recov file and return its header row + suggested column
-    matches for the column-mapping UI.
+    matches for the column-mapping UI.  ``sheet`` pins which tab to read
+    (None = densest tab).
 
     Returns::
 
@@ -426,7 +481,7 @@ def inspect_file(path: Path) -> dict[str, Any]:
         "headers": [], "suggested": {}, "preview_rows": [],
     }
     try:
-        raw = _read_rows(path)
+        raw = _read_rows(path, sheet=sheet)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"Could not read file: {exc}"
         return out
@@ -513,12 +568,14 @@ def parse_file(
     code_header: str | None = None,
     amount_header: str | None = None,
     date_header: str | None = None,
+    sheet: str | None = None,
 ) -> dict[str, Any]:
     """Parse one monthly CO/Recov file.
 
     ``kind`` is ``"co"`` or ``"recov"``.  Optional ``code_header`` /
     ``amount_header`` force a specific header-name match (case/whitespace
     insensitive); when not supplied we fall back to keyword auto-detection.
+    ``sheet`` pins which worksheet/tab to read (None = densest tab).
 
     Returns::
 
@@ -543,7 +600,7 @@ def parse_file(
         "empty_ok": False,
     }
     try:
-        raw = _read_rows(path)
+        raw = _read_rows(path, sheet=sheet)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"Could not read file: {exc}"
         return out
@@ -738,13 +795,13 @@ def aggregate_all(state: dict[str, Any], kind: str) -> dict[str, Any]:
             item["error"] = "Saved file is missing on disk."
             out["files"].append(item)
             continue
-        code_header, amount_header, date_header, code_map = (
+        code_header, amount_header, date_header, code_map, sheet = (
             _resolve_overrides_for_file(state, kind, Path(path_str))
         )
         res = parse_file(
             Path(path_str), kind,
             code_header=code_header, amount_header=amount_header,
-            date_header=date_header,
+            date_header=date_header, sheet=sheet,
         )
         item["as_of_date"] = res.get("as_of_date") or ""
         if not res.get("ok"):
@@ -926,11 +983,11 @@ def aggregate_workbook(state: dict[str, Any], kind: str) -> dict[str, Any]:
             item["error"] = "Saved file is missing on disk."
             out["files"].append(item)
             continue
-        code_header, amount_header, date_header, code_map = (
+        code_header, amount_header, date_header, code_map, sheet = (
             _resolve_overrides_for_file(state, kind, Path(path_str))
         )
         try:
-            raw = _read_rows(Path(path_str))
+            raw = _read_rows(Path(path_str), sheet=sheet)
         except Exception as exc:  # noqa: BLE001
             item["error"] = f"Could not read file: {exc}"
             out["files"].append(item)

@@ -42,11 +42,14 @@ def _col_letter(idx: int) -> str:
     return out
 
 
-def _read_concat(filepath: str | Path):
+def _read_concat(filepath: str | Path, sheet: str | None = None):
     """Mirror ``generate_report._read_data_file``: read as DataFrame w/o header.
 
     For Excel files with multiple sheets concatenates all sheets that share
-    the maximum column count.
+    the maximum column count.  When ``sheet`` names a worksheet in the
+    workbook (case-insensitive), only that tab is read instead — this lets a
+    CU whose charge-offs and recoveries sit on separate tabs of one workbook
+    pick which tab feeds each side.
     """
     import pandas as pd  # deferred — pandas import is slow on network drives
 
@@ -55,6 +58,15 @@ def _read_concat(filepath: str | Path):
         return pd.read_csv(filepath, header=None, dtype=object,
                            keep_default_na=False)
     xl = pd.ExcelFile(filepath)
+    want = (sheet or "").strip().lower()
+    if want:
+        match = next(
+            (s for s in xl.sheet_names if str(s).strip().lower() == want),
+            None,
+        )
+        if match is not None:
+            return pd.read_excel(xl, sheet_name=match, header=None,
+                                 dtype=object)
     parts = []
     for s in xl.sheet_names:
         d = pd.read_excel(xl, sheet_name=s, header=None, dtype=object)
@@ -85,8 +97,11 @@ def _looks_like_loan_code(val: Any) -> bool:
 # Public
 # ---------------------------------------------------------------------------
 
-def inspect_file(filepath: str | Path, max_rows: int = 12) -> dict[str, Any]:
+def inspect_file(filepath: str | Path, max_rows: int = 12,
+                 sheet: str | None = None) -> dict[str, Any]:
     """Read the file and return a small preview for column-mapping UI.
+
+    ``sheet`` pins which worksheet/tab to read (None = concat all sheets).
 
     Returns::
         {
@@ -106,7 +121,7 @@ def inspect_file(filepath: str | Path, max_rows: int = 12) -> dict[str, Any]:
         out["error"] = f"File not found: {filepath}"
         return out
     try:
-        df = _read_concat(p)
+        df = _read_concat(p, sheet=sheet)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"Could not read file: {exc}"
         return out
@@ -148,7 +163,8 @@ def inspect_file(filepath: str | Path, max_rows: int = 12) -> dict[str, Any]:
     return out
 
 
-def _suggest_columns(filepath: str | Path) -> dict[str, Any]:
+def _suggest_columns(filepath: str | Path,
+                     sheet: str | None = None) -> dict[str, Any]:
     """Heuristic column-index suggestions for a CO/recov file.
 
     Used to seed the wizard mapping when the user first uploads a file.
@@ -159,7 +175,7 @@ def _suggest_columns(filepath: str | Path) -> dict[str, Any]:
 
     out: dict[str, Any] = {"has_header": False}
     try:
-        df = _read_concat(filepath)
+        df = _read_concat(filepath, sheet=sheet)
     except Exception:  # noqa: BLE001
         return out
     if df.empty:
@@ -218,7 +234,7 @@ def extract_codes(filepath: str | Path, parse_config: dict[str, Any]) -> dict[st
         out["error"] = f"File not found: {filepath}"
         return out
     try:
-        df = _read_concat(p)
+        df = _read_concat(p, sheet=(parse_config.get("sheet") or None))
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"Could not read file: {exc}"
         return out
