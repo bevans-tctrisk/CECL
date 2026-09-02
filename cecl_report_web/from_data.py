@@ -90,8 +90,13 @@ def build_cover(client_name: str, snapshot_date: str, config: dict,
     # way it does for the workbook; import lazily to avoid a heavy import at
     # module load.
     try:
+        import os as _os
         import report_vizo as _rv
-        top = _logo_data_uri(getattr(_rv, "LOGO_VIZO", ""))
+        _vizo = getattr(_rv, "LOGO_VIZO", "") or ""
+        # Prefer a shadow-free variant next to the source logo when present, so
+        # the PDF cover shows the Vizo mark without the baked-in drop shadow.
+        _noshadow = (_os.path.splitext(_vizo)[0] + "_noshadow.png") if _vizo else ""
+        top = _logo_data_uri(_noshadow if _os.path.exists(_noshadow) else _vizo)
         bottom = _logo_data_uri(getattr(_rv, "LOGO_TCT", ""))
     except Exception:  # noqa: BLE001 - logos are optional; cover still renders
         top = bottom = None
