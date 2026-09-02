@@ -354,7 +354,7 @@ def build_impr_deter(client_name: str, snapshot_date: str, config: dict,
         KeyValueRow(label=adj_label, value=adj),
     ]
     heading = [
-        "CECL Adjustment & Improved/Deteriorated",
+        "Improved & Deteriorated Loans",
         f"For Quarter Ending {_rv._snap_display(snapshot_date)}",
     ]
     return ImprDeterPage(
@@ -1506,17 +1506,17 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                          df=df, grades=grades)
             if var is not None:
                 pages.append(("summary_variance.html", {"page": var}, False))
+        impd = build_impr_deter(client_name, snapshot_date, config, hist,
+                                df=df, grades=grades)
+        impd_charts = (render_chart_specs(impr_deter_charts(df, grades, config, hist))
+                       if df is not None else [])
+        pages.append(("impr_deter.html", {"page": impd, "charts": impd_charts}, True))
     if df is not None and not supplemental:
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
         rc_charts = render_chart_specs(
             risk_change_ncc_chart(df, grades, config) + risk_change_charts(hist))
         pages.append(("risk_change.html", {"page": rc, "charts": rc_charts}, True))
     if not supplemental:
-        impd = build_impr_deter(client_name, snapshot_date, config, hist,
-                               df=df, grades=grades)
-        impd_charts = (render_chart_specs(impr_deter_charts(df, grades, config, hist))
-                       if df is not None else [])
-        pages.append(("impr_deter.html", {"page": impd, "charts": impd_charts}, False))
         acl = build_acl_env(client_name, snapshot_date, config, hist,
                            df=df, grades=grades)
         if acl is not None:

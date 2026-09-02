@@ -312,15 +312,24 @@ tfoot { display: table-footer-group; }
 .chart-cell { flex: 0 0 auto; }
 .chart-cell svg.chart { display: block; }
 
-/* Chart-centric pages (e.g. Impr Deter): 2x2 grid, charts fill the width. */
+/* Chart-centric pages (e.g. Impr Deter): 2x2 grid, charts fill the width.
+   The Impr Deter page is landscape -- fix the grid to the available height so
+   the four charts render large and stay on a single page. */
 .charts-grid.impr-charts {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.1in 0.2in;
+  grid-template-rows: 1fr 1fr;
+  gap: 0.15in 0.45in;
   margin-top: 0.15in;
+  height: 6.8in;
 }
-.impr-charts .chart-cell { width: 100%; }
-.impr-charts svg.chart { width: 100%; height: auto; }
+.impr-charts .chart-cell {
+  width: 100%; min-height: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.impr-charts svg.chart {
+  max-width: 100%; max-height: 100%; width: auto; height: auto;
+}
 
 
 

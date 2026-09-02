@@ -10,18 +10,6 @@
     {% endfor %}
   </header>
 
-  {% if page.cecl_adjustment %}
-  <table class="cecl-box">
-    <caption class="cecl-title">CECL Adjustment</caption>
-    {% for row in page.cecl_adjustment %}
-    <tr>
-      <td class="cecl-label">{{ row.label }}</td>
-      <td class="cecl-value">{{ row.value | acct0 }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-  {% endif %}
-
   {% if charts %}
   <div class="charts-grid impr-charts">
     {% for svg in charts %}<div class="chart-cell">{{ svg | safe }}</div>{% endfor %}
