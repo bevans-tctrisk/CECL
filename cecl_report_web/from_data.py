@@ -829,6 +829,146 @@ def build_env_factor(client_name: str, snapshot_date: str, config: dict,
         ])
 
 
+def build_co_recov_dq(client_name: str, snapshot_date: str, config: dict,
+                      hist: dict | None = None, df: Any = None,
+                      grades: Any = None) -> TablePage | None:
+    """Display CO-Recov-DQ: Charge-offs, Recoveries, Net Charge-offs and
+    Delinquency %, each by pool across the WARM look-back years -- computed
+    from ``hist`` (windowing logic ported from report_vizo._sheet_co_recov_dq).
+    """
+    import report_vizo as _rv
+
+    if df is None:
+        return None
+    cfg = config or {}
+    cu = cfg.get("credit_union") or client_name
+    pools = _rv._ordered_pools(df, hist)
+    if not pools:
+        return None
+    h = hist or {}
+    co_data = h.get("chargeoffs", {})
+    rc_data = h.get("recoveries", {})
+    dq_pct = h.get("dq_pct", {})
+    years = h.get("years", []) or list(range(2019, int(snapshot_date[:4]) + 1))
+    _imp = h.get("impaired", {}) or {}
+    acl_months_map = _imp.get("acl_months", {})
+    snap_year = int(snapshot_date[:4])
+    snap_month = int(snapshot_date[5:7])
+    if pools and years:
+        _max_lol = max(acl_months_map.get(p, 36) for p in pools)
+        _abs_first = (snap_year * 12 + snap_month) - _max_lol + 1
+        _cutoff = (_abs_first - 1) // 12
+        years = [y for y in years if y >= _cutoff]
+    year_strs = [str(y) for y in years]
+
+    warm_co = _imp.get("warm_co", {})
+    warm_rc = _imp.get("warm_rc", {})
+    use_warm = bool(warm_co)
+    warm_co_monthly = _imp.get("warm_co_monthly", {}) or h.get("co_monthly", {})
+    warm_rc_monthly = _imp.get("warm_rc_monthly", {}) or h.get("rc_monthly", {})
+    co_monthly = h.get("co_monthly", {})
+    rc_monthly = h.get("rc_monthly", {})
+
+    def _window_start(pool):
+        pool_acl = acl_months_map.get(pool, 36)
+        abs_first = (snap_year * 12 + snap_month) - pool_acl + 1
+        ey = (abs_first - 1) // 12
+        return ey, abs_first - ey * 12
+
+    def _windowed(monthly_data, yearly_data, pool, year, ey, em):
+        if year != ey:
+            return yearly_data.get(year, {}).get(pool, 0)
+        partial = 0
+        has_window = False
+        for m in range(em, 13):
+            v = monthly_data.get((year, m), {}).get(pool, 0)
+            if v:
+                has_window = True
+            partial += v
+        has_any = has_window or any(
+            monthly_data.get((year, m), {}).get(pool, 0) for m in range(1, em))
+        if has_any:
+            full_year = yearly_data.get(year, {}).get(pool, 0)
+            if full_year and partial and (full_year > 0) != (partial > 0):
+                partial = -partial
+            return partial
+        full = yearly_data.get(year, {}).get(pool, 0)
+        return full * (12 - em + 1) / 12 if full else 0
+
+    def _warm_months(pool):
+        return acl_months_map.get(pool, cfg.get("warm_months", {}).get(pool, 36))
+
+    def _year_labels():
+        labels = list(year_strs)
+        if labels:
+            labels[-1] = f"YTD {year_strs[-1]}"
+        return labels
+
+    def _flow_section(title, total_label, yearly, monthly, net=False):
+        cols = [title] + _year_labels() + [total_label, "WARM Months"]
+        rows: list[list[TableCell]] = []
+        for pool in pools:
+            ey, em = _window_start(pool)
+            cells = [TableCell(pool, "text", bold=True, align="left")]
+            total = 0
+            for y in years:
+                if y < ey:
+                    cells.append(TableCell(None))
+                    continue
+                if net:
+                    cv = _windowed(warm_co_monthly if use_warm else co_monthly,
+                                   warm_co if use_warm else co_data, pool, y, ey, em)
+                    rv = _windowed(warm_rc_monthly if use_warm else rc_monthly,
+                                   warm_rc if use_warm else rc_data, pool, y, ey, em)
+                    val = abs(cv) - abs(rv)
+                else:
+                    val = abs(_windowed(monthly, yearly, pool, y, ey, em) or 0)
+                cells.append(TableCell(val, "currency"))
+                total += val
+            cells.append(TableCell(total, "currency", bold=True))
+            cells.append(TableCell(_warm_months(pool), "text", align="center"))
+            rows.append(cells)
+        return TableSection(title=title, columns=cols, rows=rows)
+
+    sections = [
+        _flow_section("Charge offs", "ACL Charge offs",
+                      warm_co if use_warm else co_data,
+                      warm_co_monthly if use_warm else co_monthly),
+        _flow_section("Recoveries", "ACL Recoveries",
+                      warm_rc if use_warm else rc_data,
+                      warm_rc_monthly if use_warm else rc_monthly),
+        _flow_section("Net Charge offs", "Net Charge offs", None, None, net=True),
+    ]
+
+    warm_dq = _imp.get("warm_dq_pct", {})
+    use_dq = warm_dq if warm_dq else dq_pct
+    dq_cols = ["DQ %"] + _year_labels() + ["Average", "Variance"]
+    dq_rows: list[list[TableCell]] = []
+    for pool in pools:
+        ey = _window_start(pool)[0]
+        cells = [TableCell(pool, "text", bold=True, align="left")]
+        rates = []
+        for y in years:
+            if y < ey:
+                cells.append(TableCell(None))
+                continue
+            val = use_dq.get(y, {}).get(pool, 0)
+            cells.append(TableCell(val, "pct2"))
+            rates.append(val)
+        avg = sum(rates) / len(rates) if rates else 0
+        var = rates[-1] - avg if len(rates) > 1 else 0
+        cells.append(TableCell(avg, "pct2", bold=True))
+        cells.append(TableCell(var, "pct2", bold=True))
+        dq_rows.append(cells)
+    sections.append(TableSection(title="Delinquency", columns=dq_cols, rows=dq_rows))
+
+    return TablePage(
+        credit_union=cu,
+        title="Delinquency Calculation",
+        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        sections=sections)
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -862,6 +1002,10 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                df=df, grades=grades)
         if env is not None:
             pages.append(("table_page.html", {"page": env}, True))
+        codq = build_co_recov_dq(client_name, snapshot_date, config, hist,
+                                 df=df, grades=grades)
+        if codq is not None:
+            pages.append(("table_page.html", {"page": codq}, True))
         acl_sum = build_acl_summary(client_name, snapshot_date, config, hist,
                                     df=df, grades=grades)
         if acl_sum is not None:
