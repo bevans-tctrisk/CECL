@@ -36,6 +36,12 @@ html, body {
   break-after: auto;
 }
 
+/* ---- Print pagination: keep logical blocks intact, repeat headers ---- */
+.cecl-box, .rc-summary, .chart-cell, .cover-page { break-inside: avoid; }
+tr { break-inside: avoid; }
+thead { display: table-header-group; }
+tfoot { display: table-footer-group; }
+
 /* ---- Cover page (mirrors sheet_cover_vizo: centered, 2 logos) ---- */
 .cover-page {
   text-align: center;
