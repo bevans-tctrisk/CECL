@@ -13068,7 +13068,10 @@ def generate_report(client_name, snapshot_date=None, reports=None):
     _want_vizo_pdf = ('vizo' in reports
                       and (bool(config.get('reports', {}).get('vizo_pdf'))
                            or 'vizo_pdf' in reports))
-    if _want_vizo_pdf:
+    # The ACL sidecar is written on EVERY vizo run so future quarters can diff
+    # against it without opening this workbook.
+    _want_vizo_sidecar = 'vizo' in reports
+    if _want_vizo_pdf or _want_vizo_sidecar:
         import copy as _copy
         _pdf_config = _copy.deepcopy(config)
         _pdf_hist = _copy.deepcopy(hist)
@@ -13130,6 +13133,23 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                     saved.append(pdf_path)
                 except Exception as _pdf_exc:  # noqa: BLE001
                     print(f"  Warning: vizo PDF generation failed: {_pdf_exc}")
+
+            if rpt_type == 'vizo' and _want_vizo_sidecar:
+                try:
+                    from cecl_report_web import acl_store
+                    from cecl_report_web import from_data as _fd
+                    from report_vizo import compute_acl_environmental
+                    _env = compute_acl_environmental(
+                        df, grades, _pdf_config, _pdf_hist, snapshot_date)
+                    if _env.get('acl_pools'):
+                        _shape = _fd._acl_current_shape(
+                            _env['acl_pools'], _env['acl_summary'],
+                            _env['acl_impaired'])
+                        acl_store.write_acl_snapshot(
+                            RPT_DIR, cu, snapshot_date, _shape)
+                        print(f"  Wrote ACL sidecar for {snapshot_date}")
+                except Exception as _sc_exc:  # noqa: BLE001
+                    print(f"  ACL sidecar skipped: {_sc_exc}")
 
             # Integrity gate. On 2026-08-31 a namespace bug in
             # patch_impdet_charts produced workbooks Excel refused to open,

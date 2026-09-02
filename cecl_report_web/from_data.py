@@ -1255,16 +1255,28 @@ def _acl_current_shape(acl_pools: dict, acl_summary: dict, acl_impaired: dict) -
 
 
 def _load_prior_acl(cu: str, snapshot_date: str, config: dict):
-    """Locate + parse the prior quarter's ACL Env tab the same way the Change
-    Analysis workbook does. Returns (prior_dict | None, prior_snap | None)."""
+    """Locate + parse the prior quarter's ACL data. Prefers the JSON sidecar
+    (no .xlsx dependency); falls back to reading the prior workbook's ACL Env
+    tab for periods generated before sidecars existed. Returns
+    (prior_dict | None, prior_snap | None)."""
+    cfg = config or {}
+    rpt_dir = (cfg.get("report_dir") or cfg.get("output_dir")
+               or os.path.join(os.environ.get("CECL_WORKSPACE_ROOT")
+                               or os.getcwd(), "Reports"))
+    # 1) Prefer the sidecar.
+    try:
+        from . import acl_store
+        shape, prior_snap = acl_store.load_prior_snapshot(
+            rpt_dir, cu, snapshot_date)
+        if shape and shape.get("totals"):
+            return shape, prior_snap
+    except Exception as exc:  # noqa: BLE001
+        print(f"  prior ACL sidecar unavailable: {exc}")
+    # 2) Fall back to the prior workbook.
     try:
         import openpyxl
         from change_analysis import _find_prior_report, _parse_acl_sheet
         from report_vizo import ACL_SHEET
-        cfg = config or {}
-        rpt_dir = (cfg.get("report_dir") or cfg.get("output_dir")
-                   or os.path.join(os.environ.get("CECL_WORKSPACE_ROOT")
-                                   or os.getcwd(), "Reports"))
         safe_cu = cu.replace(" ", "_").replace("/", "-")
         path, prior_snap = _find_prior_report(rpt_dir, safe_cu, "Vizo_Model",
                                               snapshot_date)
