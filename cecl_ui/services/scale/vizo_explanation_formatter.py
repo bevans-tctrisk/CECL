@@ -18,7 +18,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 
-SHEET = "Explanation of ACL Calc-Vizo"
+SHEET = "Appendix 2-Vizo"
 TARGET_ROWS = (19, 23, 25)
 COLUMN = "A"
 

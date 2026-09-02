@@ -31,7 +31,7 @@ from . import (
     acl_history_db, env_factor_writer, excel_recalc, impaired_loader,
     lol_writer, mapping_loader, mgmt_adj_writer, qfactor_loader,
     runs_service, solr_fetcher, template_loader,
-    tct_change_analysis, vizo_explanation_formatter,
+    tct_change_analysis, vizo_explanation_formatter, vizo_layout,
 )
 
 
@@ -213,9 +213,15 @@ _TCT_ONLY_SHEETS = {
 }
 _VIZO_ONLY_SHEETS = {
     "Cover-Vizo", "Executive Summary-Vizo", "Scale Calculation-Vizo",
-    "Env Factor by Pool-Vizo", " Impaired Loans-Vizo", "Introduction-Vizo",
-    "Explanation of ACL Calc-Vizo", "Envir Factor Ranges-Vizo",
-    "New Report Calc-Vizo",
+    "Env Factor by Pool-Vizo", " Impaired Loans-Vizo", "Historical Summary",
+    "Change Analysis", "Appendix-Vizo", "Appendix 2-Vizo",
+    "Envir Factor Ranges-Vizo", "New Report Calc-Vizo",
+}
+
+# Merged into 'Env Factor by Pool-Vizo'; retained for cross-sheet formula
+# refs but never shown in either variant.
+_ALWAYS_HIDDEN_SHEETS = {
+    "Envir Factor Ranges-Vizo",
 }
 
 _ONE_PAGE_RANGE_SHEETS = {
@@ -304,6 +310,8 @@ def _hide_other_variant(
         ws = wb[name]
         if name.startswith("DNU "):
             hide = True
+        elif name in _ALWAYS_HIDDEN_SHEETS:
+            hide = True
         elif keep_variant == "tct" and name in _VIZO_ONLY_SHEETS:
             hide = True
         elif keep_variant == "vizo" and name in _TCT_ONLY_SHEETS:
@@ -370,6 +378,20 @@ def _hide_total_chargeoff_vizo_rows(workbook_path: str | Path) -> list[int]:
     return hidden
 
 
+def _resolve_template_for(out_path: Path) -> str | None:
+    """Resolve the canonical template for the period baked into a report
+    filename (``<period>_CECL_SCALE_...``). Used to source the merged Env
+    Factor + redesigned Cover during layout normalization."""
+    m = re.match(r"^(\d{4}-\d{2})_CECL_SCALE_", Path(out_path).stem)
+    if not m:
+        return None
+    try:
+        res = template_loader.resolve_template(m.group(1))
+        return res.get("path") if res.get("ok") else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def apply_report_variant(
     workbook_path: str | Path, variant: str,
 ) -> dict:
@@ -420,6 +442,15 @@ def apply_report_variant(
             # Add quarter-over-quarter narrative tab immediately after
             # Calc tab (SCALE analogue of Migration change analysis).
             tct_change_analysis.append_tct_change_analysis(out_path)
+        else:
+            # Vizo: reshape to the approved redesign layout first (idempotent;
+            # carry-history reports are seeded from the prior quarter and
+            # would otherwise keep the old tab order/names), then fill the
+            # 'Change Analysis' placeholder with the change analysis.
+            vizo_layout.normalize_vizo_layout(
+                out_path, _resolve_template_for(out_path),
+            )
+            tct_change_analysis.append_vizo_change_analysis(out_path)
         theme_bytes = tct_theme if which == "tct" else vizo_theme
         theme_label = "Office default" if which == "tct" else "Vizo"
         if theme_bytes is not None:
@@ -458,8 +489,13 @@ def _report_variant_from_state(state: dict) -> str:
 
 
 def _resolve_cu_name(doc, solr_url, solr_core, charter, scale) -> str:
-    """Credit union name from the MOST RECENT 5300 filing, falling back to
-    the modeled-period ``doc``'s cuname. Best-effort — never raises."""
+    """Credit union name for the report. A non-empty ``cu_name_override`` in
+    the scale block wins (it distributes via Historical Data!B2); otherwise
+    use the MOST RECENT 5300 filing, falling back to the modeled-period
+    ``doc``'s cuname. Best-effort — never raises."""
+    override = ((scale or {}).get("cu_name_override") or "").strip()
+    if override:
+        return override
     try:
         name = solr_fetcher.most_recent_cuname(
             solr_url, solr_core, charter,
@@ -1199,7 +1235,9 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
 
         lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
-        lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
+        lol_result = lol_writer.apply_lol_effective(
+            out_path, tmpl["path"], lol_overrides
+        )
 
         imp_rows = _impaired_rows_from_state(state)
         imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
@@ -1518,7 +1556,9 @@ def run_multi_quarter(
             mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
             mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
             lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
-            lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
+            lol_result = lol_writer.apply_lol_effective(
+                out_path, tmpl["path"], lol_overrides
+            )
             imp_rows = _impaired_rows_from_state(state)
             imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
             env_result = env_factor_writer.apply_env_factor_ranges(out_path)
@@ -1984,7 +2024,38 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
 
         lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
-        lol_result = lol_writer.apply_lol_overrides(out_path, lol_overrides)
+        # Resolve the canonical template so non-overridden pools are reset
+        # to their template default rather than inheriting a stale month
+        # carried forward from the prior quarter's copied workbook.
+        _lol_tmpl = template_loader.resolve_template(
+            period, scale.get("template_override_path") or None
+        )
+        _lol_tmpl_path = _lol_tmpl.get("path", "") if _lol_tmpl.get("ok") else ""
+        # Carry-forward capture: promote any Life-of-Loan month baked into
+        # the prior report (set outside the wizard) into the draft's
+        # overrides so it displays in the settings / Life-of-Loan step and
+        # persists for future quarters. Existing draft overrides win, so a
+        # value the user explicitly set (or cleared) is never overwritten.
+        lol_captured: dict[str, int] = {}
+        if _lol_tmpl_path:
+            try:
+                _carried = lol_writer.read_carried_overrides(
+                    str(prior_path), _lol_tmpl_path
+                )
+                lol_overrides = dict(lol_overrides)
+                for _pool, _months in _carried.items():
+                    if _pool not in lol_overrides:
+                        lol_overrides[_pool] = _months
+                        lol_captured[_pool] = _months
+                if lol_captured:
+                    state.setdefault("scale", {})["life_of_loan_overrides"] = (
+                        lol_overrides
+                    )
+            except Exception:  # noqa: BLE001
+                lol_captured = {}
+        lol_result = lol_writer.apply_lol_effective(
+            out_path, _lol_tmpl_path, lol_overrides
+        )
 
         imp_rows = _impaired_rows_from_state(state)
         imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
@@ -2086,6 +2157,7 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "lol_pools_written": lol_result["pools_written"],
         "lol_skipped": lol_result["skipped"],
         "lol_error": lol_result["error"],
+        "lol_captured": lol_captured,
         "impaired_applied": imp_result["applied"],
         "impaired_cleared": imp_result["cleared"],
         "impaired_error": imp_result["error"],

@@ -418,8 +418,6 @@ def backfill_missing_quarters(
     return out
 
 
-
-
 def backfill_missing_quarters_distributed(
     cu: str,
     charter: int,
@@ -428,14 +426,14 @@ def backfill_missing_quarters_distributed(
     target_period: str,
     history_months: int,
     *,
-    pool_distribution: dict,
-    canonical_map=None,
-    existing_dates=None,
+    pool_distribution: dict[str, float],
+    canonical_map: list[dict[str, str]] | None = None,
+    existing_dates: set[str] | None = None,
     overwrite: bool = False,
     source_period_iso: str = "",
-    username=None,
-    password=None,
-):
+    username: str | None = None,
+    password: str | None = None,
+) -> dict[str, Any]:
     """Backfill missing quarter-ends by distributing the QUARTER's TOTAL
     loan balance across the user's configured pools using the supplied
     ``pool_distribution`` ratios (typically captured from the earliest
@@ -447,7 +445,7 @@ def backfill_missing_quarters_distributed(
     per-loan-code rows (``5300:%``) for this CU to avoid double-
     counting at report time.
     """
-    out = {
+    out: dict[str, Any] = {
         "ok": False,
         "error": None,
         "mode": "distributed",
@@ -469,7 +467,7 @@ def backfill_missing_quarters_distributed(
         return out
     if not pool_distribution:
         out["error"] = (
-            "Pool distribution is empty - upload at least one historical "
+            "Pool distribution is empty — upload at least one historical "
             "balance file with a non-zero earliest month."
         )
         return out
@@ -486,6 +484,9 @@ def backfill_missing_quarters_distributed(
         return out
 
     pool_names = sorted(pool_distribution.keys())
+    # Cleanup: drop any prior 5300-distributed rows whose loan_code is
+    # NOT in the current pool list, and ALL prior per-loan-code rows
+    # for this CU (mixing the two modes would double-count).
     try:
         from sqlalchemy import text as _sql_text
         eng = extract_hist_processor._engine_lazy()
@@ -519,6 +520,8 @@ def backfill_missing_quarters_distributed(
     out["expected"] = quarter_ends
     existing = set(existing_dates or [])
 
+    # NCUA parent/child overlap fields — when the parent has a non-zero
+    # balance, suppress the child to avoid double-counting in the total.
     _PARENT_CHILDREN = {
         "1st Mortgage Real Estate": ("First Liens",),
         "Other Real Estate": (
@@ -552,7 +555,7 @@ def backfill_missing_quarters_distributed(
             out["months_no_data"].append(qe)
             continue
 
-        bucket_totals = {}
+        bucket_totals: dict[str, float] = {}
         for entry in cmap:
             code = entry["loan_code"]
             fc = entry["field_code"]
@@ -617,3 +620,228 @@ def backfill_missing_quarters_distributed(
     out["ok"] = True
     return out
 
+
+def backfill_missing_quarters_distributed(
+    cu: str,
+    charter: int,
+    solr_url: str,
+    core: str,
+    target_period: str,
+    history_months: int,
+    *,
+    pool_distribution: dict[str, float],
+    canonical_map: list[dict[str, str]] | None = None,
+    existing_dates: set[str] | None = None,
+    overwrite: bool = False,
+    source_period_iso: str = "",
+    username: str | None = None,
+    password: str | None = None,
+) -> dict[str, Any]:
+    """Backfill missing quarter-ends by distributing the QUARTER's TOTAL
+    loan balance from 5300 across the user's configured pools using the
+    supplied ``pool_distribution`` ratios (typically derived from the
+    earliest month of the historical balance file(s)).
+
+    For each missing quarter-end:
+      * Fetch the 5300 doc for the charter at that period.
+      * Compute total = sum of all canonical-bucket field values
+        (same buckets the per-loan-code mode would have produced).
+      * For each ``(pool_name, ratio)`` in ``pool_distribution``,
+        write one row to ``loan_code_history`` with
+        ``loan_code = pool_name``, ``total_balance = total * ratio``,
+        ``source = '5300-distributed:<qe>'``.
+
+    The pool_distribution is captured at run time and the
+    ``source_period_iso`` (the earliest historical month it was
+    derived from) is recorded on the run result for traceability.
+    """
+    out: dict[str, Any] = {
+        "ok": False,
+        "error": None,
+        "mode": "distributed",
+        "expected": [],
+        "months_filled": [],
+        "months_skipped": [],
+        "months_no_data": [],
+        "rows_written": 0,
+        "stale_rows_removed": 0,
+        "new_loan_codes": [],
+        "pool_distribution": dict(pool_distribution or {}),
+        "distribution_period": source_period_iso,
+    }
+    if not cu:
+        out["error"] = "Credit union name not set on Identity step."
+        return out
+    if not charter:
+        out["error"] = "Charter number not set on Identity step."
+        return out
+    if not pool_distribution:
+        out["error"] = (
+            "Pool distribution is empty — upload at least one historical "
+            "balance file with a non-zero earliest month."
+        )
+        return out
+    cmap = canonical_map if canonical_map is not None else load_canonical_map()
+    if not cmap:
+        out["error"] = (
+            f"Canonical 5300 map is empty or missing: {_CANONICAL_CSV}"
+        )
+        return out
+    try:
+        extract_hist_processor.ensure_table()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"Could not ensure loan_code_history table: {exc}"
+        return out
+
+    # Cleanup: drop any prior 5300-distributed rows whose loan_code is
+    # NOT in the current pool list (e.g. user renamed a pool, or
+    # re-uploaded a different historical file). Scoped to source
+    # LIKE '5300-distributed:%' so per-loan-code backfill rows and
+    # user-uploaded extracts are untouched.
+    pool_names = sorted(pool_distribution.keys())
+    try:
+        from sqlalchemy import text as _sql_text
+        eng = extract_hist_processor._engine_lazy()
+        with eng.begin() as conn:
+            res = conn.execute(
+                _sql_text(
+                    "DELETE FROM loan_code_history "
+                    "WHERE cu = :cu "
+                    "AND source LIKE '5300-distributed:%' "
+                    "AND loan_code <> ALL(:codes)"
+                ),
+                {"cu": cu, "codes": pool_names},
+            )
+            out["stale_rows_removed"] = int(res.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        out["months_skipped"].append({
+            "period": "(cleanup)",
+            "reason": f"stale-row cleanup failed: {type(exc).__name__}: {exc}",
+        })
+
+    # Cleanup: drop any prior PER-LOAN-CODE rows (source LIKE '5300:%')
+    # for this CU, since the user explicitly chose distributed mode and
+    # mixing the two would double-count balances at report time.
+    try:
+        from sqlalchemy import text as _sql_text
+        eng = extract_hist_processor._engine_lazy()
+        with eng.begin() as conn:
+            res = conn.execute(
+                _sql_text(
+                    "DELETE FROM loan_code_history "
+                    "WHERE cu = :cu "
+                    "AND source LIKE '5300:%'"
+                ),
+                {"cu": cu},
+            )
+            out["stale_rows_removed"] += int(res.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        out["months_skipped"].append({
+            "period": "(per-loan-code cleanup)",
+            "reason": f"cleanup failed: {type(exc).__name__}: {exc}",
+        })
+
+    quarter_ends = expected_quarter_ends(target_period, history_months)
+    out["expected"] = quarter_ends
+    existing = set(existing_dates or [])
+
+    for qe in quarter_ends:
+        fill_dates = quarter_fill_dates(qe)
+        if overwrite:
+            targets = list(fill_dates)
+        else:
+            targets = [d for d in fill_dates if d not in existing]
+        if not targets:
+            out["months_skipped"].append({
+                "period": qe,
+                "reason": "quarter already covered (all 3 months present)",
+            })
+            continue
+        try:
+            doc = fetch_solr_doc(
+                solr_url, core, int(charter), qe,
+                username=username, password=password,
+            )
+        except Exception as exc:  # noqa: BLE001
+            out["months_skipped"].append({
+                "period": qe,
+                "reason": f"fetch error: {type(exc).__name__}: {exc}",
+            })
+            continue
+        if doc is None:
+            out["months_no_data"].append(qe)
+            continue
+
+        # Total loan balance = sum across every canonical 5300 bucket.
+        # NCUA parent/child overlap (e.g. A703 vs A703A) would
+        # double-count this total; suppress child fields when the
+        # parent has a non-zero value.
+        _PARENT_CHILDREN = {
+            "1st Mortgage Real Estate": ("First Liens",),
+            "Other Real Estate": (
+                "Junior Liens", "Other Real Estate (Other)"),
+        }
+        bucket_totals: dict[str, float] = {}
+        for entry in cmap:
+            code = entry["loan_code"]
+            fc = entry["field_code"]
+            val = _coerce_number(doc.get(fc)) if fc in doc else 0.0
+            bucket_totals[code] = bucket_totals.get(code, 0.0) + val
+        for parent, children in _PARENT_CHILDREN.items():
+            if bucket_totals.get(parent, 0.0) > 0:
+                for ch in children:
+                    bucket_totals.pop(ch, None)
+        total = sum(bucket_totals.values())
+        if total <= 0:
+            out["months_skipped"].append({
+                "period": qe,
+                "reason": "5300 doc had no positive loan balances",
+            })
+            continue
+
+        rollup_rows = [
+            {
+                "loan_code": pool_name,
+                "total_balance": round(total * float(ratio), 2),
+                "loan_count": 0,
+                "fico_histogram": {},
+                "fico_balance": {},
+            }
+            for pool_name, ratio in pool_distribution.items()
+            if float(ratio) > 0
+        ]
+        if not rollup_rows:
+            out["months_skipped"].append({
+                "period": qe,
+                "reason": "all pool ratios were zero",
+            })
+            continue
+
+        for as_of in targets:
+            label = ("quarter-end" if as_of == qe
+                     else "copied from quarter-end")
+            try:
+                written = extract_hist_processor.upsert_month(
+                    cu, as_of, rollup_rows,
+                    source=f"5300-distributed:{qe}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                out["months_skipped"].append({
+                    "period": as_of,
+                    "reason": f"upsert error: {exc}",
+                })
+                continue
+            out["months_filled"].append({
+                "period": as_of,
+                "quarter_end": qe,
+                "rows_written": written,
+                "codes": len(rollup_rows),
+                "total_balance": round(total, 2),
+                "note": label,
+            })
+            out["rows_written"] += written
+            existing.add(as_of)
+
+    out["new_loan_codes"] = pool_names
+    out["ok"] = True
+    return out
