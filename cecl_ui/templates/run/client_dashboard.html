@@ -186,6 +186,9 @@
     <label><input type="checkbox" name="mgmt_adj_napkin"
         {% if cfg.reports is not defined or cfg.reports.get('mgmt_adj_napkin', True) %}checked{% endif %}>
       Management Adjustment Worksheet</label>
+    <label><input type="checkbox" name="acl_funding"
+        {% if cfg.reports is not defined or cfg.reports.get('acl_funding', True) %}checked{% endif %}>
+      ACL Funding Worksheet</label>
 
     <div class="btn-row">
       <a class="btn btn-secondary" href="{{ url_for('run.select_cu') }}">&larr; CU list</a>

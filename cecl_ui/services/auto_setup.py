@@ -1850,6 +1850,7 @@ def _set_reports_default_from_folder(state: dict[str, Any], folder: str) -> None
             "vizo": True,
             "vizo_supp": True,
             "impdet": True,
+            "acl_funding": True,
         }
     # else leave whatever default was already in state (TCT-only by default).
 
