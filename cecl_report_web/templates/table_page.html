@@ -31,5 +31,12 @@
   </table>
   {% endfor %}
 
+  {% if page.notes %}
+  {% if page.notes_title %}<h3 class="tbl-section-title">{{ page.notes_title }}</h3>{% endif %}
+  <ul class="tbl-notes">
+    {% for n in page.notes %}<li>{{ n }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
 </section>
 {% endblock %}

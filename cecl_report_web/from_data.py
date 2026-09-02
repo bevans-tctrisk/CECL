@@ -1224,6 +1224,228 @@ def build_loss_factor(client_name: str, snapshot_date: str, config: dict,
         sections=[TableSection(columns=cols, rows=rows)])
 
 
+def _acl_current_shape(acl_pools: dict, acl_summary: dict, acl_impaired: dict) -> dict:
+    """Shape the current-period ACL data into the same dict layout
+    change_analysis._parse_acl_sheet produces, so the diff + commentary code
+    path is byte-identical to the workbook's."""
+    pools: dict = {}
+    order: list = []
+    for name, pdata in (acl_pools or {}).items():
+        t = pdata.get("total") or {}
+        pools[name] = {
+            "balance": float(t.get("balance") or 0),
+            "spec_id": float(t.get("spec_id") or 0),
+            "total_allow": float(t.get("total_allow") or 0),
+        }
+        order.append(name)
+    impaired = {k: float(v or 0) for k, v in (acl_impaired or {}).items()}
+    s = acl_summary or {}
+    totals = {k: float(s.get(k) or 0) for k in (
+        "pooled_balance", "pooled_total_allow", "total_spec_allow",
+        "total_allow_needed", "acl_balance", "adjustment")}
+    return {"pools": pools, "order": order, "impaired": impaired, "totals": totals}
+
+
+def _load_prior_acl(cu: str, snapshot_date: str, config: dict):
+    """Locate + parse the prior quarter's ACL Env tab the same way the Change
+    Analysis workbook does. Returns (prior_dict | None, prior_snap | None)."""
+    try:
+        import openpyxl
+        from change_analysis import _find_prior_report, _parse_acl_sheet
+        from report_vizo import ACL_SHEET
+        cfg = config or {}
+        rpt_dir = (cfg.get("report_dir") or cfg.get("output_dir")
+                   or os.path.join(os.environ.get("CECL_WORKSPACE_ROOT")
+                                   or os.getcwd(), "Reports"))
+        safe_cu = cu.replace(" ", "_").replace("/", "-")
+        path, prior_snap = _find_prior_report(rpt_dir, safe_cu, "Vizo_Model",
+                                              snapshot_date)
+        if not path:
+            return None, None
+        pwb = openpyxl.load_workbook(path, data_only=True)
+        prior = (_parse_acl_sheet(pwb[ACL_SHEET])
+                 if ACL_SHEET in pwb.sheetnames else None)
+        pwb.close()
+        return prior, prior_snap
+    except Exception as exc:  # noqa: BLE001 - never break the PDF path
+        print(f"  prior ACL unavailable: {exc}")
+        return None, None
+
+
+_NO_PRIOR_NOTE = ("No prior report is available for comparison - this is the "
+                  "earliest report on file for this credit union.")
+
+
+def build_summary_variance(client_name: str, snapshot_date: str, config: dict,
+                           hist: dict | None = None, df: Any = None,
+                           grades: Any = None) -> TablePage | None:
+    """Summary Variance: Current / Prior / Change over four ACL measures."""
+    import report_vizo as _rv
+
+    if df is None:
+        return None
+    acl_pools, acl_summary, acl_impaired = _acl_data(
+        config, snapshot_date, hist, df, grades)
+    if not acl_pools:
+        return None
+    cu = (config or {}).get("credit_union") or client_name
+    cur = _acl_current_shape(acl_pools, acl_summary, acl_impaired)
+    prior, prior_snap = _load_prior_acl(cu, snapshot_date, config)
+
+    def _ratio(t):
+        pb = t.get("pooled_balance") or 0
+        return (t.get("total_allow_needed", 0) / pb) if pb else None
+
+    labels = ["Total Expected Losses on Loans", "Current ACL Balance",
+              "Adjustment", "ACL/Total Loans"]
+    fmts = ["currency2", "currency2", "currency2", "pct2"]
+    ct = cur["totals"]
+    cur_vals = [ct["total_allow_needed"], ct["acl_balance"], ct["adjustment"],
+                _ratio(ct)]
+
+    def _section(title, vals):
+        rows = [[TableCell(lbl, "text", align="left"), TableCell(v, f)]
+                for lbl, v, f in zip(labels, vals, fmts)]
+        return TableSection(title=title, columns=["Measure", "Value"], rows=rows)
+
+    sections = [_section(f"Current ACL - {_rv._snap_display(snapshot_date)}",
+                         cur_vals)]
+    notes: list[str] = []
+    if prior:
+        pt = prior["totals"]
+        prior_vals = [pt.get("total_allow_needed", 0), pt.get("acl_balance", 0),
+                      pt.get("adjustment", 0), _ratio(pt)]
+        change_vals = [(c - p) if (c is not None and p is not None) else None
+                       for c, p in zip(cur_vals, prior_vals)]
+        sections.append(_section(f"Prior ACL - {_rv._snap_display(prior_snap)}",
+                                 prior_vals))
+        sections.append(_section("Change", change_vals))
+    else:
+        notes.append(_NO_PRIOR_NOTE)
+
+    return TablePage(
+        credit_union=cu, title="Summary Variance",
+        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        sections=sections, notes=notes)
+
+
+def build_change_analysis(client_name: str, snapshot_date: str, config: dict,
+                          hist: dict | None = None, df: Any = None,
+                          grades: Any = None) -> TablePage | None:
+    """Change Analysis: per-pool ACL variance, impaired variance, summary
+    metrics, and the auto-generated significant-change commentary -- current
+    from data, prior from the prior quarter's workbook."""
+    from change_analysis import _explain_impaired, _explain_pool, _is_significant
+
+    if df is None:
+        return None
+    acl_pools, acl_summary, acl_impaired = _acl_data(
+        config, snapshot_date, hist, df, grades)
+    if not acl_pools:
+        return None
+    cfg = config or {}
+    cu = cfg.get("credit_union") or client_name
+    cur = _acl_current_shape(acl_pools, acl_summary, acl_impaired)
+    prior, prior_snap = _load_prior_acl(cu, snapshot_date, config)
+
+    if not prior:
+        return TablePage(
+            credit_union=cu, title="Change Analysis - Period over Period",
+            heading_lines=[f"Current period: {snapshot_date}"],
+            notes=[_NO_PRIOR_NOTE])
+
+    all_pools = list(cur["order"]) + [p for p in prior["order"]
+                                      if p not in cur["order"]]
+    rows_data = []
+    for p in all_pools:
+        c = cur["pools"].get(p, {})
+        pr = prior["pools"].get(p, {})
+        ca, pa = c.get("total_allow", 0.0), pr.get("total_allow", 0.0)
+        rows_data.append({
+            "pool": p, "cur": ca, "prior": pa, "delta": ca - pa,
+            "pct": (ca - pa) / pa if pa else None,
+            "cur_bal": c.get("balance", 0.0), "prior_bal": pr.get("balance", 0.0),
+            "cur_spec": c.get("spec_id", 0.0), "prior_spec": pr.get("spec_id", 0.0),
+        })
+
+    pool_rows = []
+    for rd in rows_data:
+        pool_rows.append([
+            TableCell(rd["pool"], "text", align="left"),
+            TableCell(rd["cur"], "currency"), TableCell(rd["prior"], "currency"),
+            TableCell(rd["delta"], "currency"),
+            TableCell(rd["pct"], "pct") if rd["pct"] is not None else TableCell(None)])
+    ctot = cur["totals"].get("pooled_total_allow", 0.0)
+    ptot = prior["totals"].get("pooled_total_allow", 0.0)
+    pool_rows.append([
+        TableCell("Pooled Total Allowance", "text", bold=True, align="left"),
+        TableCell(ctot, "currency", bold=True), TableCell(ptot, "currency", bold=True),
+        TableCell(ctot - ptot, "currency", bold=True),
+        TableCell((ctot - ptot) / ptot if ptot else None, "pct", bold=True)])
+    sec1 = TableSection(title="Pool ACL Allowance Variance",
+                        columns=["Pool", "Current", "Prior", "$ Change", "% Change"],
+                        rows=pool_rows)
+
+    cats = list(cur["impaired"].keys()) + [c for c in prior["impaired"]
+                                           if c not in cur["impaired"]]
+    imp_rows = []
+    for cat in cats:
+        cv = cur["impaired"].get(cat, 0.0)
+        pv = prior["impaired"].get(cat, 0.0)
+        imp_rows.append([TableCell(cat, "text", align="left"),
+                         TableCell(cv, "currency"), TableCell(pv, "currency"),
+                         TableCell(cv - pv, "currency")])
+    cimp = cur["totals"].get("total_spec_allow", sum(cur["impaired"].values()))
+    pimp = prior["totals"].get("total_spec_allow", sum(prior["impaired"].values()))
+    imp_rows.append([
+        TableCell("Total Specifically Identified", "text", bold=True, align="left"),
+        TableCell(cimp, "currency", bold=True), TableCell(pimp, "currency", bold=True),
+        TableCell(cimp - pimp, "currency", bold=True)])
+    sec2 = TableSection(title="Impaired Loan Reserve Variance",
+                        columns=["Impairment Type", "Current", "Prior", "$ Change"],
+                        rows=imp_rows)
+
+    sum_rows = []
+    for label, key in (("Total Allowance Needed", "total_allow_needed"),
+                       ("Allowance for Credit Loss Balance", "acl_balance"),
+                       ("Adjustment (Over)/Under-funded", "adjustment")):
+        cv = cur["totals"].get(key, 0.0)
+        pv = prior["totals"].get(key, 0.0)
+        sum_rows.append([TableCell(label, "text", align="left"),
+                         TableCell(cv, "currency"), TableCell(pv, "currency"),
+                         TableCell(cv - pv, "currency")])
+    sec3 = TableSection(title="Summary",
+                        columns=["Metric", "Current", "Prior", "$ Change"],
+                        rows=sum_rows)
+
+    notes = []
+    specific_pools = {str(p).strip().lower()
+                      for p in (cfg.get("warm_allowance_pools") or [])}
+    for rd in sorted(rows_data, key=lambda x: -abs(x["delta"])):
+        if _is_significant(rd):
+            notes.append(_explain_pool(
+                rd, specific=rd["pool"].strip().lower() in specific_pools))
+    imp_note = _explain_impaired(cur["impaired"], prior["impaired"], cimp, pimp)
+    if imp_note:
+        notes.append(imp_note)
+    tot_d = cur["totals"].get("total_allow_needed", 0.0) \
+        - prior["totals"].get("total_allow_needed", 0.0)
+    if abs(tot_d) >= 1000:
+        notes.insert(0, f"Total Allowance Needed "
+                        f"{'increased' if tot_d > 0 else 'decreased'} "
+                        f"${abs(tot_d):,.0f} versus the prior report, to "
+                        f"${cur['totals'].get('total_allow_needed', 0.0):,.0f}.")
+    if not notes:
+        notes.append("No pool reserve moved materially versus the prior report; "
+                     "changes were within normal quarter-to-quarter variation.")
+
+    return TablePage(
+        credit_union=cu, title="Change Analysis - Period over Period",
+        heading_lines=[f"Current: {snapshot_date}    |    Prior: {prior_snap}"],
+        sections=[sec1, sec2, sec3],
+        notes_title="Analysis of Significant Changes", notes=notes)
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -1280,6 +1502,14 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                         df=df, grades=grades)
         if impaired is not None:
             pages.append(("table_page.html", {"page": impaired}, False))
+        var = build_summary_variance(client_name, snapshot_date, config, hist,
+                                     df=df, grades=grades)
+        if var is not None:
+            pages.append(("table_page.html", {"page": var}, False))
+        chg = build_change_analysis(client_name, snapshot_date, config, hist,
+                                    df=df, grades=grades)
+        if chg is not None:
+            pages.append(("table_page.html", {"page": chg}, False))
         pages.append(("narrative.html",
                       {"page": build_introduction(client_name, config)}, False))
         pages.append(("narrative.html",

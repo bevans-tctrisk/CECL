@@ -47,6 +47,10 @@ tfoot { display: table-footer-group; }
   font-size: 12pt; font-weight: 700; color: #0D4D5E;
   margin: 12pt 0 3pt;
 }
+.table-page .tbl-notes {
+  margin: 2pt 0 8pt; padding-left: 16pt; font-size: 10.5pt; line-height: 1.45;
+}
+.table-page .tbl-notes li { margin: 0 0 3pt; }
 .data-table {
   width: 100%; border-collapse: collapse; margin-bottom: 8pt;
   font-size: 10.5pt;

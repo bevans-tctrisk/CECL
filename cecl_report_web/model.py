@@ -270,6 +270,8 @@ class TablePage:
     title: str
     heading_lines: list[str] = field(default_factory=list)
     sections: list[TableSection] = field(default_factory=list)
+    notes_title: str = ""
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
