@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Edit Settings &mdash; {{ credit_union }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Edit Settings &mdash; {{ credit_union }}
+    <small class="muted">({{ short_name }})</small></h2>
+  <p class="muted">
+    Update the per-pool <strong>Management Adjustment</strong> and
+    <strong>ACL (Life of Loan) Months</strong> for this SCALE credit
+    union. Changes are written to the CU's SCALE wizard draft and are
+    re-applied on every future quarter's run &mdash; the same values you
+    set on the SCALE setup wizard's Mgmt Adjustments and Life of Loan
+    Months steps.
+  </p>
+  <p>
+    <a class="btn btn-secondary"
+       href="{{ url_for('scale_runs.cu_dashboard', short_name=short_name) }}">
+      &larr; Back to dashboard
+    </a>
+    <a class="btn btn-secondary"
+       href="{{ url_for('scale_runs.upload_impaired_form', short_name=short_name) }}">
+      Upload Impaired Loans Report
+    </a>
+  </p>
+</div>
+
+{% if template_missing %}
+  <div class="card">
+    <div class="flash warning" style="margin:0;">
+      <strong>Template not resolved yet.</strong>
+      Pool names and the default Life-of-Loan months are read from the
+      SCALE template for this CU's target period. Run a quarter first (or
+      re-open the SCALE wizard and confirm the Template &amp; Map step) so
+      the template resolves, then return here to edit settings.
+    </div>
+  </div>
+{% else %}
+<form method="post">
+  <div class="card">
+    <h3>Management Adjustment default</h3>
+    <p class="muted">
+      Written to <code>Management Adjustment!D2</code>. The workbook
+      formula only applies this default rate when a pool's CECL Lifetime
+      Loss Rate and any hard-code value are both zero. Admin default:
+      <strong>{{ '%.4f'|format(admin_default_pct * 100) }}%</strong>.
+    </p>
+    <label>Default Mgmt Adj (%)
+      <input type="number" step="0.0001" name="default_pct"
+             value="{{ '%.4f'|format(default_pct * 100) }}"
+             style="width:130px;">
+    </label>
+  </div>
+
+  <div class="card">
+    <h3>Pools <span class="muted" style="font-weight:normal;">({{ rows | length }})</span></h3>
+    <p class="muted">
+      <strong>ACL Months</strong> is the per-pool Life of Loan (Weighted
+      Average Maturity) that drives the ACL Lifetime Loss Rate. Leave it
+      blank to use the template default shown next to each row.
+      <strong>Mgmt Adj (%)</strong> is an optional per-pool hard-code
+      overlay. Check <strong>Use Default Mgmt Adj</strong> to apply the
+      industry default management adjustment to that pool instead.
+    </p>
+    {% if not rows %}
+      <p><em>No pool names found in the SCALE template's
+        <code>Scale Calculation</code> sheet.</em></p>
+    {% else %}
+    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr style="background:#eef; text-align:left;">
+          <th style="padding:6px 8px; width:40px;">#</th>
+          <th style="padding:6px 8px;">Pool</th>
+          <th style="padding:6px 8px; width:150px;">ACL Months</th>
+          <th style="padding:6px 8px; text-align:center; width:150px;"
+              title="Apply the industry default management adjustment to this pool">
+            Use Default Mgmt Adj</th>
+          <th style="padding:6px 8px; width:150px;">Mgmt Adj (%)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr style="border-bottom:1px solid #eee;">
+          <td style="padding:4px 8px;" class="muted">{{ loop.index }}</td>
+          <td style="padding:4px 8px;">{{ r.name }}</td>
+          <td style="padding:4px 8px;">
+            <input type="number" min="0" max="600" step="1"
+                   name="lol_months__{{ r.idx }}"
+                   value="{% if r.override_months %}{{ r.override_months }}{% endif %}"
+                   placeholder="{{ r.default_months if r.default_months is not none else '' }}"
+                   style="width:110px;"
+                   title="Template default: {{ r.default_months if r.default_months is not none else 'n/a' }}">
+          </td>
+          <td style="padding:4px 8px; text-align:center;">
+            <input type="checkbox" name="pool_use_default__{{ r.idx }}" value="1"
+                   {% if r.use_default %}checked{% endif %}>
+          </td>
+          <td style="padding:4px 8px;">
+            <span style="display:inline-flex; align-items:center; gap:4px;">
+              <input type="number" step="0.0001" name="pool_pct__{{ r.idx }}"
+                     value="{{ '%.4f'|format(r.hard_code_pct * 100) }}"
+                     style="width:110px;">
+              <span class="muted">%</span>
+            </span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="5" style="padding:14px 8px 6px; font-weight:600;">
+            Whole-portfolio overlay
+            <span class="muted" style="font-weight:400;">
+              (Management Adjustment for Historical Loss Experience &mdash;
+              applies to the entire loan portfolio)
+            </span>
+          </td>
+        </tr>
+        <tr style="border-top:1px solid #eee;">
+          <td style="padding:4px 8px;" class="muted">&mdash;</td>
+          <td style="padding:4px 8px;">Management Adjustment for Historical Loss Experience</td>
+          <td style="padding:4px 8px;" class="muted">&mdash;</td>
+          <td style="padding:4px 8px; text-align:center;">
+            <input type="checkbox" name="portfolio_use_default" value="1"
+                   {% if portfolio.use_default %}checked{% endif %}>
+          </td>
+          <td style="padding:4px 8px;">
+            <span style="display:inline-flex; align-items:center; gap:4px;">
+              <input type="number" step="0.0001" name="portfolio_pct"
+                     value="{{ '%.4f'|format(portfolio.hard_code_pct * 100) }}"
+                     style="width:110px;">
+              <span class="muted">%</span>
+            </span>
+          </td>
+        </tr>
+      </tfoot>
+    </table>
+    <p class="muted" style="margin-top:12px;">
+      Pool names &amp; template default months read from
+      <code>{{ template_path }}</code>.
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <button class="btn btn-primary" type="submit" name="action" value="save">Save Settings</button>
+    <button class="btn btn-secondary" type="submit" name="action" value="reset"
+            onclick="return confirm('Reset all Management Adjustment and ACL Months overrides for this CU?');">
+      Reset to defaults
+    </button>
+    <a class="btn btn-secondary"
+       href="{{ url_for('scale_runs.cu_dashboard', short_name=short_name) }}">Cancel</a>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

@@ -4,25 +4,92 @@
 {% include "setup/_stepper.html" %}
 
 <div class="card">
-  <h2>Run SCALE for {{ state.scale.period }}</h2>
+  <h2>Generate SCALE reports</h2>
   <p class="muted">
-    Fetches 5300 data from Solr and writes a workbook to
-    <code>Generated_Reports/{{ state.short_name }}/{{ state.scale.period }}/</code>.
-    The default run fills <strong>32 consecutive quarters</strong>
-    (newest &rarr; oldest) into the same workbook so prior-quarter
-    columns are populated. Quarters with no matching mapping CSV are
-    skipped and listed below.
+    The wizard generates the
+    <strong>{{ auto_periods | length if auto_periods else 4 }}</strong> most
+    recent quarterly reports
+    {% if auto_periods %}
+      (<strong>{% for p in auto_periods %}{{ p }}{% if not loop.last %}, {% endif %}{% endfor %}</strong>)
+    {% endif %}
+    under
+    <code>Generated_Reports/{{ state.short_name }}/&lt;quarter&gt;/</code>,
+    so you can trend the last year. The oldest quarter builds the full
+    Historical Data history; each newer quarter carries forward from the
+    prior one. The uploaded Impaired Loans file is applied to the most
+    recent quarter only.
   </p>
 
-  <form method="post" style="display:flex; gap:8px; align-items:center;">
-    <button type="submit" name="action" value="run" class="btn">
-      Run SCALE (32 quarters)
-    </button>
-    <button type="submit" name="action" value="run_single" class="btn btn-secondary"
-            title="Fill only the selected target period; useful for debugging a single quarter">
-      Run single quarter only
-    </button>
-  </form>
+  <div style="margin-top:16px; padding:14px; border:1px solid #c9d6e8; background:#f7faff; border-radius:6px;">
+    <h3 style="margin-top:0;">Environmental Factors
+      <span class="muted" style="font-weight:normal;">(Economic Stress Index)</span></h3>
+    <p class="muted">
+      These feed the <strong>Env Factor by Pool</strong> tab. Click
+      <strong>Fetch from federal sources</strong> to pull the latest
+      <em>unemployment</em> (BLS), <em>population</em> (U.S. Census), and
+      <em>bankruptcies</em> (U.S. Courts) for this state.
+      <strong>Foreclosures</strong> has no federal source - enter it manually.
+      Values are saved to this CU and reused on every run.
+    </p>
+    <form method="post">
+      <div style="display:flex; flex-wrap:wrap; gap:16px; align-items:flex-end;">
+        <label>State
+          <input type="text" name="econ_state"
+                 value="{{ economic.get('state', '') }}" style="width:170px;">
+        </label>
+        <label>County
+          <input type="text" name="econ_county"
+                 value="{{ economic.get('county', '') }}" style="width:170px;">
+        </label>
+        <label>Unemployment rate
+          <input type="text" name="econ_unemployment_rate"
+                 value="{{ economic.get('unemployment_rate', '') }}"
+                 placeholder="e.g. 0.038" style="width:120px;">
+          <span class="muted" style="display:block; font-size:11px;">decimal (0.038) or percent (3.8)</span>
+        </label>
+        <label>Population
+          <input type="text" name="econ_population"
+                 value="{{ economic.get('population', '') }}"
+                 placeholder="auto-fetch" style="width:140px;">
+        </label>
+        <label>Bankruptcies
+          <input type="text" name="econ_bankruptcies"
+                 value="{{ economic.get('bankruptcies', '') }}"
+                 placeholder="auto-fetch" style="width:140px;">
+        </label>
+        <label>Foreclosures
+          <input type="text" name="econ_foreclosures"
+                 value="{{ economic.get('foreclosures', '') }}"
+                 placeholder="manual" style="width:140px;">
+        </label>
+      </div>
+      <div style="margin-top:14px; display:flex; gap:10px;">
+        <button type="submit" name="action" value="save_economic" class="btn btn-primary">Save</button>
+        <button type="submit" name="action" value="fetch_economic" class="btn btn-secondary">
+          Fetch from federal sources
+        </button>
+      </div>
+    </form>
+  </div>
+
+  {% if last_auto_run %}
+    <div style="margin-top:16px; padding:10px 14px; border:1px solid #c9d6e8; background:#f4f8ff; border-radius:6px;">
+      <h3 style="margin-top:0;">Report generation summary</h3>
+      <ul style="margin:6px 0 0 18px;">
+        {% for r in last_auto_run %}
+          <li>
+            <strong>{{ r.period }}</strong> &mdash;
+            {% if r.ok %}
+              <span style="color:#0a7f3f;">OK</span>
+            {% else %}
+              <span style="color:#a01818;">FAILED</span>
+              {% if r.errors %}<span class="muted">({{ r.errors | join('; ') }})</span>{% endif %}
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
 
   {% if last_run %}
     {% set is_multi = last_run.iterations is defined %}
@@ -195,9 +262,16 @@
 
   <div class="btn-row" style="margin-top:18px;">
     <a class="btn btn-secondary" href="{{ url_for('scale_setup.step_review') }}">&larr; Back</a>
-    <form method="post" action="{{ url_for('scale_setup.complete_and_home') }}" style="display:inline;">
-      <button type="submit" class="btn btn-primary">Continue to SCALE Runs &rarr;</button>
+    <form method="post" style="display:inline-flex; gap:8px; align-items:center;">
+      <button type="submit" name="action" value="run" class="btn btn-primary">
+        Generate {{ auto_periods | length if auto_periods else 4 }} reports
+      </button>
+      <button type="submit" name="action" value="run_single" class="btn btn-secondary"
+              title="Fill only the latest quarter; useful for debugging a single quarter">
+        Run latest quarter only
+      </button>
     </form>
   </div>
+  <p class="muted" style="margin-top:8px;">Running either option takes you to the SCALE Runs page for this CU.</p>
 </div>
 {% endblock %}

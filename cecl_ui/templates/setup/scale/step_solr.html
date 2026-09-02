@@ -1,14 +1,17 @@
 {% extends "base.html" %}
-{% block title %}SCALE — Solr & Period{% endblock %}
+{% block title %}SCALE — Solr Connection{% endblock %}
 {% block content %}
 {% include "setup/_stepper.html" %}
 
 <div class="card">
-  <h2>Solr connection &amp; target quarter</h2>
+  <h2>Solr connection</h2>
   <p class="muted">
     SCALE pulls all loan / charge-off / delinquency data from the NCUA 5300
-    Call Report via Solr. Confirm the connection and pick the quarter you want
-    to report on.
+    Call Report via Solr. Confirm the connection &mdash; the wizard then
+    automatically finds the most recent 5300 filing and generates the
+    <strong>{{ (auto.periods | length) if auto and auto.periods else 4 }}</strong>
+    most recent quarterly reports so you can trend the last year. No period
+    selection needed.
   </p>
 
   <form method="post">
@@ -27,17 +30,37 @@
       <label>Solr password <span class="muted">(blank to keep)</span>
         <input type="password" name="solr_pass" value="" autocomplete="off">
       </label>
-      <label>Target period (YYYY-MM)
-        <select name="period">
-          <option value="">-- pick a quarter --</option>
-          {% for p in periods %}
-            <option value="{{ p }}" {% if state.scale.period == p %}selected{% endif %}>{{ p }}</option>
-          {% endfor %}
-        </select>
-      </label>
       <div class="muted">
         Charter number: <strong>{{ state.charter_number or '(not set — go back to Identity)' }}</strong>
       </div>
+    </div>
+
+    {# Auto-detected quarters that will be generated. #}
+    <div style="margin-top:14px; padding:12px 14px; border:1px solid #c9d6e8; background:#f4f8ff; border-radius:6px;">
+      {% if auto and auto.ok %}
+        <div>
+          Most recent 5300 available:
+          <strong>{{ auto.latest }}</strong>
+          {% if auto.source == 'solr' %}
+            <span class="muted">(from Solr for this charter)</span>
+          {% elif auto.source == 'map_fallback' %}
+            <span class="muted">(Solr unavailable — latest template period)</span>
+          {% endif %}
+        </div>
+        <div style="margin-top:6px;">
+          Reports to generate:
+          {% for p in auto.periods %}
+            <strong>{{ p }}</strong>{% if not loop.last %}, {% endif %}
+          {% endfor %}
+        </div>
+      {% else %}
+        <div style="color:#a01818;">
+          Couldn't determine the quarters to run yet
+          {% if auto and auto.error %}&mdash; {{ auto.error }}{% endif %}.
+          Confirm the charter number (Identity step) and the Solr connection,
+          then click <strong>Save</strong>.
+        </div>
+      {% endif %}
     </div>
 
     {% if state.scale.last_test %}

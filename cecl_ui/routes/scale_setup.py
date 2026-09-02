@@ -62,7 +62,7 @@ _MGMT_ADJ_DEFAULT_ON_POOLS = frozenset({
 # -------------------------------------------------------------------
 WIZARD_STEPS_SCALE = [
     ("identity",       "1. CU Identity"),
-    ("scale_solr",     "2. Solr & Period"),
+    ("scale_solr",     "2. Solr Connection"),
     ("scale_template", "3. Template & Map"),
     ("scale_qfactors", "4. Q-Factors"),
     ("scale_lol",      "5. Life of Loan Months"),
@@ -105,6 +105,9 @@ def _default_scale_block() -> dict[str, Any]:
         "solr_user": "",
         "solr_pass": "",
         "period": "",
+        # The N most recent quarter-ends (oldest -> newest) the wizard will
+        # auto-generate reports for, resolved from Solr 5300 availability.
+        "auto_periods": [],
         "template_override_path": "",
         "template_override_name": "",
         "map_override_path": "",
@@ -335,6 +338,10 @@ def _flash_prior_acl_warnings(result: dict[str, Any]) -> None:
 
 @scale_setup_bp.route("/start", methods=["GET", "POST"])
 def start():
+    # Start a brand-new SCALE setup from a clean slate so a prior CU's
+    # data (name, charter, Solr, pools, ...) can't bleed into this one.
+    session.pop(STATE_KEY, None)
+    session.modified = True
     state = _state()
     _ensure_scale_mode(state)
     _save_state(state)
@@ -356,6 +363,112 @@ def _period_choices() -> list[str]:
     return sorted(seen, reverse=True)
 
 
+# Number of most-recent quarters the SCALE wizard auto-generates.
+AUTO_PERIOD_COUNT = 4
+
+
+def _resolve_auto_periods(state: dict[str, Any], n: int = AUTO_PERIOD_COUNT) -> dict[str, Any]:
+    """Resolve the ``n`` most recent quarter-ends to auto-run for this CU.
+
+    Uses Solr 5300 availability for the CU's charter (intersected with the
+    periods we have a mapping CSV for), falling back to the newest
+    available mapping period when Solr can't be reached. Returns
+    ``{ok, periods (oldest->newest), latest, source, error}``.
+    """
+    sc = state.get("scale") or {}
+    solr_url = (sc.get("solr_url") or "").strip()
+    solr_core = (sc.get("solr_core") or "").strip()
+    map_periods = set(template_loader.list_available_map_periods())
+    latest = ""
+    source = ""
+    err = ""
+
+    try:
+        charter_int = int(str(state.get("charter_number") or "").strip())
+    except (TypeError, ValueError):
+        charter_int = None
+
+    if charter_int is not None and solr_url and solr_core:
+        probe = solr_fetcher.list_charter_periods(
+            solr_url, solr_core, charter_int,
+            username=sc.get("solr_user") or None,
+            password=sc.get("solr_pass") or None,
+        )
+        if probe.get("ok"):
+            usable = sorted(
+                (set(probe.get("periods") or set()) & map_periods),
+                reverse=True,
+            )
+            if usable:
+                latest, source = usable[0], "solr"
+            else:
+                err = ("Solr has no 5300 filings for this charter that match "
+                       "an available SCALE mapping period.")
+        else:
+            err = probe.get("error") or "Solr availability check failed."
+
+    if not latest:
+        avail = sorted(map_periods, reverse=True)
+        if avail:
+            latest = avail[0]
+            source = source or "map_fallback"
+        else:
+            return {"ok": False, "periods": [], "latest": "",
+                    "source": "", "error": err or "No mapping periods available."}
+
+    # N consecutive quarters ending at ``latest``, keeping only those with a
+    # mapping CSV (maps must match the period exactly; templates fall back).
+    seq = [p for p in scale_runner.make_periods(latest, n) if p in map_periods]
+    periods = list(reversed(seq))  # oldest -> newest
+    return {"ok": bool(periods), "periods": periods, "latest": latest,
+            "source": source, "error": err}
+
+
+def _apply_auto_periods(state: dict[str, Any]) -> dict[str, Any]:
+    """Resolve and store the auto-run periods on the draft. Sets
+    ``scale.period`` to the latest (so the template/map/LoL/mgmt steps
+    resolve against the current quarter) and ``scale.auto_periods`` to the
+    full oldest->newest list."""
+    sc = _scale(state)
+    res = _resolve_auto_periods(state)
+    if res["ok"]:
+        sc["auto_periods"] = res["periods"]
+        sc["period"] = res["latest"]
+    return res
+
+
+def _run_auto_periods(state: dict[str, Any], workspace_root: str) -> list[dict[str, Any]]:
+    """Generate a report for each auto-resolved quarter (oldest -> newest).
+
+    The oldest quarter is a full multi-quarter build (establishes the
+    Historical Data history); each newer quarter carries forward from the
+    prior report. The uploaded Impaired Loans file is applied only to the
+    most recent quarter (it's point-in-time), so the older reports trend
+    cleanly. Returns ``[{period, result}, ...]``.
+    """
+    sc = _scale(state)
+    periods = [p for p in (sc.get("auto_periods") or []) if p]
+    if not periods and sc.get("period"):
+        periods = [sc["period"]]
+    saved_impaired = sc.get("impaired_file")
+    results: list[dict[str, Any]] = []
+    for i, p in enumerate(periods):
+        sc["period"] = p
+        is_latest = (i == len(periods) - 1)
+        sc["impaired_file"] = saved_impaired if is_latest else {}
+        if i == 0:
+            r = scale_runner.run_multi_quarter(state, workspace_root, quarters=32)
+        else:
+            r = scale_runner.run_quarter_carry_history(state, workspace_root)
+        results.append({"period": p, "result": r})
+    # Restore the uploaded impaired file and pin the period to the latest
+    # quarter so the dashboard / later steps default to the current report.
+    sc["impaired_file"] = saved_impaired
+    if periods:
+        sc["period"] = periods[-1]
+    return results
+
+
 @scale_setup_bp.route("/step/solr", methods=["GET", "POST"])
 def step_solr():
     state = _state()
@@ -371,9 +484,7 @@ def step_solr():
         new_pass = request.form.get("solr_pass", "")
         if new_pass:
             sc["solr_pass"] = new_pass
-        period = request.form.get("period", "").strip()
-        if period:
-            sc["period"] = period
+
         if action == "test":
             res = solr_fetcher.test_connection(sc["solr_url"], sc["solr_core"])
             sc["last_test"] = res
@@ -384,29 +495,43 @@ def step_solr():
                 "success" if res["ok"] else "error",
             )
             return redirect(url_for("scale_setup.step_solr"))
-        # Validate period before saving
-        if not sc["period"]:
-            flash("Pick a target period (YYYY-MM).", "error")
-        else:
-            try:
-                _y, m = sc["period"].split("-")
-                if m not in VALID_Q_MONTHS:
-                    raise ValueError
-            except Exception:  # noqa: BLE001
-                flash("Period must be YYYY-MM with month 03/06/09/12.", "error")
-                _save_state(state)
-                return redirect(url_for("scale_setup.step_solr"))
+
         if not sc["solr_url"] or not sc["solr_core"]:
             flash("Solr URL and core are required.", "error")
             _save_state(state)
             return redirect(url_for("scale_setup.step_solr"))
+
+        # Auto-resolve the quarters to run (no manual period selection).
+        auto = _apply_auto_periods(state)
         _save_state(state)
+        if not auto["ok"]:
+            flash(
+                f"Could not determine the quarters to run automatically: "
+                f"{auto.get('error') or 'no available periods'}. Check the "
+                f"charter number and Solr connection.",
+                "error",
+            )
+            return redirect(url_for("scale_setup.step_solr"))
+        if auto.get("source") == "map_fallback" and auto.get("error"):
+            flash(
+                f"Solr availability check note: {auto['error']} Using the "
+                f"latest available template period instead.",
+                "warning",
+            )
         if action == "next":
             return redirect(url_for("scale_setup.step_template_map"))
+        flash(
+            "Detected the latest 5300 quarter and the reports to generate.",
+            "success",
+        )
         return redirect(url_for("scale_setup.step_solr"))
+
+    # GET: auto-resolve so the page can show what will run.
+    auto = _apply_auto_periods(state)
+    _save_state(state)
     return render_template(
         "setup/scale/step_solr.html",
-        periods=_period_choices(),
+        auto=auto,
         **_wizard_ctx("scale_solr"),
     )
 
@@ -925,6 +1050,7 @@ def step_review():
         lol_count=lol_count,
         imp=imp,
         imp_parsed=imp_parsed,
+        auto_periods=sc.get("auto_periods") or [],
         **_wizard_ctx("scale_review"),
     )
 
@@ -938,28 +1064,133 @@ def step_run():
     state = _state()
     _ensure_scale_mode(state)
     sc = _scale(state)
+    sn = (state.get("short_name") or "").strip()
+
+    def _dashboard_or_self() -> str:
+        if sn:
+            return url_for("scale_runs.cu_dashboard", short_name=sn)
+        return url_for("scale_setup.step_run")
+
+    def _mark_setup_completed() -> None:
+        if not (sn or state.get("credit_union")):
+            return
+        try:
+            wizard_drafts.mark_completed(
+                current_app.config["WORKSPACE_ROOT"],
+                wizard_drafts.draft_key_for_state(state),
+                model="scale",
+            )
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Could not mark setup completed: {exc}", "warning")
+
+    def _apply_economic_form(econ: dict[str, Any]) -> dict[str, Any]:
+        for _k in ("state", "county"):
+            _v = (request.form.get(f"econ_{_k}") or "").strip()
+            if _v:
+                econ[_k] = _v
+        _ur = (request.form.get("econ_unemployment_rate") or "").strip().rstrip("%")
+        if _ur:
+            try:
+                _urf = float(_ur)
+                if _urf > 1.0:
+                    _urf = _urf / 100.0
+                if 0.0 <= _urf <= 1.0:
+                    econ["unemployment_rate"] = round(_urf, 6)
+            except ValueError:
+                pass
+        for _k in ("population", "bankruptcies", "foreclosures"):
+            _raw = (request.form.get(f"econ_{_k}") or "").strip().replace(",", "")
+            if _raw:
+                try:
+                    _n = int(float(_raw))
+                    if _n >= 0:
+                        econ[_k] = _n
+                except ValueError:
+                    pass
+        return econ
+
     if request.method == "POST":
         action = request.form.get("action", "")
-        if action == "run":
-            result = scale_runner.run_multi_quarter(
-                state, current_app.config["WORKSPACE_ROOT"], quarters=32,
-            )
-            sc["last_run"] = result
-            _save_state(state)
-            if result.get("ok"):
+        if action in ("save_economic", "fetch_economic"):
+            econ = dict(state.get("economic_data") or {})
+            econ = _apply_economic_form(econ)
+            if action == "fetch_economic":
+                st = (econ.get("state") or "").strip()
+                cty = (econ.get("county") or "").strip()
+                if not st:
+                    flash("Set the State first, then fetch.", "error")
+                    return redirect(url_for("scale_setup.step_run"))
+                try:
+                    import fetch_econ_data
+
+                    fetched = fetch_econ_data.fetch_economic_data(st, cty) or {}
+                except Exception as exc:  # noqa: BLE001
+                    flash(f"Fetch failed: {exc}", "error")
+                    return redirect(url_for("scale_setup.step_run"))
+
+                got: list[str] = []
+                for key, label in (
+                    ("unemployment_rate", "unemployment"),
+                    ("population", "population"),
+                    ("bankruptcies", "bankruptcies"),
+                ):
+                    val = fetched.get(key)
+                    if val not in (None, ""):
+                        econ[key] = val
+                        got.append(label)
+                state["economic_data"] = econ
+                _save_state(state)
                 _persist_scale_draft(state, "scale_run")
+                if got:
+                    flash(
+                        "Fetched " + ", ".join(got)
+                        + " from federal sources. Foreclosures has no federal source "
+                        "- enter it manually if needed.",
+                        "success",
+                    )
+                else:
+                    flash(
+                        "No values could be fetched for "
+                        f"{st}{(' / ' + cty) if cty else ''}. Check the state name, "
+                        "or enter factors manually.",
+                        "warning",
+                    )
+            else:
+                state["economic_data"] = econ
+                _save_state(state)
+                _persist_scale_draft(state, "scale_run")
+                flash("Environmental factors saved.", "success")
+            return redirect(url_for("scale_setup.step_run"))
+
+        if action == "run":
+            results = _run_auto_periods(
+                state, current_app.config["WORKSPACE_ROOT"],
+            )
+            # Keep the latest quarter's detailed result for the Run page.
+            latest_res = results[-1]["result"] if results else {}
+            sc["last_run"] = latest_res
+            sc["last_auto_run"] = [
+                {"period": r["period"], "ok": bool(r["result"].get("ok")),
+                 "errors": r["result"].get("errors") or []}
+                for r in results
+            ]
+            _save_state(state)
+            ok_periods = [r["period"] for r in results if r["result"].get("ok")]
+            fail = [r for r in results if not r["result"].get("ok")]
+            if ok_periods:
+                _persist_scale_draft(state, "scale_run")
+                _mark_setup_completed()
                 flash(
-                    f"SCALE workbook written: "
-                    f"{result.get('quarters_written', 0)} of "
-                    f"{result.get('quarters_requested', 32)} quarter(s) filled.",
+                    f"Generated {len(ok_periods)} SCALE report(s): "
+                    f"{', '.join(ok_periods)}.",
                     "success",
                 )
-                _flash_recalc_warnings(result)
-                _flash_prior_acl_warnings(result)
-            else:
-                for err in result.get("errors", []):
-                    flash(err, "error")
-            return redirect(url_for("scale_setup.step_run"))
+                _flash_recalc_warnings(latest_res)
+                _flash_prior_acl_warnings(latest_res)
+            for r in fail:
+                errs = "; ".join(r["result"].get("errors") or ["unknown error"])
+                flash(f"{r['period']}: {errs}", "error")
+            return redirect(_dashboard_or_self())
         if action == "run_single":
             result = scale_runner.run_single_quarter(
                 state, current_app.config["WORKSPACE_ROOT"]
@@ -968,6 +1199,7 @@ def step_run():
             _save_state(state)
             if result.get("ok"):
                 _persist_scale_draft(state, "scale_run")
+                _mark_setup_completed()
                 flash(
                     f"SCALE workbook written: applied {result['applied']} "
                     f"of {result['total_rows']} cells.",
@@ -978,10 +1210,14 @@ def step_run():
             else:
                 for err in result.get("errors", []):
                     flash(err, "error")
-            return redirect(url_for("scale_setup.step_run"))
+            return redirect(_dashboard_or_self())
     return render_template(
         "setup/scale/step_run.html",
         last_run=sc.get("last_run") or {},
+        last_auto_run=sc.get("last_auto_run") or [],
+        auto_periods=sc.get("auto_periods") or [],
+        economic=state.get("economic_data") or {},
+        short_name=sn,
         **_wizard_ctx("scale_run"),
     )
 

@@ -11,7 +11,16 @@
     <tr><th>Short name</th><td>{{ state.short_name }}</td></tr>
     <tr><th>Solr URL</th><td><code>{{ state.scale.solr_url }}</code></td></tr>
     <tr><th>Solr core</th><td><code>{{ state.scale.solr_core }}</code></td></tr>
-    <tr><th>Target period</th><td><strong>{{ state.scale.period }}</strong></td></tr>
+    <tr><th>Reports to generate</th>
+      <td>
+        {% if auto_periods %}
+          {% for p in auto_periods %}<strong>{{ p }}</strong>{% if not loop.last %}, {% endif %}{% endfor %}
+          <span class="muted">&mdash; the {{ auto_periods | length }} most recent quarters</span>
+        {% else %}
+          <strong>{{ state.scale.period }}</strong>
+        {% endif %}
+      </td>
+    </tr>
     <tr><th>Template</th>
       <td>
         {% if tmpl.ok %}
