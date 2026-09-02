@@ -582,7 +582,7 @@ def reimport_period(short_name: str):
 def reports(short_name: str):
     snap = request.form.get("snapshot_date") or None
     selected: list[str] = []
-    for r in ("tct", "vizo", "vizo_supp", "mgmt_adj_napkin", "acl_funding"):
+    for r in ("tct", "vizo", "vizo_supp", "mgmt_adj_napkin", "acl_funding", "vizo_pdf"):
         if request.form.get(r) == "on":
             selected.append(r)
     impdet = request.form.get("impdet") == "on"
@@ -1344,7 +1344,7 @@ def new_quarter(short_name: str):
         if unmapped:
             report_selection = {
                 r: (request.form.get(r) == "on")
-                for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin", "acl_funding")
+                for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin", "acl_funding", "vizo_pdf")
             }
             return render_template(
                 "run/new_quarter.html",
@@ -1425,7 +1425,7 @@ def new_quarter(short_name: str):
                           "rows": []}
         report_selection = {
             r: (request.form.get(r) == "on")
-            for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin", "acl_funding")
+            for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin", "acl_funding", "vizo_pdf")
         }
         # Case 1: a populated comparison — show the Balance Adjustment review.
         if comparison and comparison.get("ok") and comparison.get("rows"):
@@ -1493,7 +1493,7 @@ def new_quarter(short_name: str):
             impaired_result = None
         report_selection = {
             r: (request.form.get(r) == "on")
-            for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin", "acl_funding")
+            for r in ("tct", "vizo", "vizo_supp", "impdet", "mgmt_adj_napkin", "acl_funding", "vizo_pdf")
         }
         # Case 1: a workbook was found with usable impaired rows / codes —
         # show the verification page so the user can review it.
@@ -1536,7 +1536,7 @@ def new_quarter(short_name: str):
 
     # 4) Run reports — selection comes from form (defaults seeded from cfg)
     selected: list[str] = []
-    for r in ("tct", "vizo", "vizo_supp", "mgmt_adj_napkin", "acl_funding"):
+    for r in ("tct", "vizo", "vizo_supp", "mgmt_adj_napkin", "acl_funding", "vizo_pdf"):
         if request.form.get(r) == "on":
             selected.append(r)
     impdet = request.form.get("impdet") == "on"

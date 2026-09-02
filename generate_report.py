@@ -13063,15 +13063,19 @@ def generate_report(client_name, snapshot_date=None, reports=None):
 
     # Optional data-driven PDF alongside the Vizo workbook. Snapshot pristine
     # inputs BEFORE the loop mutates config/hist (OAC expansion, Impr-Deter
-    # stashes) so the from-data recompute starts clean.
+    # stashes) so the from-data recompute starts clean. Enabled by the config
+    # flag OR by 'vizo_pdf' appearing in the requested reports list.
     _want_vizo_pdf = ('vizo' in reports
-                      and bool(config.get('reports', {}).get('vizo_pdf')))
+                      and (bool(config.get('reports', {}).get('vizo_pdf'))
+                           or 'vizo_pdf' in reports))
     if _want_vizo_pdf:
         import copy as _copy
         _pdf_config = _copy.deepcopy(config)
         _pdf_hist = _copy.deepcopy(hist)
 
     for rpt_type in reports:
+        if rpt_type == 'vizo_pdf':
+            continue  # a modifier on the 'vizo' report, not a tab of its own
         try:
             if rpt_type == 'tct':
                 wb, fname = compose_tct_new(client_name, snapshot_date, df, config, grades, hist)
