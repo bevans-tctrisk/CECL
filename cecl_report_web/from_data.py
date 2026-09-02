@@ -680,6 +680,32 @@ def build_mgmt_adj_summary(client_name: str, snapshot_date: str, config: dict,
                      sections=[TableSection(columns=cols, rows=rows)])
 
 
+def build_impaired_loans(client_name: str, snapshot_date: str, config: dict,
+                         hist: dict | None = None, df: Any = None,
+                         grades: Any = None) -> TablePage | None:
+    """Impaired Loans - ASC 310-10: the specifically identified allowance by
+    impairment category, from the ACL Env impaired data."""
+    import report_vizo as _rv
+
+    acl_pools, acl_summary, acl_impaired = _acl_data(
+        config, snapshot_date, hist, df, grades)
+    if not acl_impaired:
+        return None
+    cu = (config or {}).get("credit_union") or client_name
+    rows = [[TableCell(k, "text", align="left"), TableCell(v, "currency")]
+            for k, v in acl_impaired.items()]
+    if "total_spec_allow" in acl_summary:
+        rows.append([
+            TableCell("Total Specifically Identified Allowance", "text",
+                      bold=True, align="left"),
+            TableCell(acl_summary.get("total_spec_allow"), "currency", bold=True)])
+    return TablePage(
+        credit_union=cu, title="Impaired Loans - ASC 310-10",
+        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        sections=[TableSection(columns=["Impairment Category", "Allowance"],
+                               rows=rows)])
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -717,4 +743,8 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                       df=df, grades=grades)
         if mgmt is not None:
             pages.append(("table_page.html", {"page": mgmt}, True))
+        impaired = build_impaired_loans(client_name, snapshot_date, config, hist,
+                                        df=df, grades=grades)
+        if impaired is not None:
+            pages.append(("table_page.html", {"page": impaired}, False))
     return {"cover": cover, "pages": pages}
