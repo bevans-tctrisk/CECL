@@ -468,6 +468,80 @@ def risk_change_ncc_chart(df: Any, grades: Any, config: dict) -> list[ChartSpec]
         value_format="pct")]
 
 
+def impr_deter_charts(df: Any, grades: Any, config: dict,
+                      hist: dict | None = None) -> list[ChartSpec]:
+    """The four Impr Deter charts: Improved/Deteriorated by grade (%), the
+    Improved/Deteriorated diverging bar by pool, and Net Change by pool."""
+    import report_vizo as _rv
+    from cecl_engine import risk_change_matrix
+
+    no_score = (config or {}).get("no_score_label", "Not Reported")
+    _imp = (hist or {}).get("impaired", {}) or {}
+    gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
+    chart_grades = [g for g in gl if g != no_score]
+
+    # Grade-level improved/deteriorated: WARM Executive Summary (3) if present,
+    # else derived from the migration matrix (same rule as the Risk Change grid).
+    es3 = _imp.get("exec_summary_3") or {}
+    if es3:
+        grade_imp = {g: float((es3.get("improved") or {}).get(g, 0) or 0)
+                     for g in chart_grades}
+        grade_det = {g: float((es3.get("deteriorated") or {}).get(g, 0) or 0)
+                     for g in chart_grades}
+    else:
+        matrix = risk_change_matrix(df, grades, no_score)
+        n_top = int((config or {}).get("top_grades_double_drop", 3))
+        grade_imp = {g: 0.0 for g in chart_grades}
+        grade_det = {g: 0.0 for g in chart_grades}
+        for j, og in enumerate(gl):
+            for i, cg in enumerate(gl):
+                v = float(_rv._matrix_val(matrix, cg, og) or 0.0)
+                if i > j:
+                    if not (j < n_top and (i - j) < 2) and og in grade_det:
+                        grade_det[og] += v
+                elif i < j and og in grade_imp:
+                    grade_imp[og] += v
+    imp_tot = sum(grade_imp.values()) or 0.0
+    det_tot = sum(grade_det.values()) or 0.0
+    imp_pct_g = [(grade_imp[g] / imp_tot if imp_tot else 0.0) for g in chart_grades]
+    det_pct_g = [(grade_det[g] / det_tot if det_tot else 0.0) for g in chart_grades]
+
+    # Pool-level improved / deteriorated (negative) / net, risk-rated pools only.
+    _rr = _imp.get("risk_rated", {}) or {}
+    names, p_imp, p_det, p_net = [], [], [], []
+    for pool in _rv._ordered_pools(df, hist):
+        pdf = df[df["loan_pool"] == pool]
+        if _rr.get(pool, True):
+            ip, dp, npct = _rv._ncc(pdf, grades, config)
+        else:
+            ip, dp, npct = 0.0, 0.0, 0.0
+        names.append(pool)
+        p_imp.append(float(ip)); p_det.append(-float(dp)); p_net.append(float(npct))
+
+    specs: list[ChartSpec] = []
+    if chart_grades:
+        specs.append(ChartSpec(
+            kind="column", title="Improved Loans", categories=chart_grades,
+            series=[{"name": "Improved", "values": imp_pct_g, "colors": ["0D4D5E"]}],
+            value_format="pct"))
+        specs.append(ChartSpec(
+            kind="column", title="Deteriorated Loans", categories=chart_grades,
+            series=[{"name": "Deteriorated", "values": det_pct_g, "colors": ["873A3A"]}],
+            value_format="pct"))
+    if names:
+        specs.append(ChartSpec(
+            kind="diverging_bar", title="Improved / Deteriorated Loans",
+            categories=names,
+            series=[{"name": "Improved", "values": p_imp, "colors": ["0D4D5E"]},
+                    {"name": "Deteriorated", "values": p_det, "colors": ["873A3A"]}],
+            value_format="pct"))
+        specs.append(ChartSpec(
+            kind="bar_h", title="Net Change", categories=names,
+            series=[{"name": "Net", "values": p_net, "colors": ["829901"]}],
+            value_format="pct"))
+    return specs
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -490,7 +564,9 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
     if not supplemental:
         impd = build_impr_deter(client_name, snapshot_date, config, hist,
                                df=df, grades=grades)
-        pages.append(("impr_deter.html", {"page": impd, "charts": []}, False))
+        impd_charts = (render_chart_specs(impr_deter_charts(df, grades, config, hist))
+                       if df is not None else [])
+        pages.append(("impr_deter.html", {"page": impd, "charts": impd_charts}, False))
         acl = build_acl_env(client_name, snapshot_date, config, hist,
                            df=df, grades=grades)
         if acl is not None:
