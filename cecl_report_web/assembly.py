@@ -27,6 +27,57 @@ _LANDSCAPE_HINTS = ("risk change", "acl env", "hist bal", "co-recov", "co recov"
 _WIDE_COL_THRESHOLD = 12
 
 
+def _pdf_escape(s: str) -> str:
+    return s.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+
+
+def _number_overlay(width: float, height: float, text: str,
+                    font_size: int = 9) -> bytes:
+    """Build a one-page PDF (matching width/height) whose only content is
+    *text* centred near the bottom margin, drawn in base-14 Helvetica so no
+    font embedding is needed. Used to stamp "Page X of N" post-merge."""
+    tw = len(text) * font_size * 0.5  # Helvetica ~0.5em average advance
+    x = max(0.0, (width - tw) / 2.0)
+    y = 22.0  # points up from the page bottom
+    stream = (f"BT /F1 {font_size} Tf 0.33 0.33 0.31 rg "
+              f"{x:.2f} {y:.2f} Td ({_pdf_escape(text)}) Tj ET").encode("latin-1")
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.2f} {height:.2f}] "
+         f"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>").encode("latin-1"),
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n"
+        + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for i, o in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + o + b"\nendobj\n"
+    xref_pos = len(out)
+    out += b"xref\n0 " + str(len(objs) + 1).encode() + b"\n0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (b"trailer\n<< /Size " + str(len(objs) + 1).encode()
+            + b" /Root 1 0 R >>\nstartxref\n" + str(xref_pos).encode()
+            + b"\n%%EOF")
+    return out
+
+
+def _stamp_page_numbers(writer) -> None:
+    """Overlay 'Page X of N' onto every page of a PdfWriter, in place."""
+    from pypdf import PdfReader
+
+    total = len(writer.pages)
+    for idx, page in enumerate(writer.pages, start=1):
+        box = page.mediabox
+        overlay = PdfReader(io.BytesIO(_number_overlay(
+            float(box.width), float(box.height),
+            f"Page {idx} of {total}"))).pages[0]
+        page.merge_page(overlay)
+
+
 def find_report(ws_root: str | Path, credit_union: str, snapshot: str,
                 *, supplemental: bool = False) -> Path | None:
     """Locate the generated Vizo workbook for a CU/period."""
@@ -138,6 +189,7 @@ def render_report_pdf(report_path: str | Path, cu: str, snap: str,
         reader = PdfReader(io.BytesIO(pdf_bytes))
         for pg in reader.pages:
             writer.add_page(pg)
+    _stamp_page_numbers(writer)
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()
@@ -198,6 +250,7 @@ def render_report_pdf_from_data(client_name: str, snapshot_date: str,
             R.render_pdf(p["full"], landscape=p["landscape"])))
         for pg in reader.pages:
             writer.add_page(pg)
+    _stamp_page_numbers(writer)
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()
