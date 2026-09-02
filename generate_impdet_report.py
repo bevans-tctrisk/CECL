@@ -1108,6 +1108,42 @@ def _load_extract_enrichment(config, workspace_root, snap=None):
     return enrich
 
 
+def warn_stale_credit_pull(config, snap):
+    """Print a WARNING when the configured credit pull is materially older than
+    the report snapshot.
+
+    The 'current' credit score / grade — and therefore the entire
+    improved-vs-deteriorated migration classification — comes from the credit
+    pull. A pull more than one quarter older than the report period means those
+    'current' figures are stale, which is easy to miss because the loan
+    balances themselves are current. Threshold: > 3 months (one quarter).
+    """
+    cp = config.get('credit_pull') or {}
+    asof = cp.get('pull_as_of_date')
+    if not asof:
+        m = re.search(r'(20\d{2})[-_ ](\d{1,2})',
+                      str(cp.get('uploaded_filename') or ''))
+        if m:
+            asof = f"{m.group(1)}-{int(m.group(2)):02d}-01"
+    if not asof:
+        return
+    try:
+        pull_ts = pd.Timestamp(asof)
+        snap_ts = pd.Timestamp(snap)
+    except Exception:  # noqa: BLE001
+        return
+    months = (snap_ts.year - pull_ts.year) * 12 + (snap_ts.month - pull_ts.month)
+    if months > 3:
+        print(
+            f"  WARNING: credit pull is {months} months older than the report "
+            f"period ({pull_ts.date()} vs snapshot {snap_ts.date()}). The "
+            f"'Current Credit Score', 'Current Credit Grade' and the "
+            f"improved/deteriorated classification are based on this STALE "
+            f"pull. Upload a current credit pull and re-import the period to "
+            f"refresh them."
+        )
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Main orchestration
 # ═══════════════════════════════════════════════════════════════════
@@ -1126,6 +1162,8 @@ def generate_report(client, snap=None):
         return
 
     print(f"Generating Improved/Deteriorated report for {cu}, period ending {snap}")
+
+    warn_stale_credit_pull(config, snap)
 
     # ── Try to load rich data from WARM "All Loans" tab ──────────
     warm_path = find_warm_file(config, snap)
