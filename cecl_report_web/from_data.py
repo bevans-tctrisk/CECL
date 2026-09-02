@@ -28,6 +28,8 @@ from .model import (
     KeyValueRow,
     MatrixCell,
     MatrixRow,
+    NarrativePage,
+    NarrativeSection,
     RiskChangeMatrix,
     RiskChangePage,
     TableCell,
@@ -706,6 +708,43 @@ def build_impaired_loans(client_name: str, snapshot_date: str, config: dict,
                                rows=rows)])
 
 
+def build_introduction(client_name: str, config: dict) -> NarrativePage:
+    """Static Appendix - Credit Migration / CECL methodology narrative."""
+    cu = (config or {}).get("credit_union") or client_name
+    return NarrativePage(
+        credit_union=cu, title="Appendix - Credit Migration",
+        sections=[
+            NarrativeSection("Credit Migration", (
+                "Credit Migration describes the movement of individual loans through the "
+                "credit scoring system. Each loan is assigned a risk grade based on the "
+                "borrower's credit score at origination and the most recent credit score. "
+                "When the current score differs from the original score, the loan has "
+                "\"migrated\" - either improving (higher score) or deteriorating (lower "
+                "score). This migration forms the basis for assessing changes in portfolio "
+                "risk.")),
+            NarrativeSection("CECL Methodology", (
+                "Under the Current Expected Credit Losses (CECL) standard, institutions must "
+                "estimate lifetime expected credit losses on financial assets measured at "
+                "amortized cost. The Credit Migration methodology uses the Weighted Average "
+                "Remaining Maturity (WARM) approach to estimate these losses, incorporating "
+                "historical loss experience, current conditions, and reasonable and "
+                "supportable forecasts.")),
+        ])
+
+
+def build_exec_summary_narrative(client_name: str, config: dict) -> NarrativePage:
+    """Static Appendix - Executive Summary narrative."""
+    cu = (config or {}).get("credit_union") or client_name
+    return NarrativePage(
+        credit_union=cu, title="Appendix - Executive Summary",
+        sections=[NarrativeSection("Executive Summary", (
+            "The Executive Summary provides an overview of the credit union's current "
+            "portfolio risk position. It includes the CECL Adjustment calculation showing "
+            "the relationship between pooled allowance, specifically identified allowance, "
+            "total allowance needed, and the current ACL balance. The summary also presents "
+            "improved and deteriorated loan totals by portfolio segment."))])
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -747,4 +786,8 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                         df=df, grades=grades)
         if impaired is not None:
             pages.append(("table_page.html", {"page": impaired}, False))
+        pages.append(("narrative.html",
+                      {"page": build_introduction(client_name, config)}, False))
+        pages.append(("narrative.html",
+                      {"page": build_exec_summary_narrative(client_name, config)}, False))
     return {"cover": cover, "pages": pages}

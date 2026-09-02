@@ -271,3 +271,21 @@ class TablePage:
     heading_lines: list[str] = field(default_factory=list)
     sections: list[TableSection] = field(default_factory=list)
 
+
+@dataclass
+class NarrativeSection:
+    """A heading + prose paragraph on a narrative page."""
+
+    heading: str
+    body: str
+
+
+@dataclass
+class NarrativePage:
+    """A text-only appendix page (Introduction, Executive Summary, ...)."""
+
+    credit_union: str
+    title: str
+    sections: list[NarrativeSection] = field(default_factory=list)
+
+

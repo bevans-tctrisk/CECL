@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} — {{ page.credit_union }}{% endblock %}
+{% block body %}
+<section class="page narrative-page">
+
+  <header class="rpt-header">
+    <div class="rpt-cu">{{ page.credit_union }}</div>
+    <div class="rpt-subhead">{{ page.title }}</div>
+  </header>
+
+  {% for sec in page.sections %}
+  <h3 class="narr-heading">{{ sec.heading }}</h3>
+  <p class="narr-body">{{ sec.body }}</p>
+  {% endfor %}
+
+</section>
+{% endblock %}
