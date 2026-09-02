@@ -431,6 +431,43 @@ def risk_change_charts(hist: dict | None, pool_name: str | None = None) -> list[
     return specs
 
 
+def _ncc_totals(df: Any, grades: Any, config: dict) -> tuple[float, float, float, float]:
+    """(improved, deteriorated, unchanged, total) balances from the matrix,
+    using the same migration-state rule as the Risk Change grid."""
+    import report_vizo as _rv
+    from cecl_engine import risk_change_matrix
+
+    no_score = (config or {}).get("no_score_label", "Not Reported")
+    n_top = int((config or {}).get("top_grades_double_drop", 3))
+    gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
+    matrix = risk_change_matrix(df, grades, no_score)
+    total = float(df["current_balance"].sum())
+    imp = det = 0.0
+    for i, g in enumerate(gl):
+        for j, og in enumerate(gl):
+            v = float(_rv._matrix_val(matrix, g, og) or 0.0)
+            st = _cell_state(i, j, g, og, no_score, n_top)
+            if st == "improved":
+                imp += v
+            elif st == "deteriorated":
+                det += v
+    return imp, det, max(0.0, total - imp - det), total
+
+
+def risk_change_ncc_chart(df: Any, grades: Any, config: dict) -> list[ChartSpec]:
+    """Net Credit Change doughnut (Improved / Deteriorated / Unchanged)."""
+    imp, det, unc, total = _ncc_totals(df, grades, config)
+    if total <= 0:
+        return []
+    return [ChartSpec(
+        kind="doughnut", title="Net Credit Change",
+        categories=["Improved", "Deteriorated", "Unchanged"],
+        series=[{"name": "NCC",
+                 "values": [imp / total, det / total, unc / total],
+                 "colors": list(_NCC_COLORS)}],
+        value_format="pct")]
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -447,7 +484,8 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
     ]
     if df is not None and not supplemental:
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
-        rc_charts = render_chart_specs(risk_change_charts(hist))
+        rc_charts = render_chart_specs(
+            risk_change_ncc_chart(df, grades, config) + risk_change_charts(hist))
         pages.append(("risk_change.html", {"page": rc, "charts": rc_charts}, True))
     if not supplemental:
         impd = build_impr_deter(client_name, snapshot_date, config, hist,
