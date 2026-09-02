@@ -70,6 +70,7 @@ tfoot { display: table-footer-group; }
 }
 .narrative-page .narr-body {
   font-size: 11pt; line-height: 1.5; margin: 0 0 6pt; max-width: 7.2in;
+  white-space: pre-line;
 }
 
 /* ---- Cover page (mirrors sheet_cover_vizo: centered, 2 logos) ---- */

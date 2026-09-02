@@ -708,6 +708,51 @@ def build_impaired_loans(client_name: str, snapshot_date: str, config: dict,
                                rows=rows)])
 
 
+def build_report_index(client_name: str, config: dict,
+                       supplemental: bool = False) -> NarrativePage:
+    """Static Report Index / overview page (ports report_vizo._sheet_report_index)."""
+    cu = (config or {}).get("credit_union") or client_name
+    if supplemental:
+        return NarrativePage(
+            credit_union=cu, title="Report Index",
+            sections=[
+                NarrativeSection("Report Overview", (
+                    "The CECL Credit Migration Supplemental Reports from TCT, Inc. "
+                    "presents the historical details of the changing nature of risk in "
+                    "the credit union\u2019s loan portfolio.")),
+                NarrativeSection("Supplemental Reporting Package:", (
+                    "Historical Loan Balances by Credit Score\n"
+                    "Loss Factor Historical Detail\n"
+                    "Charge off and Recoveries Historical Detail\n"
+                    "Balance Adjustment Detail")),
+            ])
+    return NarrativePage(
+        credit_union=cu, title="Report Index",
+        sections=[
+            NarrativeSection("Report Overview", (
+                "The CECL Credit Migration Reports from TCT, Inc. presents a comprehensive "
+                "picture of the changing nature of risk in the credit union\u2019s loan "
+                "portfolio. Credit migration is measured by the improvement or "
+                "deterioration of risk, measured by the credit score, from the date of "
+                "loan funding to the most recent data pull.  New credit scores are "
+                "typically pulled twice per year.  Migration may still be measured on a "
+                "quarterly basis to take into account new loans and changing loan "
+                "balances.")),
+            NarrativeSection("Executive Summary", (
+                "CECL Adjustment  & Improved/Deteriorated\n"
+                "Improved & Deteriorated Loans Risk Change By Credit Score")),
+            NarrativeSection("Detailed Reporting", (
+                "Allowance & Provision for Credit Loss Reserve Analysis\n"
+                "Risk Change by Credit Score - Total Loans\n"
+                "Risk Change by Credit Score - Loan Pools\n"
+                "Environmental Factor Provision for Loan Loss\n"
+                "Loss Factor Calculation\n"
+                "Delinquency Calculation\n\n"
+                "Additional detailed reporting located in the Supplemental Reporting "
+                "Package")),
+        ])
+
+
 def build_introduction(client_name: str, config: dict) -> NarrativePage:
     """Static Appendix - Credit Migration / CECL methodology narrative."""
     cu = (config or {}).get("credit_union") or client_name
@@ -969,6 +1014,216 @@ def build_co_recov_dq(client_name: str, snapshot_date: str, config: dict,
         sections=sections)
 
 
+def build_loss_factor(client_name: str, snapshot_date: str, config: dict,
+                      hist: dict | None = None, df: Any = None,
+                      grades: Any = None) -> TablePage | None:
+    """Display HIst Bal -- Loss Factor Calculation.  Per-grade annual average
+    balances across the WARM window plus each grade's Life Loss Rate,
+    Distribution Factor, ACL Base Loss Rate and % of Loans.  Ported from
+    report_vizo._sheet_loss_factor (left balance grid + right rate summary
+    combined into one wide table for the PDF).
+    """
+    import report_vizo as _rv
+
+    if df is None:
+        return None
+    cfg = config or {}
+    cu = cfg.get("credit_union") or client_name
+    no_score = cfg.get("no_score_label", "Not Reported")
+    gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
+    brr_labels = _rv._brr_grade_labels(cfg, no_score)
+    brr_pool_lcs = _rv._brr_pools_set(cfg) if brr_labels else set()
+
+    pools = _rv._ordered_pools(df, hist)
+    if not pools:
+        return None
+    h = hist or {}
+    co_data = h.get("chargeoffs", {})
+    rc_data = h.get("recoveries", {})
+    avg_bals = h.get("avg_balances", {})
+    years = h.get("years", [])
+    _imp = h.get("impaired", {}) or {}
+    acl_months_map = _imp.get("acl_months", {})
+    snap_year = int(snapshot_date[:4])
+    snap_month = int(snapshot_date[5:7])
+    if pools and years:
+        _max_lol = max(acl_months_map.get(p, 36) for p in pools)
+        _abs_first = (snap_year * 12 + snap_month) - _max_lol + 1
+        _cutoff = (_abs_first - 1) // 12
+        years = [y for y in years if y >= _cutoff]
+    num_years = len(years)
+
+    hbd = _imp.get("hist_bal_data", {})
+    annual_grade_avg: dict = {}
+    for _pk, pdata in hbd.items():
+        _dates = pdata.get("dates", [])
+        _grades_data = pdata.get("grades", {})
+        annual_grade_avg[_pk] = {}
+        for _gk, _vals in _grades_data.items():
+            if _gk.upper().startswith("HIDE"):
+                continue
+            yr_sums: dict = {}
+            yr_cnts: dict = {}
+            for _i, _d in enumerate(_dates):
+                if _i < len(_vals) and _vals[_i] > 0:
+                    yr_sums[_d.year] = yr_sums.get(_d.year, 0) + _vals[_i]
+                    yr_cnts[_d.year] = yr_cnts.get(_d.year, 0) + 1
+            for _y in yr_sums:
+                annual_grade_avg[_pk].setdefault(_y, {})
+                annual_grade_avg[_pk][_y][_gk] = yr_sums[_y] / yr_cnts[_y]
+
+    def _pool_earliest_year(pool):
+        pool_acl = acl_months_map.get(pool, 36)
+        abs_first = (snap_year * 12 + snap_month) - pool_acl + 1
+        return (abs_first - 1) // 12
+
+    warm_net_co = _imp.get("warm_net_co", {})
+    pool_life_rates: dict = {}
+    pool_avg_totals: dict = {}
+    for pool in pools:
+        pe = _pool_earliest_year(pool)
+        pa = annual_grade_avg.get(pool, {})
+        yr_tots = []
+        for y in years:
+            if y < pe:
+                continue
+            yt = sum(pa.get(y, {}).values())
+            if not yt:
+                yt = avg_bals.get(y, {}).get(pool, 0)
+            if yt:
+                yr_tots.append(yt)
+        avg_tot = sum(yr_tots) / len(yr_tots) if yr_tots else 0
+        pool_avg_totals[pool] = avg_tot
+        pool_stripped = pool.strip()
+        net_co_match = warm_net_co.get(pool_stripped, warm_net_co.get(pool, None))
+        if net_co_match is not None:
+            total_net = net_co_match
+        else:
+            total_net = 0
+            for y in years:
+                if y < pe:
+                    continue
+                total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
+                    - abs(rc_data.get(y, {}).get(pool, 0) or 0)
+        pool_life_rates[pool] = total_net / avg_tot if avg_tot > 0 else 0
+
+    year_strs = [str(y) for y in years]
+    year_labels = list(year_strs)
+    if year_labels:
+        year_labels[-1] = f"YTD {year_strs[-1]}"
+    cols = (["Current Grade"] + year_labels
+            + ["Average Balance", "Life Loss Rate", "Distribution Factor",
+               "ACL Base Loss Rate", "% of Loans", "WARM Months"])
+    width = len(cols)
+
+    def _row(first, year_cells, tail, bold=False):
+        cells = [first]
+        cells += year_cells + [TableCell(None)] * (num_years - len(year_cells))
+        cells += tail
+        cells += [TableCell(None)] * (width - len(cells))
+        return cells
+
+    risk_rated_map = _imp.get("risk_rated", {})
+    rows: list[list[TableCell]] = []
+    for pool in pools:
+        pool_earliest = _pool_earliest_year(pool)
+        rows.append(_row(TableCell(pool, "text", bold=True, align="left"), [], []))
+        pdf = df[df["loan_pool"] == pool]
+        pool_total = pdf["current_balance"].sum()
+        pool_ll = pool_life_rates.get(pool, 0)
+        is_rr = risk_rated_map.get(pool, True)
+        pool_annual = annual_grade_avg.get(pool, {})
+
+        if not is_rr:
+            yc = []
+            for yi in range(num_years):
+                if years[yi] < pool_earliest:
+                    yc.append(TableCell(None))
+                    continue
+                yt = sum(pool_annual.get(years[yi], {}).values()) \
+                    or avg_bals.get(years[yi], {}).get(pool, 0)
+                yc.append(TableCell(yt, "currency") if yt else TableCell(None))
+            nrr_avg = pool_avg_totals.get(pool, 0)
+            warm = acl_months_map.get(pool, cfg.get("warm_months", {}).get(pool, 36))
+            rows.append(_row(
+                TableCell("Total", "text", bold=True, align="left"), yc,
+                [TableCell(nrr_avg, "currency", bold=True),
+                 TableCell(pool_ll, "pct2", bold=True),
+                 TableCell(None), TableCell(None),
+                 TableCell(1.0, "pct2", bold=True),
+                 TableCell(warm, "text", align="center")]))
+            continue
+
+        pool_grade_labels = (
+            brr_labels if (brr_labels and _rv._is_brr_pool(pool, brr_pool_lcs)) else gl)
+        for gi, g in enumerate(pool_grade_labels):
+            g_df = pdf[pdf["current_grade"] == g]
+            balance = g_df["current_balance"].sum()
+            yr_vals = []
+            yc = []
+            for yi in range(num_years):
+                if years[yi] < pool_earliest:
+                    yc.append(TableCell(None))
+                    continue
+                grade_avg = pool_annual.get(years[yi], {}).get(g, 0)
+                if not grade_avg:
+                    avg = avg_bals.get(years[yi], {}).get(pool, 0)
+                    grade_avg = avg * (balance / pool_total) if pool_total and avg else 0
+                if grade_avg:
+                    yr_vals.append(grade_avg)
+                    yc.append(TableCell(grade_avg, "currency"))
+                else:
+                    yc.append(TableCell(None))
+            avg_bal = sum(yr_vals) / len(yr_vals) if yr_vals else 0
+            dist = (_rv._dist_factor(len(_rv.DIST_FACTORS) - 1)
+                    if g == no_score else _rv._dist_factor(gi))
+            base_rate = max(0, pool_ll * dist)
+            pct_pool = balance / pool_total if pool_total else 0
+            warm_cell = (TableCell(
+                acl_months_map.get(pool, cfg.get("warm_months", {}).get(pool, 36)),
+                "text", align="center") if gi == 0 else TableCell(None))
+            rows.append(_row(
+                TableCell(g, "text", align="left"), yc,
+                [TableCell(avg_bal, "currency"),
+                 TableCell(pool_ll, "pct2"), TableCell(dist, "pct2"),
+                 TableCell(base_rate, "pct2"), TableCell(pct_pool, "pct2"),
+                 warm_cell]))
+
+        yc = []
+        for yi in range(num_years):
+            if years[yi] < pool_earliest:
+                yc.append(TableCell(None))
+                continue
+            yr_total = sum(pool_annual.get(years[yi], {}).values()) \
+                or avg_bals.get(years[yi], {}).get(pool, 0)
+            yc.append(TableCell(yr_total, "currency", bold=True) if yr_total else TableCell(None))
+        rr_avg = pool_avg_totals.get(pool, 0)
+        rows.append(_row(
+            TableCell("Total", "text", bold=True, align="left"), yc,
+            [TableCell(rr_avg, "currency", bold=True),
+             TableCell(pool_ll, "pct2", bold=True),
+             TableCell(None), TableCell(None),
+             TableCell(1.0, "pct2", bold=True), TableCell(None)]))
+
+    yc = []
+    for yi in range(num_years):
+        ytot = sum(sum(annual_grade_avg.get(p, {}).get(years[yi], {}).values())
+                   for p in pools)
+        yc.append(TableCell(ytot, "currency", bold=True) if ytot else TableCell(None))
+    grand_avg = sum(pool_avg_totals.get(p, 0) for p in pools)
+    rows.append(_row(
+        TableCell("Grand Total", "text", bold=True, align="left"), yc,
+        [TableCell(grand_avg, "currency", bold=True),
+         TableCell(None), TableCell(None), TableCell(None),
+         TableCell(1.0, "pct2", bold=True), TableCell(None)]))
+
+    return TablePage(
+        credit_union=cu,
+        title="Loss Factor Calculation",
+        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        sections=[TableSection(columns=cols, rows=rows)])
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -983,6 +1238,9 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
     pages: list[tuple[str, dict, bool]] = [
         ("cover.html", {"cover": cover}, False),
     ]
+    if not supplemental:
+        pages.append(("narrative.html",
+                      {"page": build_report_index(client_name, config)}, False))
     if df is not None and not supplemental:
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
         rc_charts = render_chart_specs(
@@ -1002,6 +1260,10 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                df=df, grades=grades)
         if env is not None:
             pages.append(("table_page.html", {"page": env}, True))
+        loss = build_loss_factor(client_name, snapshot_date, config, hist,
+                                 df=df, grades=grades)
+        if loss is not None:
+            pages.append(("table_page.html", {"page": loss}, True))
         codq = build_co_recov_dq(client_name, snapshot_date, config, hist,
                                  df=df, grades=grades)
         if codq is not None:
