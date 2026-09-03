@@ -86,7 +86,7 @@ tfoot { display: table-footer-group; }
 .summary-variance-page .sv-measures {
   width: 5.6in; margin: 0 auto; border-collapse: collapse; font-size: 13pt;
 }
-.summary-variance-page .sv-measures td { padding: 4pt 12pt; }
+.summary-variance-page .sv-measures td { padding: 1.5pt 12pt; }
 .summary-variance-page .sv-m-label { text-align: left; }
 .summary-variance-page .sv-m-value {
   text-align: right; font-variant-numeric: tabular-nums;
