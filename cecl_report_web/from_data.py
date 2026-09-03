@@ -657,6 +657,20 @@ def build_mgmt_adj_summary(client_name: str, snapshot_date: str, config: dict,
     heading = [f"For Quarter Ending {_rv._snap_display(snapshot_date)}"]
     title = "Management & Environmental Adjustments"
 
+    # Base management adjustment rate driving each pool's per-grade adjustments:
+    # the pool's manual overlay, else the firm-wide admin default.
+    mgmt_adj_by_pool = config.get("mgmt_adj_by_pool", {}) or {}
+    admin_default = _rv._load_admin_default_mgmt_adj()
+    pool_use_default = _rv._build_pool_use_default_map(config)
+
+    def _base_mgmt(pool: str) -> float:
+        m = mgmt_adj_by_pool.get(pool, 0) or 0
+        if m:
+            return float(m)
+        if pool_use_default.get(pool, False) and admin_default:
+            return float(admin_default)
+        return 0.0
+
     def blank() -> TableCell:
         return TableCell(None)
 
@@ -687,7 +701,10 @@ def build_mgmt_adj_summary(client_name: str, snapshot_date: str, config: dict,
         rows.append([
             blank(), TableCell("Total", "text", bold=True, align="left"),
             TableCell(total.get("balance"), "currency", bold=True),
-            blank(), blank(), blank(),
+            blank(),
+            TableCell((_base_mgmt(pool) or None) if adj_grades else None,
+                      "pct2", bold=True),
+            blank(),
             TableCell(total.get("allow_before"), "currency", bold=True),
             TableCell(total.get("env_factor"), "pct", bold=True),
             TableCell(total.get("env_allow"), "currency", bold=True)])
