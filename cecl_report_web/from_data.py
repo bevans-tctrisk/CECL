@@ -1579,7 +1579,7 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
         codq = build_co_recov_dq(client_name, snapshot_date, config, hist,
                                  df=df, grades=grades)
         if codq is not None:
-            pages.append(("table_page.html", {"page": codq}, True))
+            pages.append(("table_page.html", {"page": codq}, False))
         acl_sum = build_acl_summary(client_name, snapshot_date, config, hist,
                                     df=df, grades=grades)
         if acl_sum is not None:

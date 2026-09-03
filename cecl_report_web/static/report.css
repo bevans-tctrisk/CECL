@@ -62,11 +62,14 @@ tfoot { display: table-footer-group; }
 .loss-factor .data-table th { padding: 2pt 3pt; }
 .loss-factor .data-table td { padding: 0.5pt 3pt; }
 
-/* Net Charge Off and Delinquency: tighter rows and section spacing. */
-.table-page.delinquency .data-table { font-size: 9pt; margin-bottom: 4pt; }
-.table-page.delinquency .data-table th { padding: 2pt 6pt; }
-.table-page.delinquency .data-table td { padding: 0.6pt 6pt; }
-.table-page.delinquency .tbl-section-title { margin: 6pt 0 2pt; }
+/* Net Charge Off and Delinquency: portrait, tight; each of the four tables
+   stays whole (never splits) and keeps its section title. */
+.table-page.delinquency .data-table {
+  font-size: 8pt; margin-bottom: 4pt; break-inside: avoid;
+}
+.table-page.delinquency .data-table th { padding: 1.5pt 5pt; }
+.table-page.delinquency .data-table td { padding: 0.4pt 5pt; }
+.table-page.delinquency .tbl-section-title { margin: 5pt 0 2pt; break-after: avoid; }
 
 /* ---- Summary Variance (SCALE 'Executive Summary-Vizo' banded card) ---- */
 .summary-variance-page { text-align: center; }
