@@ -1549,7 +1549,7 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
         acl = build_acl_env(client_name, snapshot_date, config, hist,
                            df=df, grades=grades)
         if acl is not None:
-            pages.append(("acl_env.html", {"page": acl, "charts": []}, True))
+            pages.append(("acl_env.html", {"page": acl, "charts": []}, False))
         env = build_env_factor(client_name, snapshot_date, config, hist,
                                df=df, grades=grades)
         if env is not None:

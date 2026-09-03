@@ -252,18 +252,18 @@ tfoot { display: table-footer-group; }
   height: 1.6in; width: auto; max-width: 100%;
 }
 
-/* ---- ACL Env by Pool (allowance calculation) ---- */
-.acl-env { font-size: 11pt; }
+/* ---- ACL Env by Pool (allowance calculation) -- portrait, compact ---- */
+.acl-env { font-size: 8pt; }
 .rpt-left { text-align: left; }
 
 .acl-table {
   border-collapse: collapse;
-  margin: 0.2in 0 0.3in 0;
+  margin: 0.12in 0 0 0;
   width: 100%;
 }
 .acl-table th, .acl-table td {
   border: none;
-  padding: 2.5pt 6pt;
+  padding: 0.6pt 4pt;
   white-space: nowrap;
 }
 .acl-table .hd {
@@ -276,11 +276,14 @@ tfoot { display: table-footer-group; }
 .acl-table .l { text-align: left; }
 .acl-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .acl-table .b { font-weight: 700; }
-.acl-table .pooled-total td { border-top: 1.5px solid #000; }
-.acl-table .indent { padding-left: 18pt; }
-.acl-table .pool-header td { padding-top: 5pt; font-size: 12pt; }
+/* Keep each pool, and the whole Pooled-Totals-and-below block, off page breaks. */
+.acl-table .pool-block, .acl-table .acl-summary-block { break-inside: avoid; }
+.acl-table .pooled-total td { border-top: 1.5px solid #000; padding-top: 2pt; }
+.acl-table .indent { padding-left: 14pt; }
+.acl-table .pool-header td { padding-top: 3pt; font-size: 9pt; }
 .acl-table .grade-row td { color: #333; }
-.acl-table .pool-total td { padding-top: 3pt; }
+.acl-table .pool-total td { padding-top: 1pt; }
+.acl-table .impaired-head td { padding-top: 6pt; }
 
 .acl-impaired {
   border-collapse: collapse;
