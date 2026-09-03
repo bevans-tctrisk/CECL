@@ -1245,11 +1245,27 @@ def build_loss_factor(client_name: str, snapshot_date: str, config: dict,
          TableCell(None), TableCell(None), TableCell(None),
          TableCell(1.0, "pct2", bold=True), TableCell(None)]))
 
+    # Group rows into per-pool blocks (+ a Grand Total block) so no pool splits
+    # across a page. A pool starts at its bold header row (label only, no data).
+    groups: list = []
+    cur: list | None = None
+    for r in rows:
+        c0 = r[0]
+        is_header = (getattr(c0, "value", None) and getattr(c0, "bold", False)
+                     and all(getattr(c, "value", None) is None for c in r[1:]))
+        is_grand = getattr(c0, "value", None) == "Grand Total"
+        if is_header or is_grand or cur is None:
+            cur = [r]
+            groups.append(cur)
+        else:
+            cur.append(r)
+
     return TablePage(
         credit_union=cu,
         title="Loss Factor Calculation",
         heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
-        sections=[TableSection(columns=cols, rows=rows)])
+        sections=[TableSection(columns=cols, row_groups=groups)],
+        css_class="loss-factor")
 
 
 def _acl_current_shape(acl_pools: dict, acl_summary: dict, acl_impaired: dict) -> dict:
@@ -1557,7 +1573,7 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
         loss = build_loss_factor(client_name, snapshot_date, config, hist,
                                  df=df, grades=grades)
         if loss is not None:
-            pages.append(("table_page.html", {"page": loss}, True))
+            pages.append(("table_page.html", {"page": loss}, False))
         codq = build_co_recov_dq(client_name, snapshot_date, config, hist,
                                  df=df, grades=grades)
         if codq is not None:

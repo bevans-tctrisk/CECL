@@ -256,6 +256,9 @@ class TableSection:
     columns: list[str] = field(default_factory=list)  # "" = blank header cell
     rows: list[list[TableCell]] = field(default_factory=list)
     title: str | None = None
+    # When set, rows are grouped into separate <tbody> blocks that never break
+    # across a page (each inner list is one group, e.g. a pool).
+    row_groups: list = field(default_factory=list)
 
 
 @dataclass
@@ -270,6 +273,7 @@ class TablePage:
     title: str
     heading_lines: list[str] = field(default_factory=list)
     sections: list[TableSection] = field(default_factory=list)
+    css_class: str = ""
     notes_title: str = ""
     notes: list[str] = field(default_factory=list)
 

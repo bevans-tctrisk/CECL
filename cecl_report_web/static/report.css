@@ -53,6 +53,14 @@ tfoot { display: table-footer-group; }
   margin: 2pt 0 8pt; padding-left: 16pt; font-size: 10.5pt; line-height: 1.45;
 }
 .table-page .tbl-notes li { margin: 0 0 3pt; }
+/* Grouped table rows (e.g. per pool) that must not split across a page. */
+.data-table .row-group { break-inside: avoid; }
+
+/* Loss Factor Calculation: portrait, very compact so all columns + pools fit. */
+.table-page.loss-factor { font-size: 7pt; }
+.loss-factor .data-table { font-size: 7pt; }
+.loss-factor .data-table th { padding: 2pt 3pt; }
+.loss-factor .data-table td { padding: 0.5pt 3pt; }
 
 /* ---- Summary Variance (SCALE 'Executive Summary-Vizo' banded card) ---- */
 .summary-variance-page { text-align: center; }
