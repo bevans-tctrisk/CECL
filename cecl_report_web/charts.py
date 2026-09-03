@@ -372,14 +372,14 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
             if i % lbl_step:
                 return ""
             cx = left + i * group_w + group_w / 2
-            txt = _esc(str(cat)[:7] if len(str(cat)) > 7 else cat)
             if rot:
+                txt = _esc(str(cat)[:7] if len(str(cat)) > 7 else cat)
                 yy = top + ph + 8
                 return (f'<text x="{cx:.1f}" y="{yy:.1f}" text-anchor="end" '
                         f'font-size="7" fill="#000" '
                         f'transform="rotate(-55 {cx:.1f} {yy:.1f})">{txt}</text>')
             return (f'<text x="{cx:.1f}" y="{top + ph + 12}" text-anchor="middle" '
-                    f'font-size="8" fill="#000">{txt}</text>')
+                    f'font-size="8" fill="#000">{_esc(str(cat))}</text>')
 
         if stacked:
             bw = min(group_w * 0.8, 40)
@@ -518,7 +518,7 @@ def _to_chassis_spec(spec: dict) -> dict | None:
     }
     if bar_dir == "bar" and grouping == "stacked":
         return {**common, "kind": "diverging_stacked_bar",
-                "value_format": "pct1", "width": 620}
+                "value_format": "pct1", "width": 620, "title_size": 22}
     if bar_dir == "col" and grouping == "clustered" and len(series) > 1:
         return {**common, "kind": "clustered_column",
                 "value_format": "currency", "width": 560, "height": 300}
