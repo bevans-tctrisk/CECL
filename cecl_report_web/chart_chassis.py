@@ -562,8 +562,8 @@ GAP = 2.0          # the surface gap between adjacent / stacked fills
 
 
 def header(frame: Frame, title: str | None, subtitle: str | None,
-           *, x: float | None = None) -> tuple[str, float]:
-    """Draw title/subtitle top-left. Returns (svg, y of the next free line)."""
+           *, x: float | None = None, anchor: str = "start") -> tuple[str, float]:
+    """Draw title/subtitle. Returns (svg, y of the next free line)."""
     if not title and not subtitle:
         return "", 0.0
     x = frame.x0 if x is None else x
@@ -571,11 +571,11 @@ def header(frame: Frame, title: str | None, subtitle: str | None,
     y = TITLE_SIZE + 2
     if title:
         parts.append(svg_text(x, y, title, size=TITLE_SIZE, weight=600,
-                              fill=THEME["ink"]))
+                              fill=THEME["ink"], anchor=anchor))
         y += SUBTITLE_SIZE + 4
     if subtitle:
         parts.append(svg_text(x, y, subtitle, size=SUBTITLE_SIZE,
-                              fill=THEME["ink_secondary"]))
+                              fill=THEME["ink_secondary"], anchor=anchor))
         y += 4
     return "".join(parts), y
 
@@ -875,7 +875,8 @@ def render_diverging_stacked_bar(spec: dict) -> str:
     row_h = float(opts.get("row_height", 22))
     legend_items = [(str(s.get("name") or f"Series {i+1}"), _color(series, i))
                     for i, s in enumerate(series)]
-    head_svg, head_y = header(Frame(w, 0), spec.get("title"), spec.get("subtitle"))
+    head_svg, head_y = header(Frame(w, 0), spec.get("title"), spec.get("subtitle"),
+                              x=w / 2, anchor="middle")
     top = max(head_y, 4) + LEGEND_SIZE + 10
     bottom = TICK_SIZE + 16
     h = float(spec.get("height") or (top + n * row_h + bottom))

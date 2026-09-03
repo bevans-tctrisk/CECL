@@ -561,13 +561,15 @@ def impr_deter_charts(df: Any, grades: Any, config: dict,
 
     specs: list[ChartSpec] = []
     if chart_grades:
+        # Improved drops the top grade (it can't improve); Deteriorated drops
+        # the bottom grade (it can't deteriorate).
         specs.append(ChartSpec(
-            kind="column", title="Improved Loans", categories=chart_grades,
-            series=[{"name": "Improved", "values": imp_pct_g, "colors": [_C_IMPROVED]}],
+            kind="column", title="Improved Loans", categories=chart_grades[1:],
+            series=[{"name": "Improved", "values": imp_pct_g[1:], "colors": [_C_IMPROVED]}],
             value_format="pct"))
         specs.append(ChartSpec(
-            kind="column", title="Deteriorated Loans", categories=chart_grades,
-            series=[{"name": "Deteriorated", "values": det_pct_g, "colors": [_C_DETERIORATED]}],
+            kind="column", title="Deteriorated Loans", categories=chart_grades[:-1],
+            series=[{"name": "Deteriorated", "values": det_pct_g[:-1], "colors": [_C_DETERIORATED]}],
             value_format="pct"))
     if names:
         specs.append(ChartSpec(

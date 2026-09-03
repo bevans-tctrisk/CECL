@@ -356,13 +356,16 @@ tfoot { display: table-footer-group; }
 /* Chart-centric pages (e.g. Impr Deter): 2x2 grid, charts fill the width.
    The Impr Deter page is landscape -- fix the grid to the available height so
    the four charts render large and stay on a single page. */
+.impr-deter .rpt-header { margin-bottom: 0.05in; }
+.impr-deter .rpt-cu { font-size: 13pt; }
+.impr-deter .rpt-subhead { font-size: 11pt; }
 .charts-grid.impr-charts {
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
-  gap: 0.15in 0.45in;
-  margin-top: 0.15in;
-  height: 6.8in;
+  gap: 0.1in 0.35in;
+  margin-top: 0.06in;
+  height: 7.0in;
 }
 .impr-charts .chart-cell {
   width: 100%; min-height: 0; overflow: hidden;
