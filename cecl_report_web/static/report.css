@@ -46,8 +46,8 @@ tfoot { display: table-footer-group; }
 
 /* ---- Generic table page (ACL Summary, Mgmt Adj, Impaired, ...) ---- */
 .table-page .tbl-section-title {
-  font-size: 12pt; font-weight: 700; color: #0D4D5E;
-  margin: 12pt 0 3pt;
+  font-size: 11pt; font-weight: 700; color: #0D4D5E;
+  margin: 7pt 0 2pt;
 }
 .table-page .tbl-notes {
   margin: 2pt 0 8pt; padding-left: 16pt; font-size: 10.5pt; line-height: 1.45;
@@ -96,16 +96,16 @@ tfoot { display: table-footer-group; }
   color: #555; text-align: left;
 }
 .data-table {
-  width: 100%; border-collapse: collapse; margin-bottom: 8pt;
-  font-size: 10.5pt;
+  width: 100%; border-collapse: collapse; margin-bottom: 4pt;
+  font-size: 9pt;
 }
 .data-table th {
   background: #0D4D5E; color: #fff; font-weight: 700;
-  padding: 4pt 6pt; text-align: center; vertical-align: middle;
+  padding: 2.5pt 6pt; text-align: center; vertical-align: middle;
   border: 0.5pt solid #0D4D5E;
 }
 .data-table td {
-  padding: 2.5pt 6pt;
+  padding: 1.2pt 6pt;
 }
 .data-table td.left { text-align: left; }
 .data-table td.right { text-align: right; }
