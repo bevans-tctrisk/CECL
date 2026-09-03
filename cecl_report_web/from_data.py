@@ -1037,9 +1037,9 @@ def build_co_recov_dq(client_name: str, snapshot_date: str, config: dict,
 
     return TablePage(
         credit_union=cu,
-        title="Delinquency Calculation",
+        title="Net Charge Off and Delinquency",
         heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
-        sections=sections)
+        sections=sections, css_class="delinquency")
 
 
 def build_loss_factor(client_name: str, snapshot_date: str, config: dict,
