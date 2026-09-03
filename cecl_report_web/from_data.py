@@ -1155,7 +1155,9 @@ def build_loss_factor(client_name: str, snapshot_date: str, config: dict,
     rows: list[list[TableCell]] = []
     for pool in pools:
         pool_earliest = _pool_earliest_year(pool)
-        rows.append(_row(TableCell(pool, "text", bold=True, align="left"), [], []))
+        # Pool title spans the whole row so it never wraps in the label column.
+        rows.append([TableCell(pool, "text", bold=True, align="left",
+                               colspan=width)])
         pdf = df[df["loan_pool"] == pool]
         pool_total = pdf["current_balance"].sum()
         pool_ll = pool_life_rates.get(pool, 0)

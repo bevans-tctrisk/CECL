@@ -96,7 +96,7 @@ tfoot { display: table-footer-group; }
   border: 0.5pt solid #0D4D5E;
 }
 .data-table td {
-  padding: 2.5pt 6pt; border: 0.5pt solid #cfd8dc;
+  padding: 2.5pt 6pt;
 }
 .data-table td.left { text-align: left; }
 .data-table td.right { text-align: right; }

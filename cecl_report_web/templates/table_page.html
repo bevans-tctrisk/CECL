@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ page.title }} — {{ page.credit_union }}{% endblock %}
-{% macro render_row(row) %}<tr>{% for cell in row %}<td class="{{ cell.align }}{% if cell.bold %} b{% endif %}">{{ cell | tcell }}</td>{% endfor %}</tr>{% endmacro %}
+{% macro render_row(row) %}<tr>{% for cell in row %}<td colspan="{{ cell.colspan }}" class="{{ cell.align }}{% if cell.bold %} b{% endif %}">{{ cell | tcell }}</td>{% endfor %}</tr>{% endmacro %}
 {% block body %}
 <section class="page table-page {{ page.css_class }}">
 

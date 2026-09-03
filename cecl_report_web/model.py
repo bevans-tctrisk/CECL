@@ -247,6 +247,7 @@ class TableCell:
     fmt: str = "text"  # text | currency | currency2 | pct | pct1 | pct2
     bold: bool = False
     align: str = "right"  # left | right | center
+    colspan: int = 1
 
 
 @dataclass
