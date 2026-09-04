@@ -480,6 +480,89 @@ def _svg_pie(values: list[float], cats: list[str], title: str | None,
     return _wrap("".join(parts), title)
 
 
+#: Distinct line colours for per-grade trend charts (up to 8 grades).
+_LINE_PALETTE = ["#0E7E9E", "#B4453F", "#6E8A00", "#E0A400",
+                 "#5F5F5F", "#8E5FA8", "#00857C", "#C77DA0"]
+
+
+def _svg_line(series: list[dict], cats: list[str], title: str | None,
+              *, width: int = 720, height: int = 250) -> str:
+    """Multi-series line chart (per-grade balance over time).  ``series`` =
+    [{"name", "values": [float|None], "color"?}], ``cats`` = x labels."""
+    import math
+
+    w, h = width, height
+    top, right, bottom, left = 40, 16, 46, 66
+    pw, ph = w - left - right, h - top - bottom
+    ncat = len(cats)
+    all_vals = [v for s in series for v in s["values"] if v is not None]
+    raw_max = max(all_vals + [0.0]) or 1.0
+
+    def _nice(x: float) -> float:
+        if x <= 0:
+            return 1.0
+        exp = math.floor(math.log10(x))
+        base = 10 ** exp
+        for m in (1, 2, 2.5, 5, 10):
+            if x <= m * base:
+                return m * base
+        return 10 * base
+
+    vmax = _nice(raw_max)
+
+    def _x(i: int) -> float:
+        return left + (i / max(1, ncat - 1)) * pw
+
+    def _y(v: float) -> float:
+        return top + ph - (v / vmax) * ph
+
+    def _abbr(v: float) -> str:
+        if v >= 1e6:
+            return f"${v/1e6:.1f}M"
+        if v >= 1e3:
+            return f"${v/1e3:.0f}K"
+        return f"${v:.0f}"
+
+    parts: list[str] = []
+    # Horizontal gridlines + y-axis tick labels.
+    for t in range(6):
+        gv = vmax * t / 5
+        gy = _y(gv)
+        parts.append(
+            f'<line x1="{left}" y1="{gy:.1f}" x2="{left + pw}" y2="{gy:.1f}" '
+            f'stroke="#e2e2e2" stroke-width="0.6"/>')
+        parts.append(
+            f'<text x="{left - 6}" y="{gy + 3:.1f}" text-anchor="end" '
+            f'font-size="8" fill="#555">{_abbr(gv)}</text>')
+    # Thinned, rotated x-axis date labels.
+    step = max(1, (ncat + 9) // 10)
+    for i, c in enumerate(cats):
+        if i % step and i != ncat - 1:
+            continue
+        cx = _x(i)
+        yy = top + ph + 12
+        parts.append(
+            f'<text x="{cx:.1f}" y="{yy:.1f}" text-anchor="end" '
+            f'font-size="7" fill="#555" '
+            f'transform="rotate(-45 {cx:.1f} {yy:.1f})">{_esc(c)}</text>')
+    # Series polylines.
+    for si, s in enumerate(series):
+        color = s.get("color") or _LINE_PALETTE[si % len(_LINE_PALETTE)]
+        pts = [f"{_x(i):.1f},{_y(v):.1f}"
+               for i, v in enumerate(s["values"]) if v is not None]
+        if pts:
+            parts.append(
+                f'<polyline fill="none" stroke="{color}" stroke-width="1.5" '
+                f'stroke-linejoin="round" points="{" ".join(pts)}"/>')
+    # Horizontal legend just under the title.
+    parts.append(_legend(
+        [(s.get("name") or f"Series {i+1}",
+          s.get("color") or _LINE_PALETTE[i % len(_LINE_PALETTE)])
+         for i, s in enumerate(series)],
+        left, top - 20, horizontal=True))
+    return _wrap("".join(parts), title, w=w, h=h)
+
+
 def _to_chassis_spec(spec: dict) -> dict | None:
     """Map a workbook chart spec onto a :mod:`chart_chassis` spec.
 
@@ -539,6 +622,11 @@ def render_chart_svg(spec: dict) -> str:
         return _svg_pie(s0.get("values", []), s0.get("cats", []), title,
                         doughnut="Doughnut" in ctype,
                         colors=s0.get("point_colors") or None)
+    if "Line" in ctype:
+        cats = series[0].get("cats", []) if series else []
+        return _svg_line(series, cats, title,
+                         width=int(spec.get("width") or 720),
+                         height=int(spec.get("height") or 250))
     # Bar/column chart.
     cats = series[0]["cats"] if series else []
     horizontal = spec.get("bar_dir") == "bar"

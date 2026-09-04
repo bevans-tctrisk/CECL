@@ -406,6 +406,16 @@ def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
                 "label_fmt": lbl_fmt, "show_labels": True,
             }],
         }
+    if cs.kind == "line":
+        return {
+            "type": "LineChart", "title": cs.title,
+            "width": 760, "height": 218,
+            "series": [{
+                "name": s.get("name"), "values": s.get("values") or [],
+                "cats": list(cs.categories),
+                "color": (s.get("colors") or [None])[0],
+            } for s in cs.series],
+        }
     bar_dir = "bar" if cs.kind in ("bar_h", "diverging_bar") else "col"
     grouping = "stacked" if cs.kind == "diverging_bar" else "clustered"
     return {
@@ -1534,6 +1544,185 @@ def build_change_analysis(client_name: str, snapshot_date: str, config: dict,
         notes_title="Analysis of Significant Changes", notes=notes)
 
 
+def build_bal_adjust_detail(client_name: str, snapshot_date: str, config: dict,
+                            hist: dict | None = None, df: Any = None,
+                            grades: Any = None) -> TablePage | None:
+    """Supplemental Pool_Balance Adjust -- Balance Adjustment Detail.  For each
+    pool, every grade's Loan Report Balance, Bal Adjustment and Balance Sheet
+    Total, a pool Total, and a final Grand Totals row.  Ported from
+    report_vizo._sheet_bal_adjust.  Data comes from the WARM Risk Change Data
+    Entry tab (hist['impaired']['pool_bal_detail'])."""
+    import report_vizo as _rv
+
+    if df is None:
+        return None
+    cfg = config or {}
+    cu = cfg.get("credit_union") or client_name
+    no_score = cfg.get("no_score_label", "Not Reported")
+    gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
+    _imp = (hist or {}).get("impaired", {}) or {}
+    detail = _imp.get("pool_bal_detail", {}) or {}
+    if not detail:
+        return None
+    risk_rated = _imp.get("risk_rated", {})
+    warm_order = _imp.get("pool_order", [])
+    df_pools = set(df["loan_pool"].unique())
+    if warm_order:
+        pools = [p for p in warm_order if p in df_pools or p in detail]
+    else:
+        pools = sorted(df_pools)
+
+    def _lookup(pool_name):
+        plc = pool_name.strip().lower()
+        for k, v in detail.items():
+            if k.strip().lower() == plc:
+                return v
+        return {}
+
+    cols = ["Current Grade", "Loan Report Balance", "Bal Adjustment",
+            "Balance Sheet Total"]
+    width = len(cols)
+    groups: list = []
+    g_loan = g_adj = g_bst = 0.0
+    for pool in pools:
+        pdata = _lookup(pool)
+        is_rr = risk_rated.get(pool, True)
+        grp = [[TableCell(pool, "text", bold=True, align="left", colspan=width)]]
+        if is_rr:
+            for g in gl:
+                gd = pdata.get(g, {})
+                grp.append([
+                    TableCell(g, "text", align="left"),
+                    TableCell(gd.get("loan_report_bal", 0.0), "currency"),
+                    TableCell(gd.get("bal_adj", 0.0), "currency"),
+                    TableCell(gd.get("balance_sheet_total", 0.0), "currency")])
+        td = pdata.get("Total", {})
+        t_loan = float(td.get("loan_report_bal", 0.0) or 0.0)
+        t_adj = float(td.get("bal_adj", 0.0) or 0.0)
+        t_bst = float(td.get("balance_sheet_total", 0.0) or 0.0)
+        grp.append([
+            TableCell("Total", "text", bold=True, align="left"),
+            TableCell(t_loan, "currency", bold=True),
+            TableCell(t_adj, "currency", bold=True),
+            TableCell(t_bst, "currency", bold=True)])
+        groups.append(grp)
+        g_loan += t_loan
+        g_adj += t_adj
+        g_bst += t_bst
+
+    groups.append([[
+        TableCell("Grand Totals", "text", bold=True, align="left"),
+        TableCell(g_loan, "currency", bold=True),
+        TableCell(g_adj, "currency", bold=True),
+        TableCell(g_bst, "currency", bold=True)]])
+
+    return TablePage(
+        credit_union=cu,
+        title="Balance Adjustment Detail",
+        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        sections=[TableSection(columns=cols, row_groups=groups)],
+        css_class="bal-adjust")
+
+
+def build_supplemental_appendix(client_name: str, config: dict) -> NarrativePage:
+    """Supplemental Appendix - Historical Loan Balances narrative.  Ported from
+    report_vizo._sheet_appendix_supp (the completed narrative paragraphs)."""
+    cu = (config or {}).get("credit_union") or client_name
+    return NarrativePage(
+        credit_union=cu, title="Appendix - Historical Loan Balances",
+        sections=[
+            NarrativeSection("Historical Loan Balances by Most Recent Credit Score", (
+                "Concentrations of loans in pools and grades are important indicators of "
+                "risk.  The dynamic nature of credit scores means that grade concentration "
+                "may change consistently from quarter to quarter.  The deterioration of "
+                "loans may lead to higher concentrations of loans in lower credit ranges "
+                "without any additional funding of loans in those ranges.  Improvement of "
+                "scores may lead to lower concentrations in ranges indicating opportunities "
+                "for loan growth.\n\n"
+                "This report is presented as a line graph to track the concentration of "
+                "loans in each pool by grade over time.  The trend lines in this report "
+                "show the changing makeup of loans in the portfolio and the accompanying "
+                "changes in risk.")),
+        ])
+
+
+#: Distinct line colours for per-grade trend charts (mirrors charts._LINE_PALETTE
+#: so a grade keeps the same colour across every pool chart).
+_GRADE_LINE_COLORS = ["#0E7E9E", "#B4453F", "#6E8A00", "#E0A400",
+                      "#5F5F5F", "#8E5FA8", "#00857C", "#C77DA0"]
+
+
+def _hist_trends_specs(client_name, snapshot_date, config, hist, df,
+                       grades) -> list[ChartSpec]:
+    """One per-pool line chart (a line per grade, balance over the pool's WARM
+    window) for each risk-rated pool.  Mirrors report_vizo._sheet_hist_trends."""
+    import report_vizo as _rv
+
+    cfg = config or {}
+    no_score = cfg.get("no_score_label", "Not Reported")
+    gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
+    _imp = (hist or {}).get("impaired", {}) or {}
+    hbd = _imp.get("hist_bal_data", {}) or {}
+    if not hbd:
+        return []
+    risk_rated = _imp.get("risk_rated", {})
+    acl_months = _imp.get("acl_months", {})
+    warm_order = _imp.get("pool_order", [])
+    pools = warm_order if warm_order else _rv._ordered_pools(df, hist)
+
+    specs: list[ChartSpec] = []
+    for pool in pools:
+        if not risk_rated.get(pool, True):
+            continue
+        pdata = hbd.get(pool, {})
+        pdates = pdata.get("dates", [])
+        pgrades = pdata.get("grades", {})
+        if not pdates or not pgrades:
+            continue
+        n = acl_months.get(pool, len(pdates))
+        if n < len(pdates):
+            start = len(pdates) - n
+            pdates = pdates[start:]
+            pgrades = {g: v[start:] for g, v in pgrades.items()}
+        cats = [d.strftime("%b-%y") for d in pdates]
+        series: list[dict] = []
+        for gi, g in enumerate(gl):
+            vals = pgrades.get(g)
+            if not vals or not any((x or 0) > 0 for x in vals):
+                continue
+            series.append({
+                "name": g,
+                "values": [float(x or 0) for x in vals],
+                "colors": [_GRADE_LINE_COLORS[gi % len(_GRADE_LINE_COLORS)]],
+            })
+        if not series:
+            continue
+        specs.append(ChartSpec(kind="line", title=pool, categories=cats,
+                               series=series, value_format="currency"))
+    return specs
+
+
+def build_hist_trends_page(client_name: str, snapshot_date: str, config: dict,
+                           hist: dict | None = None, df: Any = None,
+                           grades: Any = None) -> dict | None:
+    """Supplemental '> Historical Trends Balance' -- per-pool line charts.
+    Returns a template context ({cu, title, heading, charts}) or None."""
+    import report_vizo as _rv
+
+    if df is None:
+        return None
+    specs = _hist_trends_specs(client_name, snapshot_date, config, hist, df, grades)
+    if not specs:
+        return None
+    cu = (config or {}).get("credit_union") or client_name
+    return {
+        "cu": cu,
+        "title": "Historical Loan Balances by Most Recent Credit Score",
+        "heading": f"For Period Ending {_rv._snap_display(snapshot_date)}",
+        "charts": render_chart_specs(specs),
+    }
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -1548,6 +1737,22 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
     pages: list[tuple[str, dict, bool]] = [
         ("cover.html", {"cover": cover}, False),
     ]
+    if supplemental:
+        pages.append(("narrative.html",
+                      {"page": build_report_index(client_name, config,
+                                                  supplemental=True)}, False))
+        trends = build_hist_trends_page(client_name, snapshot_date, config, hist,
+                                        df=df, grades=grades)
+        if trends is not None:
+            pages.append(("hist_trends.html", trends, True))
+        ba = build_bal_adjust_detail(client_name, snapshot_date, config, hist,
+                                     df=df, grades=grades)
+        if ba is not None:
+            pages.append(("table_page.html", {"page": ba}, False))
+        pages.append(("narrative.html",
+                      {"page": build_supplemental_appendix(client_name, config)},
+                      False))
+        return {"cover": cover, "pages": pages}
     if not supplemental:
         pages.append(("narrative.html",
                       {"page": build_report_index(client_name, config)}, False))

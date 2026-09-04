@@ -71,6 +71,18 @@ tfoot { display: table-footer-group; }
 .table-page.delinquency .data-table td { padding: 0.4pt 5pt; }
 .table-page.delinquency .tbl-section-title { margin: 5pt 0 2pt; break-after: avoid; }
 
+/* Balance Adjustment Detail (Supplemental): portrait, 4 narrow columns, each
+   pool block stays whole. */
+.table-page.bal-adjust .data-table { font-size: 8.5pt; }
+.table-page.bal-adjust .data-table th { padding: 2pt 8pt; }
+.table-page.bal-adjust .data-table td { padding: 0.6pt 8pt; }
+
+/* Historical Trends Balance (Supplemental): landscape, ~2 per-pool line charts
+   per page, each chart kept whole. */
+.hist-trends .rpt-header { margin-bottom: 0.08in; }
+.hist-trends .trend-cell { break-inside: avoid; margin-bottom: 0.12in; }
+.hist-trends svg.chart { width: 100%; height: auto; display: block; }
+
 /* ---- Summary Variance (SCALE 'Executive Summary-Vizo' banded card) ---- */
 .summary-variance-page { text-align: center; }
 .summary-variance-page .sv-title {
