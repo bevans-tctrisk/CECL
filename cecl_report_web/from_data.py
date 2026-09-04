@@ -1723,6 +1723,173 @@ def build_hist_trends_page(client_name: str, snapshot_date: str, config: dict,
     }
 
 
+#: Number of month columns per landscape "page-set" for the wide monthly detail
+#: tables, chosen so the columns stay legible across a landscape page.
+_DETAIL_MONTHS_PER_CHUNK = 21
+
+
+def build_detail_hist_balances(client_name: str, snapshot_date: str, config: dict,
+                               hist: dict | None = None, df: Any = None,
+                               grades: Any = None) -> TablePage | None:
+    """Supplemental '> Detail_HIst Balances' -- Loss Factor Historical Detail.
+    Per pool, each grade's monthly balance across the pool's WARM window plus a
+    '% of Loans' column, and a pool Total.  The wide month range is split into
+    legible landscape page-sets.  Ported from report_vizo._sheet_detail_hist_bal."""
+    import report_vizo as _rv
+
+    if df is None:
+        return None
+    cfg = config or {}
+    cu = cfg.get("credit_union") or client_name
+    no_score = cfg.get("no_score_label", "Not Reported")
+    gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
+    _imp = (hist or {}).get("impaired", {}) or {}
+    hbd = _imp.get("hist_bal_data", {}) or {}
+    if not hbd:
+        return None
+    risk_rated = _imp.get("risk_rated", {})
+    acl_months = _imp.get("acl_months", {})
+    warm_order = _imp.get("pool_order", [])
+    pools = warm_order if warm_order else _rv._ordered_pools(df, hist)
+    per = _DETAIL_MONTHS_PER_CHUNK
+
+    sections: list = []
+    for pool in pools:
+        pdata = hbd.get(pool, {})
+        pdates = pdata.get("dates", [])
+        pgrades = pdata.get("grades", {})
+        ptotal = pdata.get("total", [])
+        if not pdates:
+            continue
+        n = acl_months.get(pool, len(pdates))
+        if n < len(pdates):
+            s = len(pdates) - n
+            pdates = pdates[s:]
+            pgrades = {g: v[s:] for g, v in pgrades.items()}
+            ptotal = ptotal[s:]
+        is_rr = risk_rated.get(pool, True)
+        last_total = ptotal[-1] if ptotal else 0
+        nd = len(pdates)
+        nchunks = max(1, (nd + per - 1) // per)
+        for ci in range(nchunks):
+            lo, hi = ci * per, min(ci * per + per, nd)
+            date_lbls = [d.strftime("%b-%y") for d in pdates[lo:hi]]
+            last_chunk = ci == nchunks - 1
+            cols = (["Current Grade"] + date_lbls
+                    + (["% of Loans"] if (last_chunk and is_rr) else []))
+            rows: list = []
+            if is_rr:
+                for g in gl:
+                    vals = pgrades.get(g, [])
+                    cells = [TableCell(g, "text", align="left")]
+                    for i in range(lo, hi):
+                        v = vals[i] if i < len(vals) else 0
+                        cells.append(TableCell(v, "currency") if v else TableCell(None))
+                    if last_chunk:
+                        lastv = vals[-1] if vals else 0
+                        cells.append(TableCell(
+                            (lastv / last_total if last_total else 0), "pct2"))
+                    rows.append(cells)
+            tcells = [TableCell("Total", "text", bold=True, align="left")]
+            for i in range(lo, hi):
+                v = ptotal[i] if i < len(ptotal) else 0
+                tcells.append(TableCell(v, "currency", bold=True) if v else TableCell(None))
+            if last_chunk and is_rr:
+                tcells.append(TableCell(1.0, "pct2", bold=True))
+            rows.append(tcells)
+            title = pool if nchunks == 1 else f"{pool}  (months {lo + 1}\u2013{hi})"
+            sections.append(TableSection(columns=cols, rows=rows, title=title))
+
+    if not sections:
+        return None
+    return TablePage(
+        credit_union=cu, title="Loss Factor Historical Detail",
+        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        sections=sections, css_class="hist-detail")
+
+
+def build_detail_chargeoff_hist(client_name: str, snapshot_date: str, config: dict,
+                                hist: dict | None = None, df: Any = None,
+                                grades: Any = None) -> TablePage | None:
+    """Supplemental '>Detail_Charge off Hist' -- Charge off and Recoveries
+    Historical Detail.  Three sections (Charge offs / Recoveries / Net Loss),
+    each a monthly pool table split into legible landscape page-sets.  Ported
+    from report_vizo._sheet_detail_chargeoff_hist."""
+    import datetime
+    import report_vizo as _rv
+
+    if df is None:
+        return None
+    cfg = config or {}
+    cu = cfg.get("credit_union") or client_name
+    _imp = (hist or {}).get("impaired", {}) or {}
+    co = _imp.get("warm_co_monthly") or (hist or {}).get("co_monthly", {}) or {}
+    rc = _imp.get("warm_rc_monthly") or (hist or {}).get("rc_monthly", {}) or {}
+    if not co and not rc:
+        return None
+    warm_order = _imp.get("pool_order", [])
+    pools = (warm_order if warm_order
+             else sorted(set((cfg.get("pool_map", {}) or {}).values())))
+    hbd = _imp.get("hist_bal_data", {}) or {}
+    first = next(iter(hbd.values()), {}) if hbd else {}
+    all_dates = list(first.get("dates", []))
+    if not all_dates:
+        ym = sorted(set(list(co.keys()) + list(rc.keys())))
+        all_dates = [datetime.datetime(y, m, 1) for y, m in ym]
+    if not all_dates:
+        return None
+
+    net: dict = {}
+    for ym in set(list(co.keys()) + list(rc.keys())):
+        cp = co.get(ym, {})
+        rp = rc.get(ym, {})
+        net[ym] = {p: abs(cp.get(p, 0) or 0) - abs(rp.get(p, 0) or 0)
+                   for p in set(list(cp) + list(rp))}
+
+    per = _DETAIL_MONTHS_PER_CHUNK
+    nd = len(all_dates)
+    nchunks = max(1, (nd + per - 1) // per)
+    sections: list = []
+
+    def _add(label: str, data: dict) -> None:
+        active = [p for p in pools
+                  if any((data.get((d.year, d.month), {}).get(p, 0) or 0)
+                         for d in all_dates)]
+        if not active:
+            return
+        for ci in range(nchunks):
+            lo, hi = ci * per, min(ci * per + per, nd)
+            chunk = all_dates[lo:hi]
+            date_lbls = [d.strftime("%b-%y") for d in chunk]
+            cols = [label] + date_lbls
+            rows: list = []
+            for pool in active:
+                cells = [TableCell(pool, "text", align="left")]
+                for d in chunk:
+                    v = data.get((d.year, d.month), {}).get(pool, 0) or 0
+                    cells.append(TableCell(v, "currency") if v else TableCell(None))
+                rows.append(cells)
+            tcells = [TableCell(f"Total {label}", "text", bold=True, align="left")]
+            for d in chunk:
+                s = sum(data.get((d.year, d.month), {}).get(p, 0) or 0
+                        for p in active)
+                tcells.append(TableCell(s, "currency", bold=True) if s else TableCell(None))
+            rows.append(tcells)
+            title = label if nchunks == 1 else f"{label}  (months {lo + 1}\u2013{hi})"
+            sections.append(TableSection(columns=cols, rows=rows, title=title))
+
+    _add("Charge offs", co)
+    _add("Recoveries", rc)
+    _add("Net Loss", net)
+
+    if not sections:
+        return None
+    return TablePage(
+        credit_union=cu, title="Charge off and Recoveries Historical Detail",
+        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        sections=sections, css_class="hist-detail")
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
                        df: Any = None, *, supplemental: bool = False) -> dict:
@@ -1745,6 +1912,14 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                         df=df, grades=grades)
         if trends is not None:
             pages.append(("hist_trends.html", trends, True))
+        hd = build_detail_hist_balances(client_name, snapshot_date, config, hist,
+                                        df=df, grades=grades)
+        if hd is not None:
+            pages.append(("table_page.html", {"page": hd}, True))
+        cod = build_detail_chargeoff_hist(client_name, snapshot_date, config, hist,
+                                          df=df, grades=grades)
+        if cod is not None:
+            pages.append(("table_page.html", {"page": cod}, True))
         ba = build_bal_adjust_detail(client_name, snapshot_date, config, hist,
                                      df=df, grades=grades)
         if ba is not None:

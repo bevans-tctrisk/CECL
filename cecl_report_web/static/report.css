@@ -83,6 +83,18 @@ tfoot { display: table-footer-group; }
 .hist-trends .trend-cell { break-inside: avoid; margin-bottom: 0.12in; }
 .hist-trends svg.chart { width: 100%; height: auto; display: block; }
 
+/* Wide monthly detail tables (Supplemental Loss Factor / Charge off history):
+   landscape, very compact so ~21 month columns stay legible; each pool/section
+   page-set is kept whole. */
+.table-page.hist-detail .data-table {
+  font-size: 6.5pt; width: 100%; break-inside: avoid; margin-bottom: 5pt;
+}
+.table-page.hist-detail .data-table th { padding: 1.5pt 2pt; }
+.table-page.hist-detail .data-table td { padding: 0.4pt 2pt; }
+.table-page.hist-detail .tbl-section-title {
+  font-size: 9pt; margin: 5pt 0 2pt; break-after: avoid;
+}
+
 /* ---- Summary Variance (SCALE 'Executive Summary-Vizo' banded card) ---- */
 .summary-variance-page { text-align: center; }
 .summary-variance-page .sv-title {
