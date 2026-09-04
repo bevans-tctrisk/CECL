@@ -41,7 +41,7 @@
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
     <input type="hidden" name="stage" value="mapped">
     <input type="hidden" name="period" value="{{ staged_period }}">
-    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf'] %}
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
       {% if staged_reports and staged_reports.get(r) %}
         <input type="hidden" name="{{ r }}" value="on">
       {% endif %}
@@ -159,7 +159,7 @@
                             style="display:flex; gap:6px; margin:0;">
                         <input type="hidden" name="stage" value="balance_remapped">
                         <input type="hidden" name="period" value="{{ staged_period }}">
-                        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf'] %}
+                        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
                           {% if staged_reports and staged_reports.get(r) %}
                             <input type="hidden" name="{{ r }}" value="on">
                           {% endif %}
@@ -226,7 +226,7 @@
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
     <input type="hidden" name="stage" value="balance_checked">
     <input type="hidden" name="period" value="{{ staged_period }}">
-    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf'] %}
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
       {% if staged_reports and staged_reports.get(r) %}
         <input type="hidden" name="{{ r }}" value="on">
       {% endif %}
@@ -306,7 +306,7 @@
             action="{{ url_for('run.new_quarter', short_name=short_name) }}">
         <input type="hidden" name="stage" value="impaired_remapped">
         <input type="hidden" name="period" value="{{ staged_period }}">
-        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf'] %}
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
           {% if staged_reports and staged_reports.get(r) %}
             <input type="hidden" name="{{ r }}" value="on">
           {% endif %}
@@ -468,7 +468,7 @@
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
     <input type="hidden" name="stage" value="impaired_checked">
     <input type="hidden" name="period" value="{{ staged_period }}">
-    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf'] %}
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
       {% if staged_reports and staged_reports.get(r) %}
         <input type="hidden" name="{{ r }}" value="on">
       {% endif %}
@@ -514,7 +514,7 @@
       <form method="post" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
         <input type="hidden" name="stage" value="impaired_none">
         <input type="hidden" name="period" value="{{ staged_period }}">
-        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf'] %}
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
           {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
         {% endfor %}
         <button class="btn btn-success" type="submit">Confirm &mdash; no impaired loans &rarr; Run Reports</button>
@@ -531,7 +531,7 @@
       <form method="post" enctype="multipart/form-data" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
         <input type="hidden" name="stage" value="impaired_uploaded">
         <input type="hidden" name="period" value="{{ staged_period }}">
-        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf'] %}
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
           {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
         {% endfor %}
         <input type="file" name="impaired_file" accept=".xlsx,.xlsm" required style="margin-bottom:10px; display:block;">
@@ -584,7 +584,7 @@
       <form method="post" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
         <input type="hidden" name="stage" value="balance_none">
         <input type="hidden" name="period" value="{{ staged_period }}">
-        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf'] %}
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
           {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
         {% endfor %}
         <button class="btn" type="submit">Proceed anyway &rarr;</button>
@@ -645,6 +645,9 @@
     <label><input type="checkbox" name="vizo_pdf"
            {% if cfg.reports is defined and cfg.reports.get('vizo_pdf', False) %}checked{% endif %}>
       Vizo Migration PDF <span class="muted">(standalone or with Vizo)</span></label>
+    <label><input type="checkbox" name="vizo_supp_pdf"
+           {% if cfg.reports is defined and cfg.reports.get('vizo_supp_pdf', False) %}checked{% endif %}>
+      Vizo Supplemental PDF <span class="muted">(standalone or with Vizo Supplemental)</span></label>
 
     <details style="margin-top:24px;" open>
       <summary style="cursor:pointer;"><strong>4. Allowance for Credit Loss Balance (optional override)</strong></summary>

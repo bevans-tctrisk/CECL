@@ -94,6 +94,19 @@
             report.</div>
         </span>
       </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
+        <input type="checkbox" name="vizo_supp_pdf"
+               {% if state.reports.get('vizo_supp_pdf', False) %}checked{% endif %}>
+        <span>
+          <strong>Vizo Supplemental PDF</strong>
+          <div class="help">Render the Vizo Supplemental report (historical loan
+            balances, loss factor and charge-off detail, balance adjustment)
+            as a polished PDF built directly from the report data. Can run on
+            its own (PDF only, no spreadsheet) or alongside the Vizo
+            Supplemental report.</div>
+        </span>
+      </label>
     </fieldset>
 
     <div class="btn-row">

@@ -360,6 +360,7 @@ def _default_state() -> dict[str, Any]:
             "mgmt_adj_napkin": True,
             "acl_funding": True,
             "vizo_pdf": False,
+            "vizo_supp_pdf": False,
         },
         # sample file analysis (populated by sample step)
         "sample": None,  # type: dict | None
@@ -13921,6 +13922,7 @@ def step9_reports():
             "mgmt_adj_napkin": request.form.get("mgmt_adj_napkin") == "on",
             "acl_funding": request.form.get("acl_funding") == "on",
             "vizo_pdf": request.form.get("vizo_pdf") == "on",
+            "vizo_supp_pdf": request.form.get("vizo_supp_pdf") == "on",
         }
         if not any(sel.values()):
             flash(
@@ -13986,6 +13988,7 @@ def _build_review_summary(state: dict[str, Any]) -> dict[str, Any]:
         ("Management Adj Worksheet", reports.get("mgmt_adj_napkin")),
         ("ACL Funding Worksheet", reports.get("acl_funding")),
         ("Vizo Migration PDF", reports.get("vizo_pdf")),
+        ("Vizo Supplemental PDF", reports.get("vizo_supp_pdf")),
     ) if on]
 
     return {
