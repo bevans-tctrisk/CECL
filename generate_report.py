@@ -13069,13 +13069,16 @@ def generate_report(client_name, snapshot_date=None, reports=None):
     _want_pdf = 'vizo_pdf' in reports
     _pdf_only = _want_pdf and 'vizo' not in reports
     _vizo_data = ('vizo' in reports) or _want_pdf
-    if _vizo_data:
+    _want_supp_pdf = 'vizo_supp_pdf' in reports
+    _supp_pdf_only = _want_supp_pdf and 'vizo_supp' not in reports
+    _vizo_supp_data = ('vizo_supp' in reports) or _want_supp_pdf
+    if _vizo_data or _vizo_supp_data:
         import copy as _copy
         _pdf_config = _copy.deepcopy(config)
         _pdf_hist = _copy.deepcopy(hist)
 
     for rpt_type in reports:
-        if rpt_type == 'vizo_pdf':
+        if rpt_type in ('vizo_pdf', 'vizo_supp_pdf'):
             continue  # rendered from data after the loop, not a workbook tab
         try:
             if rpt_type == 'tct':
@@ -13179,6 +13182,29 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             except Exception as _pdf_exc:  # noqa: BLE001
                 print(f"  Warning: vizo PDF generation failed: {_pdf_exc}")
 
+    # Vizo Supplemental PDF -- rendered from data (supplemental=True), so it runs
+    # whether or not the supplemental workbook is produced. Uses the pristine
+    # pre-loop snapshot of config/hist.
+    if _want_supp_pdf:
+        _safe_cu = cu.replace(' ', '_').replace('/', '-')
+        try:
+            from cecl_report_web.assembly import render_report_pdf_from_data
+            pdf_bytes = render_report_pdf_from_data(
+                client_name, snapshot_date, _pdf_config,
+                grades=grades, hist=_pdf_hist, df=df, supplemental=True)
+            supp_pdf_path = os.path.join(
+                RPT_DIR,
+                f"{snapshot_date}_CECL_Supplemental_{_safe_cu}_Vizo_Model.pdf")
+            with open(supp_pdf_path, 'wb') as _pf:
+                _pf.write(pdf_bytes)
+            print(f"  Saved vizo supplemental PDF"
+                  f"{' (PDF only)' if _supp_pdf_only else ''}: {supp_pdf_path}")
+            saved.append(supp_pdf_path)
+            log_report_generation(client_name, cu, snapshot_date,
+                                  'vizo_supp_pdf', supp_pdf_path, success=True)
+        except Exception as _pdf_exc:  # noqa: BLE001
+            print(f"  Warning: vizo supplemental PDF generation failed: {_pdf_exc}")
+
     if saved:
         print(f"\n  {len(saved)} report(s) saved to {RPT_DIR}")
     else:
@@ -13217,7 +13243,8 @@ Examples:
     )
     parser.add_argument('--client', help='Client config name (e.g., "franklin")')
     parser.add_argument('--date', help='Snapshot date (YYYY-MM-DD), defaults to latest')
-    parser.add_argument('--reports', nargs='+', choices=['tct', 'vizo', 'vizo_supp'],
+    parser.add_argument('--reports', nargs='+',
+                        choices=['tct', 'vizo', 'vizo_supp', 'vizo_pdf', 'vizo_supp_pdf'],
                         help='Report types to generate (overrides config)')
     parser.add_argument('--all', action='store_true', help='Generate for all clients')
     parser.add_argument('--list', action='store_true', help='List available clients')
