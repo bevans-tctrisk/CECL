@@ -20,6 +20,7 @@ new data-loading code.
 """
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 
 import pandas as pd
@@ -35,7 +36,9 @@ from report_tct import (
     DQ_RANGES,
     ES_RANGES,
     NCC_RANGES,
+    _add_co_rc_pools,
     _all_grades,
+    _apply_raw_code_aggregates,
     _brr_grade_labels,
     _brr_pools_set,
     _build_pool_use_default_map,
@@ -47,8 +50,10 @@ from report_tct import (
     _merge_pool_orders,
     _ncc,
     _other_allowance_considerations,
+    _remap_co_pools,
     _resolve_mgmt_adj_total,
     _sort_pools,
+    _strip_excluded_pools,
 )
 
 
@@ -524,7 +529,7 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
     ``generate_report.generate_report`` dispatcher alongside the TCT /
     Vizo / Vizo-Supplemental outputs.
     """
-    cu = config.get('credit_union', client_name)
+    cu = config.get('display_name') or config.get('credit_union', client_name)
     no_score = config.get('no_score_label', 'Not Reported')
     snap_year = int(snapshot_date[:4])
     snap_month = int(snapshot_date[5:7])
@@ -559,8 +564,28 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
     # Drop sentinel pools (Exclude / Ignore) from the report.
     pools = [p for p in pools if str(p).strip().lower() not in ('exclude', 'ignore')]
 
+    # Drop config-excluded pools (config['exclude_pools']) so remnant pools
+    # (e.g. a merged-away "Motorcycle") don't render — matching the ACL tab's
+    # _strip_excluded_pools behaviour.
+    _excl = {str(p).strip().lower() for p in (config.get('exclude_pools') or [])}
+    if _excl:
+        pools = [p for p in pools if str(p).strip().lower() not in _excl]
+
     # Baseline math.
-    life_loss = _pool_life_loss_acl(pools, hist, config_for_calc)
+    # Mirror compose_tct's hist preprocessing (raw-code loan aggregation,
+    # CO/Rc pool remap/add, excluded-pool stripping) on a private copy so
+    # the Aggregated Pool Loss Rate (column C) matches the ACL Env by Pool
+    # Mgmt Adj tab exactly — regardless of whether the TCT report ran first.
+    hist_for_ll = hist
+    try:
+        hist_for_ll = copy.deepcopy(hist)
+        _apply_raw_code_aggregates(hist_for_ll, config, snapshot_date, df, grades)
+        _remap_co_pools(hist_for_ll, config)
+        _add_co_rc_pools(hist_for_ll, config)
+        _strip_excluded_pools(hist_for_ll, config)
+    except Exception:
+        hist_for_ll = hist
+    life_loss = _pool_life_loss_acl(pools, hist_for_ll, config_for_calc)
     dq_var_map = _compute_dq_var(pools, hist, config_for_calc, snap_year, snap_month)
     econ_stress = _econ_stress(config) if hist else 0.0
 
@@ -637,12 +662,31 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
             econ_stress, ncc_r, dq_r, es_r, is_rr,
         )
 
-        # Per-pool baseline mgmt adj (Step 16 manual; admin default
-        # applies only when pool's life_loss == 0 per report_tct rule).
+        # Per-pool baseline loss rate (column C). Risk-rated pools use the
+        # per-grade life-loss; non-risk-rated pools take the WARM blended
+        # base rate (matching the ACL Env by Pool Mgmt Adj tab's
+        # nrr_base_rate) — life-loss can exceed 100% for pools like Neg
+        # Shares where net charge-offs outstrip the average balance, which
+        # the ACL tab never applies to a balance-only NRR pool.
         pool_ll = life_loss.get(pool, 0)
+        pool_c = pool_ll
+        if not is_rr:
+            _wp = next(
+                (v for k, v in acl_pools_data.items()
+                 if k.strip().lower() == pool.strip().lower()),
+                None,
+            )
+            nrr_base = (_wp.get('total', {}) or {}).get('base_rate', 0) if _wp else 0
+            _bro = (config.get('base_loss_rate_by_pool_grade') or {})
+            _bro_pool = _bro.get(pool.strip().lower()) or _bro.get(pool)
+            if _bro_pool and 'Total' in _bro_pool:
+                nrr_base = _bro_pool['Total']
+            pool_c = nrr_base
+        # Admin default applies only when the pool's base rate == 0 per the
+        # report_tct rule.
         mgmt_adj = _resolve_mgmt_adj_total(
             pool, pool_use_default, mgmt_adj_by_pool,
-            admin_default, base_rate=pool_ll,
+            admin_default, base_rate=pool_c,
         )
 
         # Grade-row balances (only meaningful for risk-rated pools).
@@ -745,7 +789,7 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
 
         _write_total_row(
             ws, total_row, first_grade, last_grade,
-            total_calc_bal, pool_ll, env_factor, mgmt_adj, is_rr,
+            total_calc_bal, pool_c, env_factor, mgmt_adj, is_rr,
         )
         pool_total_rows.append(total_row)
 
@@ -847,7 +891,7 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
     ws.print_title_rows = '1:7'
 
     # File name follows the user's requested convention.
-    safe_cu = cu.replace('/', '-').replace('\\', '-')
+    safe_cu = (config.get('credit_union') or cu).replace('/', '-').replace('\\', '-')
     snap_prefix = snapshot_date[:7]   # "YYYY-MM"
     fname = f"{snap_prefix} Management Adjustment Worksheet- {safe_cu}.xlsx"
     return wb, fname

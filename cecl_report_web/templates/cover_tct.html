@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ cover.title }} â€” {{ cover.credit_union }}{% endblock %}
+{% block body %}
+<section class="page cover-page cover-tct">
+  <h1 class="cover-tct-title">{{ cover.title }}</h1>
+  {% if cover.subtitle %}
+  <h2 class="cover-tct-subtitle">{{ cover.subtitle }}</h2>
+  {% endif %}
+
+  {% if cover.features %}
+  <div class="cover-tct-features">
+    {% for feat in cover.features %}
+    <div class="cover-tct-feature">{{ feat }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if cover.prepared_for %}
+  <div class="cover-tct-prepared">{{ cover.prepared_for }}</div>
+  {% endif %}
+  <div class="cover-tct-cu">{{ cover.credit_union }}</div>
+
+  {% if cover.period_label %}
+  <div class="cover-tct-period-label">{{ cover.period_label }}</div>
+  {% endif %}
+  <div class="cover-tct-period">{{ cover.date_text or cover.period_ending }}</div>
+
+  {% if cover.presented_by %}
+  <div class="cover-tct-presented">{{ cover.presented_by }}</div>
+  {% endif %}
+  {% if cover.logo %}
+  <img class="cover-tct-logo" src="{{ cover.logo }}" alt="TCT Risk Solutions">
+  {% endif %}
+
+  <div class="cover-foot-spacer"></div>
+
+  {% if cover.footer_lines %}
+  <div class="cover-tct-footer">
+    {% for line in cover.footer_lines %}
+    <div>{{ line }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

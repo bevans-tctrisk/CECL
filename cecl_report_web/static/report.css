@@ -77,6 +77,20 @@ tfoot { display: table-footer-group; }
 .table-page.bal-adjust .data-table th { padding: 2pt 8pt; }
 .table-page.bal-adjust .data-table td { padding: 0.6pt 8pt; }
 
+/* Management Adjustments: portrait, 9 columns -> compact so it fits width. */
+.table-page.mgmt-adj .data-table { font-size: 8pt; }
+.table-page.mgmt-adj .data-table th { padding: 2pt 4pt; }
+.table-page.mgmt-adj .data-table td { padding: 0.8pt 4pt; }
+
+/* Environmental Factor for PLL: portrait; each page (calc tables, or ranges
+   table + description) stays whole on a single page. */
+.table-page.env-factor .data-table { font-size: 9pt; break-inside: avoid; }
+.table-page.env-factor .data-table th { padding: 1.5pt 5pt; }
+.table-page.env-factor .data-table td { padding: 1pt 5pt; }
+.table-page.env-factor .tbl-section-title { margin: 5pt 0 2pt; break-after: avoid; }
+.table-page.env-factor .tbl-notes { font-size: 9pt; line-height: 1.3; }
+.table-page.env-factor .tbl-notes li { margin: 0 0 2pt; }
+
 /* Historical Trends Balance (Supplemental): landscape, ~2 per-pool line charts
    per page, each chart kept whole. */
 .hist-trends .rpt-header { margin-bottom: 0.08in; }
@@ -140,10 +154,18 @@ tfoot { display: table-footer-group; }
 .narrative-page .narr-heading {
   font-size: 12pt; font-weight: 700; color: #0D4D5E; margin: 14pt 0 4pt;
 }
+.narrative-page .narr-page-heading {
+  font-size: 12pt; font-weight: 700; text-align: center; margin: 6pt 0 12pt;
+}
 .narrative-page .narr-body {
   font-size: 11pt; line-height: 1.5; margin: 0 0 6pt; max-width: 7.2in;
   white-space: pre-line;
 }
+.narrative-page .narr-table {
+  width: auto; min-width: 3.2in; margin: 2pt 0 10pt; font-size: 10pt;
+}
+.narrative-page .narr-table td { padding: 1pt 14pt 1pt 0; }
+.narrative-page .narr-table td.b { font-weight: 700; border-top: 0.75pt solid #444; }
 
 /* ---- Cover page (mirrors sheet_cover_vizo: centered, 2 logos) ---- */
 .cover-page {
@@ -186,6 +208,31 @@ tfoot { display: table-footer-group; }
 .cover-foot-spacer { flex: 1 1 auto; min-height: 0.6in; }
 .cover-logo-bottom { width: 2.4in; height: auto; margin: 0 0 0.06in; }
 .cover-footer { font-size: 8pt; color: #000; }
+
+/* ---- TCT cover (mirrors report_tct._sheet_cover: title, feature bullets,
+       Prepared For, single centered TCT logo, address footer) ---- */
+.cover-tct { padding: 0.55in 0 0; }
+.cover-tct-title {
+  font-size: 34pt;
+  font-weight: 700;
+  margin: 0.1in 0 0;
+  letter-spacing: 0.01em;
+}
+.cover-tct-subtitle {
+  font-size: 26pt;
+  font-weight: 700;
+  margin: 0.1in 0 0.25in;
+}
+.cover-tct-features { margin: 0.1in 0 0; }
+.cover-tct-feature { font-size: 16pt; font-weight: 400; margin: 0.045in 0; }
+.cover-tct-prepared { font-size: 10pt; margin: 0.45in 0 0.05in; }
+.cover-tct-cu { font-size: 26pt; font-weight: 700; margin: 0; }
+.cover-tct-period-label { font-size: 14pt; font-weight: 700; margin: 0.28in 0 0.03in; }
+.cover-tct-period { font-size: 14pt; font-weight: 700; margin: 0; }
+.cover-tct-presented { font-size: 10pt; margin: 0.4in 0 0.08in; }
+.cover-tct-logo { width: 5in; height: auto; margin: 0 auto; }
+.cover-tct-footer { font-size: 8pt; color: #000; text-align: left; align-self: flex-start; margin-left: 0.2in; }
+.cover-tct-footer div { line-height: 1.35; }
 
 /* ---- Impr Deter (Executive Summary numbers) ---- */
 .impr-deter { font-size: 12pt; }
@@ -233,20 +280,20 @@ tfoot { display: table-footer-group; }
    Each Risk Change page (Total + one per risk-rated pool) carries both the $
    and % matrices plus three charts; kept compact so the whole tab fits on a
    single landscape page, matching the workbook's fit-to-one-page tabs. */
-.risk-change { font-size: 8.5pt; }
-.risk-change .rpt-header { margin-bottom: 0.08in; }
+.risk-change { font-size: 7.3pt; }
+.risk-change .rpt-header { margin-bottom: 0.04in; }
 .risk-change .rpt-cu { font-size: 12pt; }
 .risk-change .rpt-subhead { font-size: 10pt; }
 
 .rc-matrix {
   border-collapse: collapse;
-  margin: 0.05in auto 0.06in auto;
+  margin: 0.02in auto 0.02in auto;
   table-layout: fixed;
   width: 100%;
 }
 .rc-matrix th, .rc-matrix td {
   border: none;
-  padding: 1pt 5pt;
+  padding: 0.1pt 4pt;
   white-space: nowrap;
 }
 /* Header cells: dark teal, white, bold, centered (matches #0D4D5E). */
@@ -281,17 +328,33 @@ tfoot { display: table-footer-group; }
   text-align: right; font-variant-numeric: tabular-nums; padding: 2pt 5pt;
 }
 
-/* Three charts in a row beneath the matrices, sized to finish the page. */
+/* Four charts in a 2x2 grid beneath the matrices, sized to finish the page. */
 .rc-charts {
-  display: flex; gap: 0.3in; justify-content: center;
-  align-items: flex-start; margin-top: 0.06in;
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 0.04in 0.4in; justify-items: center; align-items: center;
+  margin-top: 0.04in;
 }
 .rc-chart-cell {
-  flex: 0 1 auto; display: flex; justify-content: center;
+  flex: 0 1 auto; display: flex; justify-content: center; break-inside: avoid;
 }
 .rc-chart-cell svg.chart {
-  height: 1.6in; width: auto; max-width: 100%;
+  height: 1.9in; width: auto; max-width: 100%;
 }
+
+/* Net Credit Change: summary table beside an exploded doughnut. */
+.ncc-combo { display: flex; flex-direction: column; align-items: center; break-inside: avoid; }
+.ncc-title { font-size: 12pt; font-weight: 600; margin-bottom: 3pt; text-align: center; }
+.ncc-body { display: flex; align-items: center; gap: 0.2in; }
+.ncc-combo svg.chart { height: 1.6in; width: auto; }
+.ncc-table { border-collapse: collapse; font-size: 10.5pt; }
+.ncc-table td { padding: 3pt 8pt; white-space: nowrap; }
+.ncc-table td.lbl { text-align: left; }
+.ncc-table td.bal, .ncc-table td.pct {
+  text-align: right; font-variant-numeric: tabular-nums;
+}
+.ncc-table tr.imp td.bal, .ncc-table tr.imp td.pct { background: #6E8A00; color: #fff; }
+.ncc-table tr.det td.bal, .ncc-table tr.det td.pct { background: #B4453F; color: #fff; }
+.ncc-table tr.unc td.bal, .ncc-table tr.unc td.pct { background: #0D4D5E; color: #fff; }
 
 /* ---- ACL Env by Pool (allowance calculation) -- portrait, compact ---- */
 .acl-env { font-size: 8pt; }
@@ -387,16 +450,16 @@ tfoot { display: table-footer-group; }
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
-  gap: 0.1in 0.35in;
-  margin-top: 0.06in;
-  height: 7.0in;
+  gap: 0.12in 0.3in;
+  margin-top: 0.05in;
+  height: 6.7in;
 }
 .impr-charts .chart-cell {
   width: 100%; min-height: 0; overflow: hidden;
   display: flex; align-items: center; justify-content: center;
 }
 .impr-charts svg.chart {
-  max-width: 100%; max-height: 100%; width: auto; height: auto;
+  width: 100%; height: 100%;
 }
 
 

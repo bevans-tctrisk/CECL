@@ -46,6 +46,14 @@ def _restep(color):
     return _BRAND_REMAP.get(c.upper(), color)
 
 
+def _hexn(c):
+    """Normalise a 6-hex colour to a leading-# form (raw, no re-stepping)."""
+    if not c:
+        return None
+    c = str(c).strip()
+    return c if c.startswith("#") else "#" + c
+
+
 def _semantic(name):
     """Colour a series/slice must always carry, whatever order it appears in.
 
@@ -280,7 +288,7 @@ def _legend(items: list[tuple[str, str]], x: int, y: int,
 
 
 def _svg_bar(series: list[dict], cats: list[str], title: str | None,
-             *, horizontal: bool, stacked: bool) -> str:
+             *, horizontal: bool, stacked: bool, prefer_colors: bool = False) -> str:
     from .format import excel_format
 
     top, right = 30, 14
@@ -299,6 +307,10 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
 
     def _bar_color(s, i, n, si):
         pts = s.get("point_colors") or []
+        if prefer_colors:
+            raw = [_hexn(c) for c in pts]
+            if len({c for c in raw if c}) > 1 and i < len(raw) and raw[i]:
+                return raw[i]
         base = (_semantic(s.get("name")) or _restep(s.get("color"))
                 or PALETTE[si % len(PALETTE)])
         pts = [_restep(x) for x in pts]
@@ -426,7 +438,8 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
 
 
 def _svg_pie(values: list[float], cats: list[str], title: str | None,
-             *, doughnut: bool, colors: list[str] | None = None) -> str:
+             *, doughnut: bool, colors: list[str] | None = None,
+             prefer_colors: bool = False) -> str:
     import math
     cx, cy, rad = 100, 130, 78
     inner = rad * 0.55 if doughnut else 0
@@ -434,7 +447,11 @@ def _svg_pie(values: list[float], cats: list[str], title: str | None,
 
     def _col(i):
         # Slice labels carry the meaning on a migration pie, so honour the
-        # semantic colours ahead of anything the workbook supplied.
+        # semantic colours ahead of anything the workbook supplied -- unless
+        # the caller asks to match the on-page matrix fills (prefer_colors),
+        # which uses the supplied hexes RAW so header teal stays 0D4D5E.
+        if prefer_colors and colors and i < len(colors) and colors[i]:
+            return _hexn(colors[i])
         sem = _semantic(cats[i] if i < len(cats) else None)
         if sem:
             return sem
@@ -603,9 +620,57 @@ def _to_chassis_spec(spec: dict) -> dict | None:
         return {**common, "kind": "diverging_stacked_bar",
                 "value_format": "pct1", "width": 620, "title_size": 22}
     if bar_dir == "col" and grouping == "clustered" and len(series) > 1:
-        return {**common, "kind": "clustered_column",
-                "value_format": "currency", "width": 560, "height": 300}
+        opts = spec.get("options") or {}
+        cser = []
+        for s in series:
+            pc = s.get("point_colors") or []
+            col = _hexn(_restep(pc[0])) if pc and pc[0] else None
+            cser.append({"name": s.get("name"),
+                         "values": s.get("values") or [],
+                         "color": col, "filled": True})
+        return {"title": spec.get("title"), "categories": cats,
+                "series": cser, "kind": "clustered_column",
+                "value_format": "currency", "width": 560, "height": 300,
+                "options": opts}
     return None
+
+
+def render_ncc_doughnut(imp: float, det: float, unc: float,
+                        *, size: int = 150) -> str:
+    """Exploded Net Credit Change doughnut: Improved (green) and Deteriorated
+    (red) slices pulled out, Unchanged (teal) seated -- colours matched to the
+    on-page Risk Change matrix fills (re-stepped _MIG_COLORS)."""
+    import math
+    cx = cy = size / 2.0
+    rad = size * 0.40
+    inner = rad * 0.55
+    segs = [(max(0.0, imp), "#6E8A00", 11.0),
+            (max(0.0, det), "#B4453F", 11.0),
+            (max(0.0, unc), "#0D4D5E", 0.0)]
+    total = sum(v for v, _, _ in segs) or 1.0
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" '
+             f'width="{size}" height="{size}" class="chart">']
+    ang = -math.pi / 2
+    for v, color, off in segs:
+        if v <= 0:
+            continue
+        frac = v / total
+        a2 = ang + frac * 2 * math.pi
+        mid = (ang + a2) / 2.0
+        ox, oy = cx + off * math.cos(mid), cy + off * math.sin(mid)
+        if frac >= 0.999:
+            parts.append(f'<circle cx="{ox:.1f}" cy="{oy:.1f}" r="{rad:.1f}" fill="{color}"/>')
+        else:
+            large = 1 if frac > 0.5 else 0
+            x1, y1 = ox + rad * math.cos(ang), oy + rad * math.sin(ang)
+            x2, y2 = ox + rad * math.cos(a2), oy + rad * math.sin(a2)
+            parts.append(f'<path d="M{ox:.1f},{oy:.1f} L{x1:.1f},{y1:.1f} '
+                         f'A{rad:.1f},{rad:.1f} 0 {large} 1 {x2:.1f},{y2:.1f} Z" '
+                         f'fill="{color}"/>')
+        ang = a2
+    parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{inner:.1f}" fill="#fff"/>')
+    parts.append('</svg>')
+    return "".join(parts)
 
 
 def render_chart_svg(spec: dict) -> str:
@@ -613,6 +678,7 @@ def render_chart_svg(spec: dict) -> str:
     ctype = spec.get("type", "")
     series = spec.get("series", [])
     title = spec.get("title")
+    opts = spec.get("options") or {}
     chassis = _to_chassis_spec(spec)
     if chassis is not None:
         from .chart_chassis import render as _chassis_render
@@ -621,7 +687,8 @@ def render_chart_svg(spec: dict) -> str:
         s0 = series[0] if series else {"values": [], "cats": []}
         return _svg_pie(s0.get("values", []), s0.get("cats", []), title,
                         doughnut="Doughnut" in ctype,
-                        colors=s0.get("point_colors") or None)
+                        colors=s0.get("point_colors") or None,
+                        prefer_colors=bool(opts.get("prefer_colors")))
     if "Line" in ctype:
         cats = series[0].get("cats", []) if series else []
         return _svg_line(series, cats, title,
@@ -631,7 +698,8 @@ def render_chart_svg(spec: dict) -> str:
     cats = series[0]["cats"] if series else []
     horizontal = spec.get("bar_dir") == "bar"
     stacked = spec.get("grouping") == "stacked"
-    return _svg_bar(series, cats, title, horizontal=horizontal, stacked=stacked)
+    return _svg_bar(series, cats, title, horizontal=horizontal, stacked=stacked,
+                    prefer_colors=bool(opts.get("prefer_colors")))
 
 
 def render_charts_for_sheet(report_path: str | Path, sheet: str) -> list[str]:

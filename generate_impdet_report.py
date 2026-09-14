@@ -1000,10 +1000,16 @@ def _load_extract_enrichment(config, workspace_root, snap=None):
             hr_cfg = 0
         pd_header = (hr_cfg - 1) if hr_cfg > 1 else 0
         ext_lc = os.path.splitext(path)[1].lower()
+        # Optional worksheet selection for multi-sheet loan workbooks
+        # (mirrors import_data's ``loan_sheet`` support).
+        loan_sheet = ex.get('loan_sheet') or config.get('loan_sheet')
         try:
             if has_header:
                 if ext_lc == '.csv':
                     df = pd.read_csv(path, header=pd_header)
+                elif loan_sheet:
+                    df = pd.read_excel(path, header=pd_header,
+                                       sheet_name=loan_sheet)
                 else:
                     df = pd.read_excel(path, header=pd_header)
                 # Mirror import_data's header normalisation: collapse
@@ -1025,6 +1031,9 @@ def _load_extract_enrichment(config, workspace_root, snap=None):
             else:
                 if ext_lc == '.csv':
                     df = pd.read_csv(path, header=None)
+                elif loan_sheet:
+                    df = pd.read_excel(path, header=None,
+                                       sheet_name=loan_sheet)
                 else:
                     df = pd.read_excel(path, header=None)
                 col_map = _normalize_col_map_for_no_header(col_map)
@@ -1150,6 +1159,7 @@ def warn_stale_credit_pull(config, snap):
 def generate_report(client, snap=None):
     config = load_config(client)
     cu = config['credit_union']
+    disp = config.get('display_name') or cu
     grades = config['credit_grades']
     no_score = config.get('no_score_label', 'Not Reported')
     n_top = config.get('top_grades_double_drop', 3)
@@ -1354,10 +1364,10 @@ def generate_report(client, snap=None):
 
     # Build workbook
     wb = Workbook()
-    _sheet_key(wb, cu, snap)
-    _sheet_improved(wb, cu, snap, df, pool_order)
-    _sheet_deteriorated(wb, cu, snap, df, pool_order)
-    _sheet_all_loans(wb, cu, snap, df)
+    _sheet_key(wb, disp, snap)
+    _sheet_improved(wb, disp, snap, df, pool_order)
+    _sheet_deteriorated(wb, disp, snap, df, pool_order)
+    _sheet_all_loans(wb, disp, snap, df)
 
     # "All Loans" tab is intentionally left unlocked so users can sort/filter.
     # (Previously protected with a password; removed per user request.)

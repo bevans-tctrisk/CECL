@@ -108,13 +108,14 @@ PALETTE = [
     "#6E8A00",  # 4 olive   (brand 829901)
 ]
 
-#: Semantic assignment for the migration-direction charts. "Improved" is the
-#: brand olive (829901 -> re-stepped PALETTE[3]) and "Deteriorated" the brand
-#: maroon, matching the risk-change matrix, the DQ/CO pies and the Net Credit
-#: Change doughnut so one hue means one thing across every page.
+#: Semantic assignment for the migration-direction bar/column charts, using the
+#: EXACT Excel Impr Deter chart hexes: Improved teal 0D4D5E, Deteriorated dark
+#: maroon 3D1A1A, Net olive 829901. (The DQ/CO pies and Net Credit Change
+#: doughnut carry their own explicit point colours and are unaffected.)
 SEMANTIC = {
-    "improved": PALETTE[3],
-    "deteriorated": PALETTE[1],
+    "improved": "#0D4D5E",
+    "deteriorated": "#3D1A1A",
+    "net": "#829901",
     "unchanged": "#9A9A93",
 }
 
@@ -983,6 +984,8 @@ def render_clustered_column(spec: dict) -> str:
     n = len(cats)
     opts = spec.get("options") or {}
     outline = bool(opts.get("outline"))
+    no_axis = bool(opts.get("no_value_axis"))
+    ow = float(opts.get("outline_width", 1.6))
     w = float(spec.get("width") or 560)
     h = float(spec.get("height") or 300)
 
@@ -998,10 +1001,15 @@ def render_clustered_column(spec: dict) -> str:
 
     legend_items = [(str(s.get("name") or f"Series {i+1}"), _color(series, i))
                     for i, s in enumerate(series)]
-    head_svg, head_y = header(Frame(w, 0), spec.get("title"), spec.get("subtitle"))
+    center = bool(opts.get("center_title"))
+    head_svg, head_y = header(Frame(w, 0), spec.get("title"), spec.get("subtitle"),
+                              x=(w / 2 if center else None),
+                              anchor=("middle" if center else "start"))
     top = max(head_y, 4) + LEGEND_SIZE + 12
-    left = max_tick_width(ticks, tick_formatter(
-        spec.get("value_format") or "currency", ticks)) + 12 + (14 if spec.get("axis_title") else 0)
+    left = (10.0 if no_axis else
+            max_tick_width(ticks, tick_formatter(
+                spec.get("value_format") or "currency", ticks)) + 12
+            + (14 if spec.get("axis_title") else 0))
     right = 10
 
     # Two-pass bottom margin: the category axis needs the band step, which
@@ -1018,9 +1026,15 @@ def render_clustered_column(spec: dict) -> str:
 
     p: list[str] = [svg_open(w, h),
                     svg_rect(0, 0, w, h, fill=THEME["surface"]), head_svg]
-    p.append(legend(legend_items, frame.x0, top - 8, filled=not outline))
-    p.append(y_axis(frame, yscale, ticks, tfmt,
-                    axis_title=spec.get("axis_title")))
+    legend_x = frame.x0
+    if center:
+        lw = sum(LEGEND_SIZE * 0.9 + 4 + text_width(lbl, LEGEND_SIZE) + 16
+                 for lbl, _c in legend_items) - 16
+        legend_x = max(frame.x0, (w - lw) / 2)
+    p.append(legend(legend_items, legend_x, top - 8, filled=not outline))
+    if not no_axis:
+        p.append(y_axis(frame, yscale, ticks, tfmt,
+                        axis_title=spec.get("axis_title")))
 
     base_y = yscale(0.0)
     label_size = LABEL_SIZE - 0.5
@@ -1041,7 +1055,7 @@ def render_clustered_column(spec: dict) -> str:
             if outline:
                 p.append(svg_rect(bx + 0.8, y_top + 0.8, bar_w - 1.6,
                                   max(0.0, y_bot - y_top - 0.8), fill="none",
-                                  stroke=color, stroke_width=1.6, rx=1.5))
+                                  stroke=color, stroke_width=ow, rx=1.5))
             else:
                 p.append(svg_rect(bx, y_top, bar_w, y_bot - y_top,
                                   fill=color, rx=2))
@@ -1053,7 +1067,7 @@ def render_clustered_column(spec: dict) -> str:
                                       size=label_size, anchor="middle",
                                       fill=THEME["ink_secondary"],
                                       extra=' style="font-variant-numeric:tabular-nums"'))
-    p.append(x_category_axis(frame, band, cats))
+    p.append(x_category_axis(frame, band, cats, rule=not no_axis))
     p.append(svg_close())
     return "".join(p)
 

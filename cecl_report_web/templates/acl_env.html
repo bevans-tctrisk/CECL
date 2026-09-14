@@ -81,10 +81,14 @@
       </tr>
       {% endfor %}
       {% for row in page.adjustment_rows %}
+      {% if row.label == "" and row.value is none %}
+      <tr class="summary-spacer"><td colspan="11">&nbsp;</td></tr>
+      {% else %}
       <tr class="summary-row{% if row.bold %} b{% endif %}">
         <td class="l{% if row.bold %} b{% endif %}" colspan="10">{{ row.label }}</td>
         <td class="num{% if row.bold %} b{% endif %}">{{ row.value | acct0 }}</td>
       </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>

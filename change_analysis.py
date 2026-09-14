@@ -15,7 +15,6 @@ Both ``report_tct.compose_tct`` and ``report_vizo.compose_vizo_main`` call
 """
 import os
 import re
-import glob
 import math
 
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -32,18 +31,18 @@ _SECTION_WORDS = {
     "allowance & provision for loan loss reserve analysis",
 }
 
-# ── styling ──────────────────────────────────────────────────────────────
+# ── styling (Vizo brand: Calibri, teal 0D4D5E header, legend palette) ─────
 _THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
-F_TITLE = Font(name="Arial", size=14, bold=True)
-F_SUB = Font(name="Arial", size=10, italic=True, color="595959")
-F_HDR = Font(name="Arial", size=10, bold=True, color="FFFFFF")
-F_CELL = Font(name="Arial", size=10)
-F_BOLD = Font(name="Arial", size=10, bold=True)
-F_NOTE = Font(name="Arial", size=10)
-FILL_HDR = PatternFill("solid", fgColor="305496")
-FILL_TOT = PatternFill("solid", fgColor="D9E1F2")
-FILL_FLAG = PatternFill("solid", fgColor="FCE4D6")
+F_TITLE = Font(name="Calibri", size=14, bold=True)
+F_SUB = Font(name="Calibri", size=10, italic=True, color="595959")
+F_HDR = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+F_CELL = Font(name="Calibri", size=10)
+F_BOLD = Font(name="Calibri", size=10, bold=True)
+F_NOTE = Font(name="Calibri", size=10)
+FILL_HDR = PatternFill("solid", fgColor="0D4D5E")
+FILL_TOT = PatternFill("solid", fgColor="DEEAF6")
+FILL_FLAG = PatternFill("solid", fgColor="FFF2CC")
 ACCT = '_(* #,##0_);_(* (#,##0);_(* "-"_);_(@_)'
 PCT = '0.0%'
 LEFT_WRAP = Alignment(horizontal="left", vertical="top", wrap_text=True)
@@ -126,23 +125,90 @@ def _parse_acl_sheet(ws):
 
 
 # ── locating the prior report ────────────────────────────────────────────
-def _find_prior_report(rpt_dir, safe_cu, suffix, snap):
-    """Return (path, snap_date) of the most recent report for this CU/format
-    dated strictly before ``snap``, or (None, None)."""
-    pattern = os.path.join(rpt_dir, f"*_CECL_Migration_{safe_cu}_{suffix}.xlsx")
+def _prior_quarter_end(snap):
+    """Most recent calendar quarter-end date ('YYYY-MM-DD') strictly before
+    ``snap``, or None."""
+    q_ends = []
+    try:
+        y = int(str(snap)[0:4])
+    except (TypeError, ValueError):
+        return None
+    for yy in (y, y - 1):
+        for mm, dd in ((3, 31), (6, 30), (9, 30), (12, 31)):
+            q_ends.append(f"{yy:04d}-{mm:02d}-{dd:02d}")
+    q_ends = sorted(q for q in q_ends if q < str(snap))
+    return q_ends[-1] if q_ends else None
+
+
+def _select_prior_candidate(candidates, snap, pin=None):
+    """From ``candidates`` (a list of ``(date_str, item)`` all dated strictly
+    before ``snap``) pick the one to compare against, honoring ``pin``:
+      * ``'prior_quarter_end'`` -> the most recent calendar quarter-end before
+        ``snap`` (exact match, else the most recent on/before that quarter-end);
+      * explicit ``'YYYY-MM'`` / ``'YYYY-MM-DD'`` -> the matching entry.
+    Falls back to the most-recent-prior when ``pin`` is unset or unmatched.
+    Returns ``(date_str, item)`` or ``None``."""
+    if not candidates:
+        return None
+    candidates = sorted(candidates)  # ascending by date_str
+    if pin:
+        pin_s = str(pin).strip().lower()
+        if pin_s in ('prior_quarter_end', 'prior_quarter',
+                     'quarter_end', 'quarter'):
+            target = _prior_quarter_end(snap)
+            if target:
+                exact = [c for c in candidates if c[0] == target]
+                if exact:
+                    return exact[-1]
+                le = [c for c in candidates if c[0] <= target]
+                if le:
+                    return le[-1]
+        else:
+            pin_norm = str(pin).strip()
+            match = [c for c in candidates
+                     if c[0] == pin_norm or c[0].startswith(pin_norm)]
+            if match:
+                return match[-1]
+        # A pin was requested but no report at/before the target exists. Return
+        # nothing rather than a LATER report (e.g. comparing a June quarter to
+        # an interim April) so callers can try their next fallback or show
+        # "no prior". Most-recent is only used when no pin is set.
+        print(f"    Change Analysis: compare_to={pin!r} matched no prior report "
+              f"at/before the target before {snap}; no prior selected.")
+        return None
+    return candidates[-1]
+
+
+def _find_prior_report(rpt_dir, safe_cu, suffix, snap, pin=None):
+    """Return (path, snap_date) of the prior report to compare against.
+
+    By default returns the most recent report for this CU/format dated
+    strictly before ``snap``. When ``pin`` is set it selects a specific
+    prior report:
+      * ``'prior_quarter_end'`` -> the report dated at the most recent
+        calendar quarter-end before ``snap`` (falls back to the most recent
+        report on/before that quarter-end when no exact match exists);
+      * an explicit ``'YYYY-MM'`` or ``'YYYY-MM-DD'`` -> the matching report.
+    An unresolved ``pin`` falls back to the most-recent-prior default.
+    """
     rx = re.compile(r"(\d{4}-\d{2}-\d{2})_CECL_Migration_"
                     + re.escape(safe_cu) + rf"_{re.escape(suffix)}\.xlsx$")
-    best, best_date = None, None
-    for path in glob.glob(pattern):
-        m = rx.search(os.path.basename(path))
-        if not m:
-            continue
-        d = m.group(1)
-        if d >= snap:
-            continue
-        if best_date is None or d > best_date:
-            best, best_date = path, d
-    return best, best_date
+    candidates = []  # (date_str, path), dated strictly before snap
+    seen_dates = set()
+    for root, _dirs, files in os.walk(rpt_dir):
+        for f in files:
+            m = rx.search(f)
+            if not m:
+                continue
+            d = m.group(1)
+            if d >= str(snap) or d in seen_dates:
+                continue
+            seen_dates.add(d)
+            candidates.append((d, os.path.join(root, f)))
+    chosen = _select_prior_candidate(candidates, snap, pin)
+    if not chosen:
+        return None, None
+    return chosen[1], chosen[0]
 
 
 # ── expert commentary ────────────────────────────────────────────────────
@@ -261,8 +327,10 @@ def append_change_analysis(wb, cu, snap, config, suffix):
     base = os.environ.get('CECL_WORKSPACE_ROOT') \
         or os.path.dirname(os.path.abspath(__file__))
     rpt_dir = os.path.join(base, 'Reports')
-    safe_cu = cu.replace(' ', '_').replace('/', '-')
-    prior_path, prior_snap = _find_prior_report(rpt_dir, safe_cu, suffix, snap)
+    safe_cu = ((config or {}).get('credit_union') or cu).replace(' ', '_').replace('/', '-')
+    ca_pin = ((config or {}).get('change_analysis') or {}).get('compare_to')
+    prior_path, prior_snap = _find_prior_report(
+        rpt_dir, safe_cu, suffix, snap, pin=ca_pin)
 
     if not cur or not prior_path:
         msg = ("No prior report is available for comparison — this is the "

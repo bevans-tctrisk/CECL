@@ -1024,8 +1024,11 @@ def _count_pools_with_data(ws, start_row: int, start_col: int) -> int:
 # ─────────────────────────────────────────────────────────────────
 
 # Patterns used to classify files found in a historical data folder.
+# Word separators between CECL / Migration / WARM may be hyphens, spaces,
+# or underscores (e.g. "CECL-Migration-WARM" or "CECL Migration Warm").
 _WARM_FILE_RX = re.compile(
-    r"^(\d{4}-\d{2})(?:-\d{2})?\s+CECL-Migration-WARM.*\.xlsx$", re.IGNORECASE
+    r"^(\d{4}-\d{2})(?:-\d{2})?\s+CECL[\s_\-]+Migration[\s_\-]+WARM.*\.xlsx$",
+    re.IGNORECASE,
 )
 _CO_FILE_RX = re.compile(
     r"(charge[\s_\-]*off|charge_off_track|co[\s_\-]*hist)", re.IGNORECASE

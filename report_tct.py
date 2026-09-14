@@ -330,6 +330,246 @@ def _merge_pool_orders(pools, warm_order, extra=None):
     return out
 
 
+def _strip_excluded_pools(hist, config):
+    """Remove ``config['exclude_pools']`` from every hist pool container so a
+    superseded/orphaned pool with no balances (e.g. a legacy WARM pool that
+    was split into new pools) stops rendering on every tab."""
+    ex = config.get('exclude_pools') or []
+    if not ex or not hist:
+        return
+    ex_lc = {str(p).strip().lower() for p in ex if str(p).strip()}
+    if not ex_lc:
+        return
+
+    def _drop_flat(d):
+        if isinstance(d, dict):
+            for k in [k for k in d if str(k).strip().lower() in ex_lc]:
+                d.pop(k, None)
+
+    def _drop_nested(d):
+        if isinstance(d, dict):
+            for sub in d.values():
+                _drop_flat(sub)
+
+    for key in ('chargeoffs', 'recoveries', 'dq_pct', 'avg_balances',
+                'co_monthly', 'rc_monthly'):
+        _drop_nested(hist.get(key))
+
+    imp = hist.get('impaired') or {}
+    for key in ('hist_bal_data', 'acl_pools', 'pool_bal_detail', 'risk_rated',
+                'acl_months', 'warm_co_totals', 'warm_rc_totals', 'warm_net_co',
+                'balance_adjustments', 'dq_by_pool', 'co_by_pool',
+                'spec_id_by_pool'):
+        _drop_flat(imp.get(key))
+    for key in ('warm_co', 'warm_rc', 'warm_net', 'warm_dq_pct',
+                'warm_co_monthly', 'warm_rc_monthly'):
+        _drop_nested(imp.get(key))
+    po = imp.get('pool_order')
+    if isinstance(po, list):
+        imp['pool_order'] = [p for p in po
+                             if str(p).strip().lower() not in ex_lc]
+
+
+def _remap_co_pools(hist, config):
+    """Move charge-off / recovery / DQ history from one pool name to another
+    per ``config['co_pool_remap']`` (``{old_pool: new_pool}``).
+
+    Corrects source WARM workbooks that file a pool's CO/Rc history under the
+    wrong pool name (e.g. a legacy 'Motorcycle' line or a mistaken pool) so the
+    correctly-named pool shows its history. Values are moved additively; the
+    old key is removed.
+    """
+    remap = config.get('co_pool_remap') or {}
+    if not remap or not hist:
+        return
+    rm = {str(k).strip(): str(v).strip() for k, v in remap.items()
+          if str(k).strip() and str(v).strip()}
+    if not rm:
+        return
+
+    def _move_flat(d):
+        if not isinstance(d, dict):
+            return
+        for old, new in rm.items():
+            if old in d:
+                d[new] = (d.get(new) or 0) + (d.pop(old) or 0)
+
+    def _move_nested(d):
+        if isinstance(d, dict):
+            for sub in d.values():
+                _move_flat(sub)
+
+    def _has_balance(entry):
+        if not isinstance(entry, dict):
+            return False
+        try:
+            return any(abs(float(x or 0)) > 0 for x in (entry.get('total') or []))
+        except (TypeError, ValueError):
+            return False
+
+    def _move_series(d):
+        # Whole per-pool balance entry ({pool: {dates,total,grades...}}); move the
+        # source series onto the target only when the target has no real history.
+        if not isinstance(d, dict):
+            return
+        for old, new in rm.items():
+            if old in d and not _has_balance(d.get(new)):
+                d[new] = d.pop(old)
+            else:
+                d.pop(old, None)
+
+    for key in ('chargeoffs', 'recoveries', 'dq_pct', 'co_monthly',
+                'rc_monthly'):
+        _move_nested(hist.get(key))
+    imp = hist.get('impaired') or {}
+    for key in ('warm_co_totals', 'warm_rc_totals', 'warm_net_co'):
+        _move_flat(imp.get(key))
+    for key in ('warm_co', 'warm_rc', 'warm_net', 'warm_dq_pct',
+                'warm_co_monthly', 'warm_rc_monthly'):
+        _move_nested(imp.get(key))
+    _move_series(imp.get('hist_bal_data'))
+
+
+def _add_co_rc_pools(hist, config):
+    """Add analyst-supplied charge-off / recovery history for pools whose real
+    figures are missing from the source WARM's aggregated CO/Rc tab.
+
+    Config ``co_rc_add: {pool: {co: {year: amt}, rc: {year: amt}}}``. Values are
+    added to the annual series and the life-of-loan totals (caller supplies only
+    years within the pool's ACL window).
+    """
+    add = config.get('co_rc_add') or {}
+    if not add or not hist:
+        return
+    imp = hist.get('impaired') or {}
+    for pool, spec in add.items():
+        pool = str(pool).strip()
+        co = (spec or {}).get('co') or {}
+        rc = (spec or {}).get('rc') or {}
+        co_tot = rc_tot = 0.0
+        for y, amt in co.items():
+            y = int(y); amt = float(amt or 0)
+            hist.setdefault('chargeoffs', {}).setdefault(y, {})
+            hist['chargeoffs'][y][pool] = hist['chargeoffs'][y].get(pool, 0) + amt
+            if isinstance(imp.get('warm_co'), dict):
+                imp['warm_co'].setdefault(y, {})
+                imp['warm_co'][y][pool] = imp['warm_co'][y].get(pool, 0) + amt
+            co_tot += amt
+        for y, amt in rc.items():
+            y = int(y); amt = float(amt or 0)
+            hist.setdefault('recoveries', {}).setdefault(y, {})
+            hist['recoveries'][y][pool] = hist['recoveries'][y].get(pool, 0) + amt
+            if isinstance(imp.get('warm_rc'), dict):
+                imp['warm_rc'].setdefault(y, {})
+                imp['warm_rc'][y][pool] = imp['warm_rc'][y].get(pool, 0) + amt
+            rc_tot += amt
+        if isinstance(imp.get('warm_co_totals'), dict):
+            imp['warm_co_totals'][pool] = imp['warm_co_totals'].get(pool, 0) + co_tot
+        if isinstance(imp.get('warm_rc_totals'), dict):
+            imp['warm_rc_totals'][pool] = imp['warm_rc_totals'].get(pool, 0) + rc_tot
+        if isinstance(imp.get('warm_net_co'), dict):
+            imp['warm_net_co'][pool] = imp['warm_net_co'].get(pool, 0) + (co_tot - rc_tot)
+
+
+def _resolve_warm_path(config, snap):
+    """Locate the CECL-Migration-WARM workbook for raw-code aggregation.
+
+    Mirrors ``generate_report.load_impaired_data``'s search: ``data_directory``
+    plus ``credit_pull.fallback_report_folder``, matched space/underscore- and
+    hyphen-tolerantly and required to reference this CU.
+    """
+    import os
+    import re as _re
+    cu = config.get('credit_union', '')
+    safe_cu = cu.replace(' ', '_').replace('/', '-').lower()
+    first = cu.lower().split()[0] if cu.strip() else ''
+    prefix = (snap or '')[:7]
+    dirs = []
+    for key in (config.get('data_directory', ''),
+                (config.get('credit_pull') or {}).get('fallback_report_folder', '')):
+        if key and key not in dirs:
+            dirs.append(key)
+    pat = _re.compile(
+        rf'^{_re.escape(prefix)}.*CECL[\s_\-]+Migration[\s_\-]+WARM.*\.xls[xm]?$',
+        _re.IGNORECASE)
+
+    def _cu_ok(fn):
+        norm = fn.lower().replace(' ', '_')
+        return (not cu) or safe_cu in norm or (len(first) >= 4 and first in norm)
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        for root, _dirs, files in os.walk(d):
+            for f in files:
+                if f.startswith('~$') or f.upper().startswith('DNU'):
+                    continue
+                if pat.match(f) and _cu_ok(f):
+                    return os.path.join(root, f)
+    return None
+
+
+def _apply_raw_code_aggregates(hist, config, snap, df, grades):
+    """Re-derive CO/Rc/balances for pools in ``config['pool_loan_codes']`` from
+    the WARM's raw loan-code tabs, replacing whatever the aggregated WARM tabs
+    supplied (which combine/mislabel broken-out pools)."""
+    pool_codes = config.get('pool_loan_codes') or {}
+    if not pool_codes or not hist:
+        return
+    warm_path = _resolve_warm_path(config, snap)
+    if not warm_path:
+        print("    pool_loan_codes: no WARM workbook found — skipping raw-code "
+              "aggregation")
+        return
+    imp = hist.get('impaired') or {}
+    grid = None
+    for pdata in (imp.get('hist_bal_data') or {}).values():
+        if isinstance(pdata, dict) and pdata.get('dates'):
+            grid = pdata['dates']
+            break
+    try:
+        import raw_code_aggregator
+        agg = raw_code_aggregator.aggregate(
+            warm_path, pool_codes, grades, grid or [], snap, df,
+            acl_months=imp.get('acl_months'),
+            no_score=config.get('no_score_label', 'Not Reported'))
+    except Exception as exc:  # noqa: BLE001
+        print(f"    pool_loan_codes: raw-code aggregation failed: {exc}")
+        return
+
+    pools = list(pool_codes.keys())
+
+    def _replace_nested(d, agg_key):
+        if not isinstance(d, dict):
+            return
+        for sub in d.values():
+            for p in pools:
+                sub.pop(p, None)
+        for k, sub in agg[agg_key].items():
+            d.setdefault(k, {})
+            for p, v in sub.items():
+                d[k][p] = v
+
+    _replace_nested(imp.get('warm_co'), 'warm_co')
+    _replace_nested(imp.get('warm_rc'), 'warm_rc')
+    _replace_nested(imp.get('warm_co_monthly'), 'warm_co_monthly')
+    _replace_nested(imp.get('warm_rc_monthly'), 'warm_rc_monthly')
+    _replace_nested(hist.get('chargeoffs'), 'warm_co')
+    _replace_nested(hist.get('recoveries'), 'warm_rc')
+    for fk in ('warm_co_totals', 'warm_rc_totals', 'warm_net_co'):
+        d = imp.get(fk)
+        if isinstance(d, dict):
+            for p in pools:
+                d[p] = agg[fk].get(p, 0.0)
+    hb = imp.get('hist_bal_data')
+    if isinstance(hb, dict):
+        for p in pools:
+            hb[p] = agg['hist_bal_data'][p]
+    n = len(pools)
+    tot_co = sum(agg['warm_co_totals'].values())
+    print(f"    pool_loan_codes: re-derived CO/Rc/balances for {n} pool(s) "
+          f"from raw loan-code tabs (life-of-loan CO ${tot_co:,.0f})")
+
+
 # ── Admin-default + per-pool management-adjustment resolver ──────────
 def _load_admin_default_mgmt_adj():
     """Read the firm-wide default management adjustment from
@@ -1461,7 +1701,7 @@ def _sheet_impdet_summary(wb, cu, snap, df, pools, grades, config, hist=None):
 
     # Use WARM pool order if available; include WARM-only pools too so NRR
     # pools (no DB rows) still appear (with zero impaired/deteriorated %).
-    warm_order = (hist or {}).get('impaired', {}).get('pool_order', [])
+    warm_order = config.get('pool_order') or (hist or {}).get('impaired', {}).get('pool_order', [])
     _imp_isum = (hist or {}).get('impaired', {}) if hist else {}
     extra_pools_isum = set((_imp_isum.get('hist_bal_data') or {}).keys()) \
                       | set((_imp_isum.get('pool_bal_detail') or {}).keys())
@@ -1483,6 +1723,12 @@ def _sheet_impdet_summary(wb, cu, snap, df, pools, grades, config, hist=None):
                        if not str(p).upper().startswith('HIDE')
                        and str(p) != 'Exclude'
                        and str(p).strip().lower() not in ('grand total','total','excluded'))
+
+    # Exclude non-risk-rated pools (no per-grade breakdown) — grade migration
+    # doesn't apply to them.
+    _rr_map = (hist or {}).get('impaired', {}).get('risk_rated', {})
+    _nrr_cfg = set(config.get('not_risk_rated', []))
+    pools = [p for p in pools if p not in _nrr_cfg and _rr_map.get(p, True)]
 
     # Restrict df to pools that have DB rows so the Grand Total still matches
     df_pools = set(df['loan_pool'].unique())
@@ -2912,6 +3158,19 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     acl_summary = _imp.get('acl_summary', {})
     spec_id_by_pool = _imp.get('spec_id_by_pool', {})
 
+    # Pools this migration model does not reserve (loan participations /
+    # commercial handled under a separate methodology) carry no
+    # specific-identification carve-out here — matching the manual WARM,
+    # which shows them at 0/0/0. Without this, a stray specific-ID on a
+    # zero-balance pool yields a nonsensical negative calc balance/allowance.
+    _spec_excl = {str(p).strip().lower()
+                  for p in (config.get('spec_id_exclude_pools') or [])}
+    if _spec_excl and spec_id_by_pool:
+        spec_id_by_pool = {
+            p: g for p, g in spec_id_by_pool.items()
+            if str(p).strip().lower() not in _spec_excl
+        }
+
     # Pools whose allowance is an analyst-set *specific reserve* that the
     # firm-wide model cannot reproduce (e.g. commercial loans allowanced
     # per-loan from a matrix-rating schedule). For these, use the WARM
@@ -3014,6 +3273,11 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     grand_balance = 0
     grand_spec_id = 0
     pool_starts = []
+    # Per-pool per-grade computed values, captured as we render so the PDF
+    # renderer (cecl_report_web.from_data.build_acl_env) can consume TCT's
+    # numbers as data instead of screen-scraping this sheet. Additive only:
+    # nothing else reads it, so the workbook output is unaffected.
+    computed_acl_pools = {}
     _bal_detail = _imp.get('pool_bal_detail', {})
 
     # Build unified pool list in WARM order, including WARM-only pools
@@ -3043,6 +3307,12 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                           if k.strip().lower() == _pool_lc), None)
         warm_grades = warm_pool['grades'] if warm_pool else {}
         warm_total = warm_pool['total'] if warm_pool else {}
+        # Participations / commercial excluded from this model's reserve
+        # (spec_id_exclude_pools): force 0 balance + 0 specific-ID so a
+        # zero-balance pool never renders a negative calc balance/allowance,
+        # matching the manual WARM's 0/0/0 treatment.
+        if _pool_lc in _spec_excl:
+            warm_total = {**warm_total, 'balance': 0, 'spec_id': 0}
 
         is_rr = risk_rated_flags.get(pool, has_db_data) if risk_rated_flags else (pool not in nrr)
 
@@ -3096,6 +3366,7 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             # Not Reported portion for a BRR pool.
             pool_grade_balance_sum = 0
             pool_grade_spec_id_sum = 0
+            _grade_rows = {}  # captured per-grade values for the PDF renderer
             for gi, g in enumerate(pool_grade_labels):
                 fnt = _tct_grade_font(g)
 
@@ -3190,6 +3461,13 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                 r += 1
                 pool_grade_balance_sum += balance or 0
                 pool_grade_spec_id_sum += specific_id or 0
+                if not str(g).upper().startswith('HIDE'):
+                    _grade_rows[g] = {
+                        'balance': balance, 'spec_id': specific_id,
+                        'calc_bal': calc_bal, 'base_rate': base_rate,
+                        'mgmt_adj': mgmt_adj, 'factor': factor,
+                        'allow_before': allow_before,
+                    }
 
             # Pool total row
             _is_brr = _is_brr_pool(pool, brr_pool_lcs)
@@ -3233,6 +3511,17 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             grand_spec_id += total_spec_id or 0
             pool_eff_rate[pool] = (total_allow / total_calc_bal) \
                 if total_calc_bal else 0
+
+            computed_acl_pools[pool] = {
+                'grades': _grade_rows,
+                'total': {
+                    'balance': total_balance, 'spec_id': total_spec_id,
+                    'base_rate': None, 'mgmt_adj': None, 'factor': None,
+                    'allow_before': pool_allow_before_out,
+                    'env_factor': env_factor, 'env_allow': env_allow,
+                    'total_allow': total_allow,
+                },
+            }
 
             ws.cell(row=r, column=1, value="Total").font = FNT_A12B
             ws.cell(row=r, column=2, value=total_balance).number_format = ACCT
@@ -3303,6 +3592,17 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             grand_spec_id += nrr_spec_id or 0
             pool_eff_rate[pool] = (nrr_total_allow / nrr_calc_bal) \
                 if nrr_calc_bal else 0
+
+            computed_acl_pools[pool] = {
+                'grades': {},
+                'total': {
+                    'balance': nrr_balance, 'spec_id': nrr_spec_id,
+                    'base_rate': nrr_base_rate, 'mgmt_adj': nrr_mgmt_adj,
+                    'factor': nrr_factor, 'allow_before': nrr_allow_before,
+                    'env_factor': env_factor, 'env_allow': nrr_env_allow,
+                    'total_allow': nrr_total_allow,
+                },
+            }
 
             ws.cell(row=r, column=1, value="Total").font = FNT_A12B
             ws.cell(row=r, column=2, value=nrr_balance).number_format = ACCT
@@ -3401,6 +3701,30 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     acl_bal = acl_summary.get('acl_balance', config.get('acl_balance', 0))
     adjustment = total_allow_needed - acl_bal
 
+    # Stash the computed totals so the standalone ACL Funding Worksheet
+    # (report_acl_funding via report_vizo._compute_acl_totals) ties to this
+    # report instead of recomputing via the Vizo fallback path. Mirrors
+    # report_vizo._sheet_acl_reserve.
+    _imp_stash = hist.setdefault('impaired', {})
+    _imp_stash['_computed_pooled_total_allow'] = pooled_total_allow
+    _imp_stash['_computed_total_allow_needed'] = total_allow_needed
+    _imp_stash['_computed_acl_balance'] = acl_bal
+    # Publish the fully-rendered ACL environmental values as data dicts so the
+    # PDF renderer (cecl_report_web.from_data.build_acl_env, via report_tct.
+    # compute_acl_environmental) consumes TCT's numbers instead of Vizo's.
+    _imp_stash['_acl_pools_computed'] = computed_acl_pools
+    _imp_stash['_acl_summary_computed'] = {
+        'pooled_balance': pooled_balance, 'pooled_spec_id': pooled_spec_id,
+        'pooled_allow_before': grand_allow_before,
+        'pooled_env_allow': grand_env_allow,
+        'pooled_total_allow': pooled_total_allow,
+        'total_spec_allow': total_spec_allow,
+        'total_allow_needed': total_allow_needed,
+        'acl_balance': acl_bal, 'adjustment': adjustment,
+    }
+    _imp_stash['_acl_impaired_computed'] = dict(acl_impaired)
+    _imp_stash['_acl_oac_computed'] = list(oac_rows)
+
     r += 1
     ws.cell(row=r, column=1, value="Total Specifically Identified Allowance").font = FNT_A12B
     ws.cell(row=r, column=11, value=total_spec_allow).number_format = ACCT
@@ -3426,7 +3750,10 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     ws.cell(row=r, column=1, value=f"Allowance for Credit Loss Balance as of {_snap_display(snap)}").font = FNT_A12
     ws.cell(row=r, column=11, value=acl_bal).number_format = ACCT
     r += 1
-    ws.cell(row=r, column=1, value="Adjustment (Overfunded)").font = FNT_A12B
+    # Positive adjustment (needed > balance) means the CU must add to the
+    # allowance, i.e. UNDERfunded; negative means overfunded.
+    _adj_label = "Adjustment (Underfunded)" if adjustment >= 0 else "Adjustment (Overfunded)"
+    ws.cell(row=r, column=1, value=_adj_label).font = FNT_A12B
     ws.cell(row=r, column=11, value=adjustment).number_format = ACCT
     ws.cell(row=r, column=11).font = FNT_A12B
 
@@ -4979,6 +5306,58 @@ def _sheet_detail_co_hist(wb, cu, snap, config, hist):
 # MAIN COMPOSER
 # ══════════════════════════════════════════════════════════════════
 
+def compute_acl_environmental(df, grades, config, hist, snap):
+    """TCT ACL environmental data (acl_pools / acl_summary / acl_impaired /
+    acl_oac) as pure data, with no deliverable workbook -- the standalone entry
+    the PDF renderer uses so it never depends on the .xlsx being built or read.
+
+    Replicates ``compose_tct``'s pre-processing (raw-code aggregates, CO pool
+    remap, excluded-pool strip, exclude filter, and the CU distribution-factor
+    install) then runs ``_sheet_env_factor`` + ``_sheet_acl_reserve`` (the single
+    source of truth) against a throwaway workbook, on deep COPIES of ``config``
+    and ``hist`` (and a copy of ``df``) so the caller's state is untouched.
+    Returns the same dict shape ``report_vizo.compute_acl_environmental`` does.
+    """
+    import copy
+    from openpyxl import Workbook
+
+    _cfg = copy.deepcopy(config) if config else {}
+    _hist = copy.deepcopy(hist) if hist else {}
+    _df = df.copy() if df is not None else df
+    cu = _cfg.get('credit_union', '')
+    try:
+        _apply_raw_code_aggregates(_hist, _cfg, snap, _df, grades)
+        _remap_co_pools(_hist, _cfg)
+        _add_co_rc_pools(_hist, _cfg)
+        _strip_excluded_pools(_hist, _cfg)
+        _excl = {str(p).strip().lower() for p in (_cfg.get('exclude_pools') or [])}
+        if _excl:
+            _df = _df[~_df['loan_pool'].astype(str).str.strip().str.lower().isin(_excl)]
+        # Install any CU-specific distribution-factor table (same as compose_tct).
+        global _ACTIVE_DIST_FACTORS
+        _cfg_df = _cfg.get('distribution_factors')
+        if isinstance(_cfg_df, (list, tuple)) and _cfg_df:
+            try:
+                _ACTIVE_DIST_FACTORS = [float(x) for x in _cfg_df]
+            except (TypeError, ValueError):
+                _ACTIVE_DIST_FACTORS = None
+        else:
+            _ACTIVE_DIST_FACTORS = None
+        wb = Workbook()
+        env_results = _sheet_env_factor(wb, cu, snap, _df, grades, _cfg, _hist)
+        _sheet_acl_reserve(wb, cu, snap, _df, grades, _cfg, _hist, env_results)
+    except Exception as exc:  # noqa: BLE001 - never let the PDF path crash
+        print(f"  TCT compute_acl_environmental failed: {exc}")
+        return {'acl_pools': {}, 'acl_summary': {}, 'acl_impaired': {}, 'acl_oac': []}
+    imp = (_hist or {}).get('impaired', {}) or {}
+    return {
+        'acl_pools': imp.get('_acl_pools_computed', {}),
+        'acl_summary': imp.get('_acl_summary_computed', {}),
+        'acl_impaired': imp.get('_acl_impaired_computed', {}),
+        'acl_oac': imp.get('_acl_oac_computed', []),
+    }
+
+
 def compose_tct(client, snap, df, config, grades, hist=None):
     """
     Build complete TCT-format CECL-Migration-WARM workbook.
@@ -4987,6 +5366,13 @@ def compose_tct(client, snap, df, config, grades, hist=None):
     """
     cu = config['credit_union']
     no_score = config.get('no_score_label', 'Not Reported')
+    _apply_raw_code_aggregates(hist, config, snap, df, grades)
+    _remap_co_pools(hist, config)
+    _add_co_rc_pools(hist, config)
+    _strip_excluded_pools(hist, config)
+    _excl = {str(p).strip().lower() for p in (config.get('exclude_pools') or [])}
+    if _excl:
+        df = df[~df['loan_pool'].astype(str).str.strip().str.lower().isin(_excl)]
     pools = _sort_pools(df['loan_pool'].unique(), config)
 
     # Install any CU-specific distribution-factor table for this report run

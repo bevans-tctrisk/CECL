@@ -79,14 +79,18 @@ _DISCLAIMER = (
 
 
 def build_cover(client_name: str, snapshot_date: str, config: dict,
-                *, supplemental: bool = False) -> CoverPage:
-    """Populate the Vizo cover from config/period alone (no workbook).
+                *, supplemental: bool = False, variant: str = "vizo") -> CoverPage:
+    """Populate the report cover from config/period alone (no workbook).
 
-    Mirrors ``report_vizo.sheet_cover_vizo``: title, CU name, period date,
-    the confidentiality paragraph, the copyright footer, and the two bundled
-    logos resolved from ``report_vizo``'s asset paths.
+    ``variant="vizo"`` mirrors ``report_vizo.sheet_cover_vizo`` (two logos,
+    confidentiality paragraph). ``variant="tct"`` mirrors
+    ``report_tct._sheet_cover`` (title "RISK BASED PRICING", feature bullets,
+    "Prepared For", a single centered TCT logo, and the address footer).
     """
     cu = (config or {}).get("credit_union") or client_name
+
+    if variant == "tct":
+        return _build_cover_tct(cu, snapshot_date)
 
     # Reuse the report engine's own logo paths so the asset resolves the same
     # way it does for the workbook; import lazily to avoid a heavy import at
@@ -115,6 +119,47 @@ def build_cover(client_name: str, snapshot_date: str, config: dict,
         top_logo=top,
         bottom_logo=bottom,
     )
+
+
+# Feature bullets + footer verbatim from report_tct._sheet_cover / _footer_cells.
+_TCT_FEATURES = [
+    "CECL Compliant", "Risk Change by Type",
+    "Improved/Deteriorated Loan Analysis", "Environmental Factor",
+    "Allowance for Credit Loss (ACL)", "Summary of Deteriorated Loans",
+]
+
+
+def _build_cover_tct(cu: str, snapshot_date: str) -> CoverPage:
+    """TCT-format cover (report_tct._sheet_cover)."""
+    try:
+        import os as _os
+        _logo_path = _os.path.join(_os.path.dirname(__file__), "..", "logos",
+                                   "tct_risk_solutions.png")
+        logo = _logo_data_uri(_os.path.abspath(_logo_path))
+    except Exception:  # noqa: BLE001 - logo optional; cover still renders
+        logo = None
+    yr = _snap_parts(snapshot_date)[2]
+    return CoverPage(
+        credit_union=cu,
+        period_ending=str(snapshot_date)[:10],
+        title="RISK BASED PRICING",
+        subtitle="ACL/Credit Migration Report",
+        variant="tct",
+        features=list(_TCT_FEATURES),
+        prepared_for="Prepared For:",
+        period_label="For Period Ending",
+        presented_by="Presented by:",
+        date_text=_date_text(snapshot_date),
+        logo=logo,
+        footer_lines=[
+            f"\u00a9 {yr} TCT Risk Solutions",
+            "P.O. Box 2210",
+            "Eagle, ID 83616",
+            "Voice (208) 939-8366 - Fax (208) 938-6276",
+            "E-Mail: RThompson@tctrisk.com or Office@tctrisk.com",
+        ],
+    )
+
 
 
 def _cell_state(i: int, j: int, cur_grade: str, orig_grade: str,
@@ -236,38 +281,45 @@ _ACL_ADJ_KEYS = [
 
 
 def _acl_data(config: dict, snapshot_date: str, hist: dict | None,
-              df: Any, grades: Any) -> tuple[dict, dict, dict]:
-    """(acl_pools, acl_summary, acl_impaired): the values report_vizo publishes,
-    then the WARM-parsed dicts, then a standalone compute when df/grades exist."""
-    import report_vizo as _rv
+              df: Any, grades: Any, variant: str = "vizo") -> tuple[dict, dict, dict]:
+    """(acl_pools, acl_summary, acl_impaired): the values the report engine
+    publishes, then the WARM-parsed dicts, then a standalone compute when
+    df/grades exist. ``variant`` selects the TCT vs Vizo ACL compute engine
+    (they diverge -- TCT uses WARM life-loss + CU distribution factors)."""
+    if variant == "tct":
+        import report_tct as _eng
+    else:
+        import report_vizo as _eng
 
     _imp = (hist or {}).get("impaired", {}) or {}
     acl_pools = _imp.get("_acl_pools_computed") or _imp.get("acl_pools") or {}
     acl_summary = _imp.get("_acl_summary_computed") or _imp.get("acl_summary") or {}
     acl_impaired = _imp.get("_acl_impaired_computed") or _imp.get("acl_impaired") or {}
     if not acl_pools and df is not None:
-        computed = _rv.compute_acl_environmental(df, grades, config, hist, snapshot_date)
+        computed = _eng.compute_acl_environmental(df, grades, config, hist, snapshot_date)
         acl_pools = computed.get("acl_pools") or {}
         acl_summary = computed.get("acl_summary") or acl_summary
         acl_impaired = computed.get("acl_impaired") or acl_impaired
+        if isinstance(_imp, dict):
+            _imp["_acl_oac_computed"] = computed.get("acl_oac") or []
     return acl_pools, acl_summary, acl_impaired
 
 
 def build_acl_env(client_name: str, snapshot_date: str, config: dict,
                   hist: dict | None = None, df: Any = None,
-                  grades: Any = None) -> AclEnvPage | None:
+                  grades: Any = None, variant: str = "vizo") -> AclEnvPage | None:
     """Populate the "ACL Env by Pool Mgmt Adj" page from the ACL data dicts.
 
-    Prefers the values ``report_vizo._sheet_acl_reserve`` publishes when the
-    report was composed (isolated underscore keys), then the WARM-parsed dicts,
-    and finally -- when neither is present and ``df``/``grades`` are supplied --
-    computes them standalone via ``report_vizo.compute_acl_environmental`` so
-    the page renders without the workbook being built at all.
+    Prefers the values the report engine publishes when the report was composed
+    (isolated underscore keys), then the WARM-parsed dicts, and finally -- when
+    neither is present and ``df``/``grades`` are supplied -- computes them
+    standalone via the ``variant``'s ``compute_acl_environmental`` so the page
+    renders without the workbook being built at all.
     """
     import report_vizo as _rv
 
     acl_pools, acl_summary, acl_impaired = _acl_data(
-        config, snapshot_date, hist, df, grades)
+        config, snapshot_date, hist, df, grades, variant)
     if not acl_pools:
         return None
     pool_order = list(acl_pools.keys())
@@ -320,10 +372,32 @@ def build_acl_env(client_name: str, snapshot_date: str, config: dict,
 
     impaired_rows = [AdjustmentRow(label=k, value=v)
                      for k, v in acl_impaired.items()]
-    adjustment_rows = [
-        AdjustmentRow(label=lbl, value=acl_summary.get(key), bold=True)
-        for lbl, key in _ACL_ADJ_KEYS if key in acl_summary
-    ]
+    # Other Allowance Considerations (e.g. Unfunded Commitments) itemised the
+    # same way the Excel ACL Env tab shows them, inserted after the Total
+    # Specifically Identified Allowance line so both reports tie out identically.
+    _oac = ((hist or {}).get("impaired", {}) or {}).get("_acl_oac_computed") or []
+    adjustment_rows = []
+    for lbl, key in _ACL_ADJ_KEYS:
+        if key not in acl_summary:
+            continue
+        adjustment_rows.append(
+            AdjustmentRow(label=lbl, value=acl_summary.get(key), bold=True))
+        if key == "total_spec_allow":
+            # Blank spacer after the specific-ID total -- before Other Allowance
+            # Considerations, or before Total Allowance Needed when none exist.
+            adjustment_rows.append(AdjustmentRow(label="", value=None))
+            if _oac:
+                adjustment_rows.append(AdjustmentRow(
+                    label="Other Allowance Considerations", value=None, bold=True))
+                for o in _oac:
+                    adjustment_rows.append(AdjustmentRow(
+                        label=o.get("title") or "", value=o.get("amount")))
+                adjustment_rows.append(AdjustmentRow(
+                    label="Total Other Allowance Considerations",
+                    value=sum(float(o.get("amount") or 0) for o in _oac),
+                    bold=True))
+                # Blank spacer before Total Allowance Needed.
+                adjustment_rows.append(AdjustmentRow(label="", value=None))
     heading = [
         "Allowance & Provision for Credit Loss Reserve Analysis",
         f"For Quarter Ending {_rv._snap_display(snapshot_date)}",
@@ -336,7 +410,7 @@ def build_acl_env(client_name: str, snapshot_date: str, config: dict,
 
 def build_impr_deter(client_name: str, snapshot_date: str, config: dict,
                      hist: dict | None = None, df: Any = None,
-                     grades: Any = None) -> ImprDeterPage:
+                     grades: Any = None, variant: str = "vizo") -> ImprDeterPage:
     """Populate the "Impr Deter" page's CECL Adjustment box from data.
 
     The four headline allowance figures are exactly the ACL summary the ACL
@@ -349,7 +423,8 @@ def build_impr_deter(client_name: str, snapshot_date: str, config: dict,
     _imp = (hist or {}).get("impaired", {}) or {}
     acl_summary = _imp.get("_acl_summary_computed") or _imp.get("acl_summary") or {}
     if not acl_summary.get("total_allow_needed") and df is not None:
-        acl_summary = (_rv.compute_acl_environmental(
+        _eng = __import__("report_tct") if variant == "tct" else _rv
+        acl_summary = (_eng.compute_acl_environmental(
             df, grades, config, hist, snapshot_date).get("acl_summary")
             or acl_summary)
 
@@ -385,20 +460,26 @@ _C_IMPROVED = "829901"
 _C_DETERIORATED = "873A3A"
 _C_UNCHANGED = "0D4D5E"
 _C_NOT_REPORTED = "FFC000"
-_C_NET = "0D4D5E"
+_C_NET = "829901"
 _MIG_LABELS = ("Improved", "Deteriorated", "Unchanged", "Not Reported")
 _MIG_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED, _C_NOT_REPORTED)
 _NCC_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED)
+# Risk Change chart colours matched to the on-page matrix EXACTLY: cell green
+# (#6E8A00) / red (#B4453F), header teal (#0D4D5E) for Unchanged, amber for Not
+# Reported. Used RAW (prefer_colors) so Unchanged keeps the header teal.
+_RC_MIG_COLORS = ("6E8A00", "B4453F", "0D4D5E", "E0A400")
+_RC_NCC_COLORS = ("6E8A00", "B4453F", "0D4D5E")
 
 
 def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
     """Adapt a semantic ChartSpec to the dict charts.render_chart_svg consumes."""
     lbl_fmt = "0.0%" if cs.value_format == "pct" else None
+    opts = cs.options or {}
     if cs.kind in ("pie", "doughnut"):
         s0 = cs.series[0] if cs.series else {}
         ctype = "DoughnutChart" if cs.kind == "doughnut" else "PieChart"
         return {
-            "type": ctype, "title": cs.title,
+            "type": ctype, "title": cs.title, "options": opts,
             "series": [{
                 "name": s0.get("name"), "values": s0.get("values") or [],
                 "cats": list(cs.categories),
@@ -408,7 +489,7 @@ def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
         }
     if cs.kind == "line":
         return {
-            "type": "LineChart", "title": cs.title,
+            "type": "LineChart", "title": cs.title, "options": opts,
             "width": 760, "height": 218,
             "series": [{
                 "name": s.get("name"), "values": s.get("values") or [],
@@ -420,7 +501,7 @@ def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
     grouping = "stacked" if cs.kind == "diverging_bar" else "clustered"
     return {
         "type": "BarChart", "bar_dir": bar_dir, "grouping": grouping,
-        "title": cs.title,
+        "title": cs.title, "options": opts,
         "series": [{
             "name": s.get("name"), "values": s.get("values") or [],
             "cats": list(cs.categories),
@@ -465,20 +546,18 @@ def risk_change_charts(hist: dict | None, pool_name: str | None = None) -> list[
         dq = _imp.get("dq_by_status") or {}
         co = _imp.get("co_by_status") or {}
     specs: list[ChartSpec] = []
-    dq_vals = _mig_status_series(dq)
-    if dq_vals is not None:
-        specs.append(ChartSpec(
-            kind="pie", title="Delinquency by Credit Grade Migration",
-            categories=list(_MIG_LABELS),
-            series=[{"name": "DQ", "values": dq_vals, "colors": list(_MIG_COLORS)}],
-            value_format="pct"))
-    co_vals = _mig_status_series(co)
-    if co_vals is not None:
-        specs.append(ChartSpec(
-            kind="bar_h", title="Charge off by Credit Grade Migration",
-            categories=list(_MIG_LABELS),
-            series=[{"name": "CO", "values": co_vals, "colors": list(_MIG_COLORS)}],
-            value_format="pct"))
+    dq_vals = _mig_status_series(dq) or [0.0, 0.0, 0.0, 0.0]
+    specs.append(ChartSpec(
+        kind="pie", title="Delinquency by Credit Grade Migration",
+        categories=list(_MIG_LABELS),
+        series=[{"name": "DQ", "values": dq_vals, "colors": list(_RC_MIG_COLORS)}],
+        value_format="pct", options={"prefer_colors": True}))
+    co_vals = _mig_status_series(co) or [0.0, 0.0, 0.0, 0.0]
+    specs.append(ChartSpec(
+        kind="bar_h", title="Charge off by Credit Grade Migration",
+        categories=list(_MIG_LABELS),
+        series=[{"name": "CO", "values": co_vals, "colors": list(_RC_MIG_COLORS)}],
+        value_format="pct", options={"prefer_colors": True}))
     return specs
 
 
@@ -517,6 +596,71 @@ def risk_change_ncc_chart(df: Any, grades: Any, config: dict) -> list[ChartSpec]
                  "values": [imp / total, det / total, unc / total],
                  "colors": list(_NCC_COLORS)}],
         value_format="pct")]
+
+
+def risk_change_by_grade_chart(df: Any, grades: Any, config: dict) -> list[ChartSpec]:
+    """Risk Change by Grade: per-original-grade Deteriorated / Improved balances
+    (clustered columns, Not Reported excluded) -- mirrors the Excel chart."""
+    import report_vizo as _rv
+    from cecl_engine import risk_change_matrix
+
+    no_score = (config or {}).get("no_score_label", "Not Reported")
+    n_top = int((config or {}).get("top_grades_double_drop", 3))
+    gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
+    if not gl:
+        return []
+    matrix = risk_change_matrix(df, grades, no_score)
+    cats: list[str] = []
+    det_by: list[float] = []
+    imp_by: list[float] = []
+    for j, og in enumerate(gl):
+        if og == no_score:
+            continue
+        det = imp = 0.0
+        for i, g in enumerate(gl):
+            v = float(_rv._matrix_val(matrix, g, og) or 0.0)
+            st = _cell_state(i, j, g, og, no_score, n_top)
+            if st == "deteriorated":
+                det += v
+            elif st == "improved":
+                imp += v
+        cats.append(og)
+        det_by.append(det)
+        imp_by.append(imp)
+    if not cats:
+        return []
+    return [ChartSpec(
+        kind="column", title="Risk Change by Grade", categories=cats,
+        series=[{"name": "Deteriorated", "values": det_by, "colors": [_C_DETERIORATED]},
+                {"name": "Improved", "values": imp_by, "colors": [_C_IMPROVED]}],
+        value_format="currency",
+        options={"outline": True, "center_title": True,
+                 "no_value_axis": True, "value_labels": "never",
+                 "outline_width": 3.2})]
+
+
+def build_ncc_combo(df: Any, grades: Any, config: dict) -> str:
+    """Net Credit Change: the Improved/Deteriorated/Unchanged/Portfolio/Net
+    summary table beside an exploded doughnut -- one HTML fragment placed in a
+    Risk Change chart cell. Colours match the on-page matrix fills."""
+    from .charts import render_ncc_doughnut
+    imp, det, unc, total = _ncc_totals(df, grades, config)
+    if total <= 0:
+        return ""
+    net = imp - det
+    rows = [("Improved", imp, "imp"), ("Deteriorated", det, "det"),
+            ("Unchanged", unc, "unc"), ("Portfolio", total, "tot"),
+            ("Net Change", net, "net")]
+    trs = []
+    for lbl, bal, cls in rows:
+        pct = 1.0 if cls == "tot" else (bal / total if total else 0.0)
+        trs.append(f'<tr class="{cls}"><td class="lbl">{lbl}</td>'
+                   f'<td class="bal">{bal:,.0f}</td>'
+                   f'<td class="pct">{pct * 100:.1f}%</td></tr>')
+    table = '<table class="ncc-table"><tbody>' + "".join(trs) + '</tbody></table>'
+    return ('<div class="ncc-combo"><div class="ncc-title">Net Credit Change</div>'
+            '<div class="ncc-body">' + table + render_ncc_doughnut(imp, det, unc)
+            + '</div></div>')
 
 
 def impr_deter_charts(df: Any, grades: Any, config: dict,
@@ -582,15 +726,19 @@ def impr_deter_charts(df: Any, grades: Any, config: dict,
             series=[{"name": "Deteriorated", "values": det_pct_g[:-1], "colors": [_C_DETERIORATED]}],
             value_format="pct"))
     if names:
+        # Negate so Improved (teal) plots LEFT of the zero baseline and
+        # Deteriorated (maroon) RIGHT; labels still show magnitude via abs().
         specs.append(ChartSpec(
             kind="diverging_bar", title="Improved / Deteriorated Loans",
             categories=names,
-            series=[{"name": "Improved", "values": p_imp, "colors": [_C_IMPROVED]},
-                    {"name": "Deteriorated", "values": p_det, "colors": [_C_DETERIORATED]}],
+            series=[{"name": "Improved", "values": [-v for v in p_imp], "colors": [_C_IMPROVED]},
+                    {"name": "Deteriorated", "values": [-v for v in p_det], "colors": [_C_DETERIORATED]}],
             value_format="pct"))
+        # Net Change as a diverging bar: positive (net improvement) plots LEFT,
+        # negative (net deterioration) RIGHT -- negate to flip onto that side.
         specs.append(ChartSpec(
-            kind="bar_h", title="Net Change", categories=names,
-            series=[{"name": "Net", "values": p_net, "colors": [_C_NET]}],
+            kind="diverging_bar", title="Net Change", categories=names,
+            series=[{"name": "Net", "values": [-v for v in p_net], "colors": [_C_NET]}],
             value_format="pct"))
     return specs
 
@@ -640,10 +788,25 @@ def build_acl_summary(client_name: str, snapshot_date: str, config: dict,
     adj_rows: list[list[TableCell]] = []
     for k, v in (acl_impaired or {}).items():
         adj_rows.append([TableCell(k, "text", align="left"), TableCell(v, "currency")])
+    # Other Allowance Considerations (e.g. Unfunded Commitments) itemised after
+    # the specific-ID total so this page foots to Total Allowance Needed the
+    # same way the Excel ACL Summary tab does.
+    _oac = ((hist or {}).get("impaired", {}) or {}).get("_acl_oac_computed") or []
     for lbl, key in _ACL_ADJ_KEYS:
-        if key in acl_summary:
-            adj_rows.append([TableCell(lbl, "text", bold=True, align="left"),
-                             TableCell(acl_summary.get(key), "currency", bold=True)])
+        if key not in acl_summary:
+            continue
+        adj_rows.append([TableCell(lbl, "text", bold=True, align="left"),
+                         TableCell(acl_summary.get(key), "currency", bold=True)])
+        if key == "total_spec_allow" and _oac:
+            adj_rows.append([TableCell("Other Allowance Considerations", "text",
+                                       bold=True, align="left"), TableCell(None)])
+            for o in _oac:
+                adj_rows.append([TableCell(o.get("title") or "", "text", align="left"),
+                                 TableCell(o.get("amount"), "currency")])
+            adj_rows.append([TableCell("Total Other Allowance Considerations", "text",
+                                       bold=True, align="left"),
+                             TableCell(sum(float(o.get("amount") or 0) for o in _oac),
+                                       "currency", bold=True)])
     if adj_rows:
         sections.append(TableSection(
             title="Impaired Loans & Adjustment", rows=adj_rows))
@@ -667,7 +830,7 @@ def build_mgmt_adj_summary(client_name: str, snapshot_date: str, config: dict,
         return None
     cu = (config or {}).get("credit_union") or client_name
     heading = [f"For Quarter Ending {_rv._snap_display(snapshot_date)}"]
-    title = "Management & Environmental Adjustments"
+    title = "Management Adjustments"
 
     # Base management adjustment rate driving each pool's per-grade adjustments:
     # the pool's manual overlay, else the firm-wide admin default.
@@ -687,62 +850,54 @@ def build_mgmt_adj_summary(client_name: str, snapshot_date: str, config: dict,
         return TableCell(None)
 
     cols = ["Portfolio Segment", "Grade", "Balance", "ACL Base Loss Rate",
-            "Mgmt Adj", "Allowance Factor", "Allowance before Env Factor",
-            "Env Factor", "Env Factor Allowance"]
+            "Mgmt Adj", "Allowance Factor", "Allowance before Env Factor"]
     rows: list[list[TableCell]] = []
-    any_adj = False
     for pool, pdata in acl_pools.items():
         grades_d = pdata.get("grades") or {}
         total = pdata.get("total") or {}
         adj_grades = [(g, gv) for g, gv in grades_d.items()
                       if (gv.get("mgmt_adj") or 0)]
-        env_factor = total.get("env_factor") or 0
-        if not adj_grades and not env_factor:
-            continue
-        any_adj = True
-        rows.append([TableCell(pool, "text", bold=True, align="left")]
-                    + [blank() for _ in range(8)])
-        for g, gv in adj_grades:
+        if adj_grades:
+            rows.append([TableCell(pool, "text", bold=True, align="left")]
+                        + [blank() for _ in range(6)])
+            for g, gv in adj_grades:
+                rows.append([
+                    blank(), TableCell(g, "text", align="left"),
+                    TableCell(gv.get("balance"), "currency"),
+                    TableCell(gv.get("base_rate"), "pct4"),
+                    TableCell(gv.get("mgmt_adj"), "pct4"),
+                    TableCell(gv.get("factor"), "pct4"),
+                    TableCell(gv.get("allow_before"), "currency")])
             rows.append([
-                blank(), TableCell(g, "text", align="left"),
-                TableCell(gv.get("balance"), "currency"),
-                TableCell(gv.get("base_rate"), "pct4"),
-                TableCell(gv.get("mgmt_adj"), "pct4"),
-                TableCell(gv.get("factor"), "pct4"),
-                TableCell(gv.get("allow_before"), "currency"), blank(), blank()])
-        rows.append([
-            blank(), TableCell("Total", "text", bold=True, align="left"),
-            TableCell(total.get("balance"), "currency", bold=True),
-            blank(),
-            TableCell((_base_mgmt(pool) or None) if adj_grades else None,
-                      "pct2", bold=True),
-            blank(),
-            TableCell(total.get("allow_before"), "currency", bold=True),
-            TableCell(total.get("env_factor"), "pct", bold=True),
-            TableCell(total.get("env_allow"), "currency", bold=True)])
-
-    if not any_adj:
-        return TablePage(
-            credit_union=cu, title=title, heading_lines=heading,
-            sections=[TableSection(rows=[[TableCell(
-                "No management or environmental adjustments were applied "
-                "this period.", "text", align="left")]])])
+                blank(), TableCell("Total", "text", bold=True, align="left"),
+                TableCell(total.get("balance"), "currency", bold=True),
+                blank(),
+                TableCell(_base_mgmt(pool) or None, "pct2", bold=True),
+                blank(),
+                TableCell(total.get("allow_before"), "currency", bold=True)])
+        else:
+            # Pool without a management adjustment: show its totals row only.
+            rows.append([
+                TableCell(pool, "text", bold=True, align="left"),
+                TableCell("Total", "text", align="left"),
+                TableCell(total.get("balance"), "currency", bold=True),
+                blank(), blank(), blank(),
+                TableCell(total.get("allow_before"), "currency", bold=True)])
 
     rows.append([
         TableCell("Pooled Totals", "text", bold=True, align="left"), blank(),
         TableCell(acl_summary.get("pooled_balance"), "currency", bold=True),
         blank(), blank(), blank(),
-        TableCell(acl_summary.get("pooled_allow_before"), "currency", bold=True),
-        blank(),
-        TableCell(acl_summary.get("pooled_env_allow"), "currency", bold=True)])
+        TableCell(acl_summary.get("pooled_allow_before"), "currency", bold=True)])
     return TablePage(credit_union=cu, title=title, heading_lines=heading,
+                     css_class="mgmt-adj",
                      sections=[TableSection(columns=cols, rows=rows)])
 
 
 def build_impaired_loans(client_name: str, snapshot_date: str, config: dict,
                          hist: dict | None = None, df: Any = None,
                          grades: Any = None) -> TablePage | None:
-    """Impaired Loans - ASC 310-10: the specifically identified allowance by
+    """Impaired Loans - ASC 326-20: the specifically identified allowance by
     impairment category, from the ACL Env impaired data."""
     import report_vizo as _rv
 
@@ -759,7 +914,7 @@ def build_impaired_loans(client_name: str, snapshot_date: str, config: dict,
                       bold=True, align="left"),
             TableCell(acl_summary.get("total_spec_allow"), "currency", bold=True)])
     return TablePage(
-        credit_union=cu, title="Impaired Loans - ASC 310-10",
+        credit_union=cu, title="Impaired Loans - ASC 326-20",
         heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
         sections=[TableSection(columns=["Impairment Category", "Allowance"],
                                rows=rows)])
@@ -834,6 +989,250 @@ def build_introduction(client_name: str, config: dict) -> NarrativePage:
         ])
 
 
+def build_introduction_tct(client_name: str, config: dict) -> NarrativePage:
+    """TCT-format Introduction (ports report_tct._sheet_intro)."""
+    cu = (config or {}).get("credit_union") or client_name
+    return NarrativePage(
+        credit_union=cu, title="ACL/Credit Migration Report",
+        heading="Introduction and Overview",
+        sections=[
+            NarrativeSection("", (
+                "Credit Migration may be defined as a measurement of changes in credit "
+                "scores and risk for individual loans in the loan portfolio of the credit "
+                "union. The composite of these changes provides a valid measure of the "
+                "current risk inherent in the total loan portfolio.")),
+            NarrativeSection("", (
+                "Migration is measured by the improvement or deterioration of risk, measured "
+                "by the credit score, from the date of loan funding to the most recent data "
+                "pull. New credit scores are typically pulled twice per year. Migration may "
+                "still be measured on a quarterly basis to take into account new loans and "
+                "changing loan balances.")),
+            NarrativeSection("", (
+                "Over the life of a loan borrowers\u2019 credit risk rating can change.  "
+                "Borrowers, who experience financial changes such as disruptions of income, "
+                "or severe unexpected expenses, will see their ability to pay decrease which "
+                "will reduce their capacity to make payments. On the reverse side, borrowers "
+                "may experience improved income or a reduction in expenses which will "
+                "increase their ability to service their debts. These changes can have an "
+                "impact on the quality of your loan portfolios. The net effect of improved "
+                "and impaired credit is a direct and valid measure of the risk and hence the "
+                "quality of the credit union\u2019s loans portfolio.")),
+            NarrativeSection("", (
+                "Credit agencies continually monitor multiple risk indicators to calculate "
+                "credit scores including; payment history, amount of credit, available "
+                "credit, employment history, repossessions, bankruptcies, foreclosures and "
+                "others. Each of these variables is dynamic and may change at any time. "
+                "Changes in variables may impact credit worthiness resulting in a change "
+                "credit score. Changes in the credit score is a key indicator changes in the "
+                "risk associated with the loan. Changes in risk may affect member "
+                "performance, either positively or negatively, based on the either "
+                "improvement or impairment of the credit score.")),
+            NarrativeSection("", (
+                "From the beginning of the movement, credit unions have been a primary source "
+                "of financial help and support to members from all credit ranges. Providing "
+                "credit to members who need help is an important reason that credit unions "
+                "exist. Understanding the impacts of credit changes through the measurement "
+                "and analysis of changing credit scores, both deteriorated and improved, will "
+                "increase a credit unions ability to help all of its members.")),
+        ])
+
+
+def build_exec_summary_tct(client_name: str, snapshot_date: str, config: dict,
+                           df: Any = None, grades: Any = None) -> list[NarrativePage]:
+    """The TCT 3-page Executive Summary (ports report_tct._sheet_exec_summary).
+
+    Pages 1-2 are the standard narrative; page 3 adds the Improved/Deteriorated
+    grade-breakout tables. Computed values (Composite Migration Impact, Net
+    Credit Change, per-grade improved/deteriorated) use report_tct's own helpers
+    so they tie to the workbook exactly.
+    """
+    import report_tct as _rt
+
+    cu = (config or {}).get("credit_union") or client_name
+    if df is None or grades is None:
+        return []
+    no_score = config.get("no_score_label", "Not Reported")
+    gl = _rt._all_grades(grades, no_score)
+    snap_disp = _rt._snap_display(snapshot_date)
+
+    total = df["current_balance"].sum()
+    imp_pct, det_pct, ncc_pct = _rt._ncc(df, grades, config)
+    imp_bal = imp_pct * total
+    det_bal = det_pct * total
+
+    # Composite Migration Impact (per-pool average of |net|, NRR pools = 0).
+    nrr = set(config.get("not_risk_rated", []))
+    pool_impacts = []
+    for pool in sorted(df["loan_pool"].unique()):
+        pdf = df[df["loan_pool"] == pool]
+        if pdf["current_balance"].sum() == 0:
+            continue
+        pool_net = 0.0 if pool in nrr else _rt._ncc(pdf, grades, config)[2]
+        pool_impacts.append(abs(pool_net))
+    composite_impact = (sum(pool_impacts) / len(pool_impacts)) if pool_impacts else 0
+    if composite_impact < 0.15:
+        impact_status = "No Significant Risk Change"
+    elif composite_impact < 0.35:
+        impact_status = "Moderate Risk Change"
+    else:
+        impact_status = "Significant Risk Change"
+
+    ncc_score_val = _rt._score(ncc_pct * 100, _rt.NCC_RANGES)
+
+    # ── Page 1 ──
+    page1 = NarrativePage(
+        credit_union=cu, title="Executive Summary",
+        heading="Executive Overview",
+        sections=[
+            NarrativeSection("", (
+                "The Credit Migration Summary from TCT, Inc. presents a comprehensive "
+                "picture of the changing nature of risk in the credit union\u2019s loan "
+                "portfolio. Credit migration is measured by the improvement or "
+                "deterioration of risk, measured by the credit score, from the date of "
+                "loan funding to the most recent data pull. New credit scores are "
+                "typically pulled twice per year. Migration may still be measured on a "
+                "quarterly basis to take into account new loans and changing loan "
+                "balances.")),
+            NarrativeSection("", (
+                "A set of seven reports examines the changing nature of the risk inherent "
+                "in the credit union\u2019s loan portfolio. The reports are:")),
+            NarrativeSection("Section 1 \u2014 Credit Migration",
+                             "Credit change matrix\nNet Credit Change\n"
+                             "Pool and Grade Tracking Report\nDelinquency Breakout"),
+            NarrativeSection("Section 2 \u2014 Improved/Impaired Loan Listings",
+                             "Improved Loans Breakout\nDeteriorated Loans Breakout"),
+            NarrativeSection("Section 3 \u2014 Allowance for Credit Loss Calculation",
+                             "Risk Based Allowance for Credit Loss Report"),
+            NarrativeSection("Credit Change Matrix", (
+                "This report shows the disposition of loans, by grade, resulting from "
+                "credit change. Loans are grouped in columns based on the original credit "
+                "score at loan inception, or date of funding. Each range, or column, of "
+                "loans are then divided into rows that show the dollars in each credit "
+                "range based on the most recent credit score.\n\n"
+                "Loan balances shown in light red cells have a deteriorated credit score. "
+                "Loan balances shown in white cells have an unchanged credit score. Loan "
+                "balances shown in green cells have an improved credit score.\n\n"
+                "The report also provides a table at the bottom of the page showing the "
+                "percentage of loans in each column (representing the original credit "
+                "score) that is in each range as measured with the current credit "
+                "score.")),
+            NarrativeSection("Composite Migration Impact Index (by Initial Grade)", (
+                f"With a Composite Migration Impact Index of {composite_impact:.2%}, "
+                f"{cu} has {impact_status}. The composite Migration impact measures the "
+                f"level of credit change.\n\n"
+                "No Significant Risk Change: 0%\nModerate Risk Change: 15%\n"
+                "Significant Risk Change: 35%")),
+        ])
+
+    # ── Page 2 ──
+    ncc_status_tbl = TableSection(
+        columns=["Net Credit Score", "Status"],
+        rows=[[TableCell(ncc_pct, "pct2", align="left"),
+               TableCell(impact_status, "text", align="left")]])
+    page2 = NarrativePage(
+        credit_union=cu, title="Executive Summary (Continued)",
+        heading="Net Credit Change",
+        sections=[
+            NarrativeSection("", (
+                "The Net Credit change score presents a quantitative measure of the "
+                "composite change in risk in the loan portfolio. Loan balances with "
+                "impaired and improved credit scores are extracted from the Credit Change "
+                "Matrix to create this report.")),
+            NarrativeSection("", (
+                "Balances of deteriorated and improved loans are divided by the total loan "
+                "balance to calculate the percent of portfolio that are impaired and "
+                "improved. Deteriorated loan percentage is then subtracted from the "
+                "improved loan percentage to arrive at a Net Credit Change score. A "
+                "positive Net Credit Change score indicated more improving balances than "
+                "deteriorating scores.")),
+            NarrativeSection("", (
+                f"The Net Credit Change for {cu} is {ncc_pct:.2%} for the period ending "
+                f"{snap_disp}. This results in a Net Credit Score Index of "
+                f"{ncc_score_val:.2f}%."), table=ncc_status_tbl),
+            NarrativeSection("", (
+                "The Net Credit Score Index is one of the three components employed to "
+                "calculate the Environmental Factor.")),
+            NarrativeSection("Pool and Grade Tracking Report", (
+                "Concentrations of loans in pools and grades are important indicators of "
+                "risk. The dynamic nature of credit scores means that grade concentration "
+                "may change consistently from quarter to quarter.")),
+            NarrativeSection("Delinquency Breakout", (
+                "Loan delinquency is the single most valid predictor of impending loan "
+                "losses. Because loan losses exert a major influence on financial "
+                "viability, monitoring delinquency is an important aspect of loan "
+                "management. By controlling delinquency management may also control "
+                "losses.")),
+        ])
+
+    # ── Page 3: per-grade improved/deteriorated from the migration matrix ──
+    visible_grades = [g["label"] for g in grades] + [no_score]
+    matrix = _rt.risk_change_matrix(df, grades, no_score)
+    n_top = config.get("top_grades_double_drop", 3)
+    grade_imp = {g: 0 for g in visible_grades}
+    grade_det = {g: 0 for g in visible_grades}
+    for j, og in enumerate(gl):
+        for i, cg in enumerate(gl):
+            v = _rt._matrix_val(matrix, cg, og)
+            if i > j:
+                if not (j < n_top and (i - j) < 2):
+                    if og in grade_det:
+                        grade_det[og] += v
+            elif i < j and og in grade_imp:
+                grade_imp[og] += v
+
+    def _grade_table(grade_labels, values, total_label, total_val):
+        rows = []
+        for g in grade_labels:
+            rows.append([TableCell(g, "text", align="left"),
+                         TableCell(values.get(g, 0), "currency")])
+        rows.append([TableCell(total_label, "text", align="left", bold=True),
+                     TableCell(total_val, "currency", bold=True)])
+        return TableSection(columns=["Grade", "Balance"], rows=rows)
+
+    # Improved: exclude top grade (first visible) and Not Reported.
+    imp_grades = [g for g in visible_grades[1:] if g != no_score]
+    imp_tbl = _grade_table(imp_grades, grade_imp,
+                           "Total Improved", imp_bal)
+    # Deteriorated: include top grade, exclude lowest grade and Not Reported.
+    grade_only = [g for g in visible_grades if g != no_score]
+    det_grades = grade_only[:-1] if len(grade_only) > 1 else grade_only
+    det_tbl = _grade_table(det_grades, grade_det,
+                           "Total Impaired", det_bal)
+
+    page3 = NarrativePage(
+        credit_union=cu, title="Executive Summary (Continued)",
+        sections=[
+            NarrativeSection("Improved Loans Breakout", (
+                "Individual loans with improved credit scores are listed in this report by "
+                "account number. This list provides an excellent source for targeted "
+                "marketing to expand use of credit union products and services.\n\n"
+                f"Improved Loans Summary as of {snap_disp}"), table=imp_tbl),
+            NarrativeSection("Deteriorated Loans Breakout", (
+                "Individual loans with deteriorated credit scores are listed in this "
+                "report by account number. For unsecured loans a cell is provided for each "
+                "loan to insert the current credit limit attached to each loan. For secured "
+                "loans cells are provided to insert the value of collateral. The report "
+                "then automatically calculates LTV.\n\n"
+                "This report provides a starting point to identify loans that require "
+                "review and specific action. In some cases lines of credit may need to be "
+                "reduced, in other lines may require closure. In all cases these loans "
+                "require greater attention.\n\n"
+                "Since loans with deteriorated credit scores are the single greatest "
+                "source of delinquency and charge-off, early detection of impairment and "
+                "management of the line will be an effective strategy to reduce losses.\n\n"
+                f"Deteriorated Loans Summary as of {snap_disp}"), table=det_tbl),
+            NarrativeSection("Risk Based Allowance for Loan Loss Calculation", (
+                "This report utilizes the outputs from the Credit Migration Summary and Net "
+                "Credit Change Matrix to calculate the Allowance for Loan Loss required by "
+                "the credit union. Included in the calculation is an empirically calculated "
+                "Environmental Factor.\n\n"
+                "A detailed description of the methodology and individual calculations in "
+                "the process is included with the ACL report.")),
+        ])
+
+    return [page1, page2, page3]
+
+
 def build_exec_summary_narrative(client_name: str, config: dict) -> NarrativePage:
     """Static Appendix - Executive Summary narrative."""
     cu = (config or {}).get("credit_union") or client_name
@@ -849,15 +1248,18 @@ def build_exec_summary_narrative(client_name: str, config: dict) -> NarrativePag
 
 def build_env_factor(client_name: str, snapshot_date: str, config: dict,
                      hist: dict | None = None, df: Any = None,
-                     grades: Any = None) -> TablePage | None:
+                     grades: Any = None) -> list[TablePage]:
     """Environmental Factor by Pool: the economic-stress index inputs and the
     per-pool Net Credit / Delinquency / Economic Stress scores that combine
     into each pool's environmental factor -- computed from data, not the .xlsx.
+
+    Returns two pages: the calculation tables, then the Environmental Factor
+    Ranges reference table + description on a fresh page.
     """
     import report_vizo as _rv
 
     if df is None:
-        return None
+        return []
     cfg = config or {}
     cu = cfg.get("credit_union") or client_name
     ed = cfg.get("economic_data", {}) or {}
@@ -868,7 +1270,7 @@ def build_env_factor(client_name: str, snapshot_date: str, config: dict,
     ncc_r, dq_r, es_r = _rv._env_ranges(hist)
     pools = _rv._ordered_pools(df, hist)
     if not pools:
-        return None
+        return []
     dq_var = _rv._pool_dq_variance(pools, hist, snapshot_date)
     risk_rated_map = _imp.get("risk_rated", {})
 
@@ -919,16 +1321,106 @@ def build_env_factor(client_name: str, snapshot_date: str, config: dict,
             TableCell(env_f, "pct2", align="center"),
         ])
 
-    return TablePage(
+    # Environmental Factor Ranges reference table -- mirrors the Excel
+    # ">Envir Fact Ranges" block merged into this tab (matches the SCALE model).
+    er = _imp.get("env_ranges", {}) or {}
+
+    def _range_pairs(ranges, labels):
+        pairs = []
+        for idx, (lo, hi, s) in enumerate(ranges):
+            lbl = labels[idx] if idx < len(labels) else _rv._range_label(lo, hi)
+            pairs.append((lbl, s / 100.0))
+        return pairs
+
+    ncc_pairs = _range_pairs(ncc_r, er.get("ncc_labels", []))
+    dq_pairs = _range_pairs(dq_r, er.get("dq_labels", []))
+    es_pairs = _range_pairs(es_r, er.get("es_labels", []))
+
+    def _pair_cells(pairs, i):
+        if i < len(pairs):
+            lbl, sc = pairs[i]
+            return [TableCell(lbl, "text", align="center"),
+                    TableCell(sc, "pct2", align="center")]
+        return [TableCell("", "text"), TableCell("", "text")]
+
+    ranges_rows: list[list[TableCell]] = [
+        [TableCell("Net Credit Change", "text", bold=True, align="center", colspan=2),
+         TableCell("Delinquency", "text", bold=True, align="center", colspan=2),
+         TableCell("Economic Stress Score", "text", bold=True, align="center", colspan=2)],
+        [TableCell("Range", "text", bold=True, align="center"),
+         TableCell("Score", "text", bold=True, align="center"),
+         TableCell("Range", "text", bold=True, align="center"),
+         TableCell("Score", "text", bold=True, align="center"),
+         TableCell("Range", "text", bold=True, align="center"),
+         TableCell("Score", "text", bold=True, align="center")],
+    ]
+    for i in range(max(len(ncc_pairs), len(dq_pairs), len(es_pairs))):
+        ranges_rows.append(_pair_cells(ncc_pairs, i)
+                           + _pair_cells(dq_pairs, i)
+                           + _pair_cells(es_pairs, i))
+
+    ranges_section = TableSection(title="Environmental Factor Ranges",
+                                  columns=[], rows=ranges_rows)
+
+    desc_notes = [
+        "The Environmental Factor combines three distinct data sets to calculate the "
+        "likely variance between the historical loss rate and the anticipated loss rate.  "
+        "As these three data sets improve the likelihood of loss decreases and as they "
+        "deteriorate the likelihood of loss increases, hence the need to adjust the pool "
+        "provision. Statistical tests including regression, MANOVA and Pearson 'R "
+        "(correlation) were employed to validate the causal relationship of each factor "
+        "and then establish the appropriate ranges.",
+        "GAAP states that \u201cwhen estimating credit losses on each group of loans with "
+        "similar risk characteristics, an institution should consider its historical loss "
+        "experience on the group, adjusted for changes in trends, conditions, and other "
+        "relevant factors that affect repayment of the loans as of the evaluation date.\u201d",
+        "In this methodology the Environmental Factor, or Q&E, is used to adjust the "
+        "allowance for each loan pool to assure it is representative of current risk over "
+        "the life of loans in that pool. Three measures, identified in the Comptrollers "
+        "Handbook, (e.g., net credit change in the portfolio, delinquency and economic "
+        "stress factor) are correlated to the charge-off history of the credit union, to "
+        "determine if adjustments to each pool\u2019s risk factors are indicated. The three "
+        "measures are applied to minimize the potential for skewing that could result from "
+        "a single measure. Using accepted statistical techniques, (e.g., regression, ANOVA "
+        "and correlation) the extent of the relationship is measured, and the adjustment is "
+        "applied to the Pooled allowance amount for each grade to arrive at the adjusted "
+        "allowance amount.",
+        "Net Credit Change: Derived from the credit migration for each pool in the Credit "
+        "Union's loan portfolio. (Refer to the Analysis of Impaired/Improved Loans Report). "
+        "A positive net credit change indicates reduced risk while a negative credit change "
+        "indicates increased risk of loan losses.",
+        "Delinquency: Reported Delinquency percentage trends for pool based the Credit "
+        "Union\u2019s life of loans, in each distinctive pool.  Increasing delinquent "
+        "percentages are predictive of increasing losses, while decreasing percentages "
+        "suggest decreasing losses.",
+        "Economic Stress Score: Measures the relative impact of the local economy on the "
+        "historical loss rate.  Calculated using Unemployment Rate, Bankruptcy Percentage, "
+        "Foreclosure Rates and Population statistics for the State in which the Credit Union "
+        "is based. The sources of these figures are: The Bureau of Labor Statistics, Realty "
+        "Trac, and Electronic Access to Federal Court Records.",
+    ]
+
+    heading = [f"For Quarter Ending {_rv._snap_display(snapshot_date)}"]
+    calc_page = TablePage(
         credit_union=cu,
         title="Environmental Factor for PLL",
-        heading_lines=[f"For Quarter Ending {_rv._snap_display(snapshot_date)}"],
+        heading_lines=heading,
+        css_class="env-factor",
         sections=[
             TableSection(title="Economic Stress Index Calculation",
                          columns=state_cols, rows=state_rows),
             TableSection(columns=county_cols, rows=county_rows),
             TableSection(columns=pool_cols, rows=pool_rows),
         ])
+    ranges_page = TablePage(
+        credit_union=cu,
+        title="Environmental Factor for PLL",
+        heading_lines=heading,
+        css_class="env-factor",
+        sections=[ranges_section],
+        notes_title="Description",
+        notes=desc_notes)
+    return [calc_page, ranges_page]
 
 
 def build_co_recov_dq(client_name: str, snapshot_date: str, config: dict,
@@ -1321,12 +1813,17 @@ def _acl_current_shape(acl_pools: dict, acl_summary: dict, acl_impaired: dict) -
     return {"pools": pools, "order": order, "impaired": impaired, "totals": totals}
 
 
-def _load_prior_acl(cu: str, snapshot_date: str, config: dict):
+def _load_prior_acl(cu: str, snapshot_date: str, config: dict,
+                    model_name: str = "Vizo_Model"):
     """Locate + parse the prior quarter's ACL data. Prefers the JSON sidecar
     (no .xlsx dependency); falls back to reading the prior workbook's ACL Env
     tab for periods generated before sidecars existed. Returns
     (prior_dict | None, prior_snap | None)."""
     cfg = config or {}
+    # Prior-report / sidecar lookups key on the REAL credit-union name even when
+    # a display-only name is in effect for the rendered titles.
+    cu = cfg.get("_lookup_credit_union") or cfg.get("credit_union") or cu
+    _pin = (cfg.get("change_analysis") or {}).get("compare_to")
     rpt_dir = (cfg.get("report_dir") or cfg.get("output_dir")
                or os.path.join(os.environ.get("CECL_WORKSPACE_ROOT")
                                or os.getcwd(), "Reports"))
@@ -1334,7 +1831,7 @@ def _load_prior_acl(cu: str, snapshot_date: str, config: dict):
     try:
         from . import acl_store
         shape, prior_snap = acl_store.load_prior_snapshot(
-            rpt_dir, cu, snapshot_date)
+            rpt_dir, cu, snapshot_date, pin=_pin, model_name=model_name)
         if shape and shape.get("totals"):
             return shape, prior_snap
     except Exception as exc:  # noqa: BLE001
@@ -1345,8 +1842,8 @@ def _load_prior_acl(cu: str, snapshot_date: str, config: dict):
         from change_analysis import _find_prior_report, _parse_acl_sheet
         from report_vizo import ACL_SHEET
         safe_cu = cu.replace(" ", "_").replace("/", "-")
-        path, prior_snap = _find_prior_report(rpt_dir, safe_cu, "Vizo_Model",
-                                              snapshot_date)
+        path, prior_snap = _find_prior_report(rpt_dir, safe_cu, model_name,
+                                              snapshot_date, pin=_pin)
         if not path:
             return None, None
         pwb = openpyxl.load_workbook(path, data_only=True)
@@ -1365,7 +1862,8 @@ _NO_PRIOR_NOTE = ("No prior report is available for comparison - this is the "
 
 def build_summary_variance(client_name: str, snapshot_date: str, config: dict,
                            hist: dict | None = None, df: Any = None,
-                           grades: Any = None) -> SummaryVariancePage | None:
+                           grades: Any = None,
+                           model_name: str = "Vizo_Model") -> SummaryVariancePage | None:
     """Summary Variance -- the SCALE 'Executive Summary-Vizo' banded card:
     a centred 3-line title over Current / Prior / Change blocks of the four
     ACL measures."""
@@ -1373,13 +1871,14 @@ def build_summary_variance(client_name: str, snapshot_date: str, config: dict,
 
     if df is None:
         return None
+    _variant = "tct" if model_name == "TCT_Model" else "vizo"
     acl_pools, acl_summary, acl_impaired = _acl_data(
-        config, snapshot_date, hist, df, grades)
+        config, snapshot_date, hist, df, grades, _variant)
     if not acl_pools:
         return None
     cu = (config or {}).get("credit_union") or client_name
     cur = _acl_current_shape(acl_pools, acl_summary, acl_impaired)
-    prior, prior_snap = _load_prior_acl(cu, snapshot_date, config)
+    prior, prior_snap = _load_prior_acl(cu, snapshot_date, config, model_name)
 
     def _md(snap):
         s = str(snap)[:10]
@@ -1394,7 +1893,7 @@ def build_summary_variance(client_name: str, snapshot_date: str, config: dict,
         return (t.get("total_allow_needed", 0) / pb) if pb else None
 
     labels = ["Total Expected Losses on Loans", "Current ACL Balance",
-              "Adjustment", "ACL/Total Loans"]
+              "Adjustment", "Expected Losses/Total Loans"]
 
     def _measures(vals):
         out = []
@@ -1429,7 +1928,8 @@ def build_summary_variance(client_name: str, snapshot_date: str, config: dict,
 
 def build_change_analysis(client_name: str, snapshot_date: str, config: dict,
                           hist: dict | None = None, df: Any = None,
-                          grades: Any = None) -> TablePage | None:
+                          grades: Any = None,
+                          model_name: str = "Vizo_Model") -> TablePage | None:
     """Change Analysis: per-pool ACL variance, impaired variance, summary
     metrics, and the auto-generated significant-change commentary -- current
     from data, prior from the prior quarter's workbook."""
@@ -1437,14 +1937,15 @@ def build_change_analysis(client_name: str, snapshot_date: str, config: dict,
 
     if df is None:
         return None
+    _variant = "tct" if model_name == "TCT_Model" else "vizo"
     acl_pools, acl_summary, acl_impaired = _acl_data(
-        config, snapshot_date, hist, df, grades)
+        config, snapshot_date, hist, df, grades, _variant)
     if not acl_pools:
         return None
     cfg = config or {}
     cu = cfg.get("credit_union") or client_name
     cur = _acl_current_shape(acl_pools, acl_summary, acl_impaired)
-    prior, prior_snap = _load_prior_acl(cu, snapshot_date, config)
+    prior, prior_snap = _load_prior_acl(cu, snapshot_date, config, model_name)
 
     if not prior:
         return TablePage(
@@ -1890,17 +2391,146 @@ def build_detail_chargeoff_hist(client_name: str, snapshot_date: str, config: di
         sections=sections, css_class="hist-detail")
 
 
+def _build_tct_pages(client_name: str, snapshot_date: str, config: dict,
+                     grades: Any, hist: dict | None, df: Any,
+                     cover) -> list[tuple[str, dict, bool]]:
+    """The TCT Migration tab order, rendered from data.
+
+    Mirrors ``report_tct.compose_tct``. Reuses the shared archetype builders
+    (the compute is model-agnostic); TCT-unique tabs (Introduction text) use
+    TCT builders. Change Analysis reads the prior period keyed on ``TCT_Model``.
+    """
+    import report_vizo as _rv
+    model_name = "TCT_Model"
+    pages: list[tuple[str, dict, bool]] = [("cover_tct.html", {"cover": cover}, False)]
+
+    # Introduction (TCT narrative)
+    pages.append(("narrative.html",
+                  {"page": build_introduction_tct(client_name, config)}, False))
+
+    # Executive Summary (3 narrative pages).
+    for _es_pg in build_exec_summary_tct(client_name, snapshot_date, config,
+                                         df=df, grades=grades):
+        pages.append(("narrative.html", {"page": _es_pg}, False))
+
+    if df is not None:
+        # Risk Change by Credit Score -- grand-total migration matrix + charts.
+        rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
+        rc_charts = ([build_ncc_combo(df, grades, config)]
+                     + render_chart_specs(
+                         risk_change_by_grade_chart(df, grades, config)
+                         + risk_change_charts(hist)))
+        rc_charts = [c for c in rc_charts if c]
+        pages.append(("risk_change.html", {"page": rc, "charts": rc_charts}, True))
+
+        # Improved Deteriorated Summary (CECL box + 4 migration charts).
+        impd = build_impr_deter(client_name, snapshot_date, config, hist,
+                                df=df, grades=grades, variant="tct")
+        impd_charts = render_chart_specs(impr_deter_charts(df, grades, config, hist))
+        pages.append(("impr_deter.html",
+                      {"page": impd, "charts": impd_charts}, True))
+
+        # Historical Trends Balance (per-pool line charts).
+        trends = build_hist_trends_page(client_name, snapshot_date, config, hist,
+                                        df=df, grades=grades)
+        if trends is not None:
+            pages.append(("hist_trends.html", trends, True))
+
+        # Risk Change per risk-rated pool, then Total Loans.
+        _rr = ((hist or {}).get("impaired", {}) or {}).get("risk_rated", {})
+        _nrr = set(config.get("not_risk_rated", []))
+        for _pool in _rv._ordered_pools(df, hist):
+            if not _rr.get(_pool, True) or _pool in _nrr:
+                continue
+            _pdf = df[df["loan_pool"] == _pool]
+            if _pdf.empty:
+                continue
+            _prc = build_risk_change(client_name, snapshot_date, _pdf, config,
+                                     grades, hist, pool_name=_pool)
+            _pcharts = ([build_ncc_combo(_pdf, grades, config)]
+                        + render_chart_specs(
+                            risk_change_by_grade_chart(_pdf, grades, config)
+                            + risk_change_charts(hist, _pool)))
+            _pcharts = [c for c in _pcharts if c]
+            pages.append(("risk_change.html",
+                          {"page": _prc, "charts": _pcharts}, True))
+        _trc = build_risk_change(client_name, snapshot_date, df, config, grades,
+                                 hist, pool_name="Total Loans")
+        _tcharts = ([build_ncc_combo(df, grades, config)]
+                    + render_chart_specs(
+                        risk_change_by_grade_chart(df, grades, config)
+                        + risk_change_charts(hist)))
+        _tcharts = [c for c in _tcharts if c]
+        pages.append(("risk_change.html",
+                      {"page": _trc, "charts": _tcharts}, True))
+
+    # Env Factor by Pool (+ Environmental Factor Ranges page).
+    for _env_pg in build_env_factor(client_name, snapshot_date, config, hist,
+                                    df=df, grades=grades):
+        pages.append(("table_page.html", {"page": _env_pg}, False))
+
+    # ACL Env by Pool Mgmt Adj.
+    acl = build_acl_env(client_name, snapshot_date, config, hist,
+                        df=df, grades=grades, variant="tct")
+    if acl is not None:
+        pages.append(("acl_env.html", {"page": acl, "charts": []}, False))
+
+    # Pool_Balance Adjust.
+    ba = build_bal_adjust_detail(client_name, snapshot_date, config, hist,
+                                 df=df, grades=grades)
+    if ba is not None:
+        pages.append(("table_page.html", {"page": ba}, False))
+
+    # Display HIst Bal (Loss Factor Calculation).
+    loss = build_loss_factor(client_name, snapshot_date, config, hist,
+                             df=df, grades=grades)
+    if loss is not None:
+        pages.append(("table_page.html", {"page": loss}, False))
+
+    # Display CO-Recov-DQ (Delinquency Calculation).
+    codq = build_co_recov_dq(client_name, snapshot_date, config, hist,
+                             df=df, grades=grades)
+    if codq is not None:
+        pages.append(("table_page.html", {"page": codq}, False))
+
+    # > Detail_HIst Balances (Loss Factor Historical Detail).
+    hd = build_detail_hist_balances(client_name, snapshot_date, config, hist,
+                                    df=df, grades=grades)
+    if hd is not None:
+        pages.append(("table_page.html", {"page": hd}, True))
+
+    # >Detail_Charge off Hist.
+    cod = build_detail_chargeoff_hist(client_name, snapshot_date, config, hist,
+                                      df=df, grades=grades)
+    if cod is not None:
+        pages.append(("table_page.html", {"page": cod}, True))
+
+    # Change Analysis (period over period) -- keyed on the TCT model.
+    chg = build_change_analysis(client_name, snapshot_date, config, hist,
+                                df=df, grades=grades, model_name=model_name)
+    if chg is not None:
+        pages.append(("table_page.html", {"page": chg}, False))
+
+    return pages
+
+
 def build_report_model(client_name: str, snapshot_date: str, config: dict,
                        grades: Any = None, hist: dict | None = None,
-                       df: Any = None, *, supplemental: bool = False) -> dict:
+                       df: Any = None, *, supplemental: bool = False,
+                       variant: str = "vizo") -> dict:
     """Build the render-ready page set from report data.
 
     Returns ``{"cover": CoverPage, "pages": [ (template, ctx, landscape), ... ]}``.
-    Archetypes are added here incrementally (cover, Risk Change so far), each
-    reusing the report engine's own pure compute functions.
+    ``variant="vizo"`` renders the Vizo Migration tab order; ``variant="tct"``
+    renders the TCT Migration tab order (both reuse the same archetypes and the
+    report engine's own pure compute functions).
     """
     cover = build_cover(client_name, snapshot_date, config,
-                        supplemental=supplemental)
+                        supplemental=supplemental, variant=variant)
+    if variant == "tct":
+        return {"cover": cover,
+                "pages": _build_tct_pages(client_name, snapshot_date, config,
+                                          grades, hist, df, cover)}
     pages: list[tuple[str, dict, bool]] = [
         ("cover.html", {"cover": cover}, False),
     ]
@@ -1944,8 +2574,11 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
     if df is not None and not supplemental:
         import report_vizo as _rv
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
-        rc_charts = render_chart_specs(
-            risk_change_ncc_chart(df, grades, config) + risk_change_charts(hist))
+        rc_charts = (([build_ncc_combo(df, grades, config)] if df is not None else [])
+                     + render_chart_specs(
+                         risk_change_by_grade_chart(df, grades, config)
+                         + risk_change_charts(hist)))
+        rc_charts = [c for c in rc_charts if c]
         pages.append(("risk_change.html", {"page": rc, "charts": rc_charts}, True))
         # One page per risk-rated pool, mirroring the workbook's Risk Chg tabs.
         _rr = ((hist or {}).get("impaired", {}) or {}).get("risk_rated", {})
@@ -1957,9 +2590,11 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                 continue
             _prc = build_risk_change(client_name, snapshot_date, _pdf, config,
                                      grades, hist, pool_name=_pool)
-            _pcharts = render_chart_specs(
-                risk_change_ncc_chart(_pdf, grades, config)
-                + risk_change_charts(hist, _pool))
+            _pcharts = ([build_ncc_combo(_pdf, grades, config)]
+                        + render_chart_specs(
+                            risk_change_by_grade_chart(_pdf, grades, config)
+                            + risk_change_charts(hist, _pool)))
+            _pcharts = [c for c in _pcharts if c]
             pages.append(("risk_change.html",
                           {"page": _prc, "charts": _pcharts}, True))
     if not supplemental:
@@ -1967,10 +2602,9 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                            df=df, grades=grades)
         if acl is not None:
             pages.append(("acl_env.html", {"page": acl, "charts": []}, False))
-        env = build_env_factor(client_name, snapshot_date, config, hist,
-                               df=df, grades=grades)
-        if env is not None:
-            pages.append(("table_page.html", {"page": env}, True))
+        for _env_pg in build_env_factor(client_name, snapshot_date, config, hist,
+                                        df=df, grades=grades):
+            pages.append(("table_page.html", {"page": _env_pg}, False))
         loss = build_loss_factor(client_name, snapshot_date, config, hist,
                                  df=df, grades=grades)
         if loss is not None:
@@ -1986,7 +2620,7 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
         mgmt = build_mgmt_adj_summary(client_name, snapshot_date, config, hist,
                                       df=df, grades=grades)
         if mgmt is not None:
-            pages.append(("table_page.html", {"page": mgmt}, True))
+            pages.append(("table_page.html", {"page": mgmt}, False))
         impaired = build_impaired_loans(client_name, snapshot_date, config, hist,
                                         df=df, grades=grades)
         if impaired is not None:

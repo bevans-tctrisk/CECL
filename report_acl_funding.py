@@ -67,7 +67,7 @@ def compose_acl_funding(client_name, snapshot_date, df, config, grades, hist):
     ``generate_report.generate_report`` dispatcher alongside the TCT /
     Vizo / Vizo-Supplemental / Management Adjustment outputs.
     """
-    cu = config.get('credit_union', client_name)
+    cu = config.get('display_name') or config.get('credit_union', client_name)
 
     acl = _compute_acl_totals(df, grades, config, hist, snapshot_date)
     total_allow_needed = acl.get('total_allowance_needed', 0) or 0
@@ -258,7 +258,7 @@ def compose_acl_funding(client_name, snapshot_date, df, config, grades, hist):
     ws.print_area = f'A1:G{last_row}'
 
     # File name follows the Management Adjustment Worksheet convention.
-    safe_cu = cu.replace('/', '-').replace('\\', '-')
+    safe_cu = (config.get('credit_union') or cu).replace('/', '-').replace('\\', '-')
     snap_prefix = snapshot_date[:7]   # "YYYY-MM"
     fname = f"{snap_prefix} ACL Funding Worksheet - {safe_cu}.xlsx"
     return wb, fname

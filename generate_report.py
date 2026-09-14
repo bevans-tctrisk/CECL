@@ -4003,11 +4003,33 @@ def extend_hist_bal_with_monthly(hist_bal_data, monthly_balances):
         )
 
         added_any = False
+        # Ordered timestamps for in-place index lookup when filling empty
+        # existing months (e.g. un-filled current-quarter WARM columns).
+        _dt_list = [pd.Timestamp(d) for d in pdata.get('dates', [])]
         for _, row in grp.sort_values('date').iterrows():
             dt = pd.Timestamp(row['date']) + pd.offsets.MonthEnd(0)
+            pool_total = float(row['balance'])
             if dt in existing_dates_set:
+                # Month already present. Fill it only when it's an empty
+                # placeholder (all-zero total — e.g. an un-filled WARM column
+                # for the current quarter) and we now have a real balance,
+                # distributing by the most-recent grade mix. Never overwrite
+                # a month that already carries real grade data.
+                try:
+                    di = _dt_list.index(dt)
+                except ValueError:
+                    continue
+                existing_total = (pdata['total'][di]
+                                  if di < len(pdata.get('total', [])) else 0)
+                if not (existing_total or 0) and pool_total:
+                    pdata['total'][di] = pool_total
+                    for g, vals in pdata.get('grades', {}).items():
+                        if di < len(vals):
+                            vals[di] = pool_total * pcts.get(g, 0.0)
+                    added_any = True
                 continue
             existing_dates_set.add(dt)
+            _dt_list.append(dt)
             pool_total = float(row['balance'])
             pdata['dates'].append(dt)
             pdata['total'].append(pool_total)
@@ -4028,12 +4050,16 @@ def extend_hist_bal_with_monthly(hist_bal_data, monthly_balances):
                 pdata['grades'][g] = [vals[i] for i in order]
 
 
-def extend_hist_bal_with_db(hist_bal_data, df, snap, grades, config):
+def extend_hist_bal_with_db(hist_bal_data, df, snap, grades, config,
+                            fill_empty_only=False):
     """Extend hist_bal_data with new months from the current DB snapshot.
 
     Computes grade-level balances for each pool from `df` and appends them
     as new monthly columns *after* whatever the prior report already contains.
-    Only adds months not yet present.
+    Only adds months not yet present. When ``fill_empty_only`` is True, an
+    already-present snapshot month is refreshed only if its current total is
+    empty (zero) — used on the WARM path so authoritative WARM snapshot-month
+    grade data is not overwritten.
     """
     no_score = config.get('no_score_label', 'Not Reported')
     snap_ts = pd.Timestamp(snap)
@@ -4046,6 +4072,10 @@ def extend_hist_bal_with_db(hist_bal_data, df, snap, grades, config):
         if snap_ts in existing_dates:
             # Already present (e.g. from monthly file) — update grade values in-place
             idx = existing_dates.index(snap_ts)
+            if fill_empty_only:
+                _tot = pdata.get('total', [])
+                if idx < len(_tot) and (_tot[idx] or 0):
+                    continue
             if pgrades:
                 for g in list(pgrades.keys()):
                     bal = pdf[pdf['current_grade'] == g]['current_balance'].sum()
@@ -4558,7 +4588,7 @@ def _find_prior_warm_xlsx(config, snap):
             fb_folder = os.path.join(BASE, fb_folder)
         search_dirs.append(fb_folder)
 
-    pattern = re.compile(r'^(\d{4}-\d{2})(?:-\d{2})?\s+CECL-Migration-WARM.*\.xlsx$',
+    pattern = re.compile(r'^(\d{4}-\d{2})(?:-\d{2})?\s+CECL[\s_\-]+Migration[\s_\-]+WARM.*\.xlsx$',
                          re.IGNORECASE)
     candidates = []
     for sdir in search_dirs:
@@ -4864,7 +4894,7 @@ def load_impaired_data(config, snap):
     # Fallback: search by pattern, but REQUIRE this CU's name in the filename
     # so a shared fallback_report_folder doesn't pull in another CU's WARM.
     if not found:
-        pattern = re.compile(rf'^{re.escape(snap_prefix)}.*CECL-Migration-WARM.*\.xlsx$', re.IGNORECASE)
+        pattern = re.compile(rf'^{re.escape(snap_prefix)}.*CECL[\s_\-]+Migration[\s_\-]+WARM.*\.xlsx$', re.IGNORECASE)
         for sdir in search_dirs:
             if not os.path.isdir(sdir):
                 continue
@@ -7207,8 +7237,29 @@ def load_standalone_impaired(config, snap, df=None):
             if not _db_key_len:
                 _db_key_len = len(mem)
 
+    # Balance fallback index: individually-evaluated impaired loans carry
+    # distinctive current balances, so when the impaired workbook's
+    # member/suffix keys don't reconcile to the loan extract (the two files
+    # can use different suffix conventions) we can still carve the loan from
+    # the RIGHT pool when exactly one extract loan has that exact balance.
+    bal_lookup: dict = {}
+    if df is not None and 'current_balance' in df.columns and _has_pool_col:
+        _grade_col = 'current_grade' in df.columns
+        for _, r in df.iterrows():
+            try:
+                _bk = round(float(r['current_balance']), 2)
+            except (TypeError, ValueError):
+                continue
+            _pv = r['loan_pool']
+            _pval = str(_pv).strip() if pd.notna(_pv) else ''
+            if not _pval:
+                continue
+            _gv = r['current_grade'] if _grade_col else ''
+            bal_lookup.setdefault(_bk, []).append((_pval, _gv))
+
     # ── Parse detail rows (row 24+) ──
     spec_id_by_pool = {}  # {pool: {grade: balance_removed}}
+    _unmatched_impaired: list = []
     total_removed = 0.0
     suffix_len = config.get('account_suffix_length', 3)
     for row in range(24, ws.max_row + 1):
@@ -7308,6 +7359,29 @@ def load_standalone_impaired(config, snap, df=None):
                     grade = grade_lookup.get(_hit_key, '') or ''
                     matched_pool = pool_lookup.get(_hit_key)
 
+        # Balance fallback: when member/suffix keys don't reconcile, match on
+        # the loan's exact current balance -- but only when it is UNIQUE in the
+        # extract, so two loans sharing a balance are never mis-assigned.
+        if matched_pool is None and balance is not None:
+            try:
+                _cand = bal_lookup.get(round(float(balance), 2))
+            except (TypeError, ValueError):
+                _cand = None
+            if _cand and len(_cand) == 1 and _cand[0][0]:
+                matched_pool = _cand[0][0]
+                if not grade:
+                    grade = _cand[0][1] or ''
+                _unmatched_impaired.append(
+                    f"{member}-{suffix} (${removed_val:,.2f}) matched to "
+                    f"{matched_pool} by unique balance")
+
+        # A truly unmatched impaired loan would silently stay in its pooled
+        # base AND carry a specific reserve (a double-count); surface it.
+        if matched_pool is None:
+            _unmatched_impaired.append(
+                f"{member}-{suffix} (${removed_val:,.2f}) UNMATCHED - parked in "
+                f"'{_code_pool}', not carved from its pool")
+
         # Matched extract pool wins; otherwise fall back to the impaired
         # file's loan-type code mapping.
         pool = matched_pool if matched_pool else _code_pool
@@ -7372,6 +7446,11 @@ def load_standalone_impaired(config, snap, df=None):
           f"({imp_count} with provision), "
           f"Spec ID: {n_pools} pools, "
           f"Total removed: ${total_removed:,.2f}")
+    if _unmatched_impaired:
+        print(f"    Impaired match notes ({len(_unmatched_impaired)}) - "
+              f"verify these loans' member#/suffix in the impaired file:")
+        for _m in _unmatched_impaired:
+            print(f"      - {_m}")
 
     return result
 
@@ -12466,6 +12545,22 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         # CO-Recov-DQ tabs render the full WARM history even when the
         # CU has no DB backfill / file history populated.
         _overlay_warm_history_into_hist(hist, snapshot_date)
+        # The WARM 'HIst Bal Data' tab often trails the snapshot month
+        # (its balances stop a quarter or more behind). Fold the newer
+        # monthly-balance file + current DB snapshot into hist_bal_data so
+        # the Historical Trends Balance charts run through the report month.
+        hbd_warm = (impaired or {}).get('hist_bal_data') or {}
+        if hbd_warm:
+            try:
+                extend_hist_bal_with_monthly(hbd_warm, hist.get('monthly_balances'))
+                extend_hist_bal_with_db(hbd_warm, df, snapshot_date, grades,
+                                        config, fill_empty_only=True)
+                n_dates = max((len(d.get('dates', [])) for d in hbd_warm.values()),
+                              default=0)
+                print(f"    Extended WARM hist bal to snapshot: "
+                      f"{len(hbd_warm)} pools, {n_dates} months")
+            except Exception as _e:
+                print(f"    WARM hist bal extend skipped: {_e}")
     else:
         # No WARM file — try loading hist_bal_data from the prior TCT report
         prior = load_prior_tct_hist_bal(config, snapshot_date)
@@ -13072,13 +13167,23 @@ def generate_report(client_name, snapshot_date=None, reports=None):
     _want_supp_pdf = 'vizo_supp_pdf' in reports
     _supp_pdf_only = _want_supp_pdf and 'vizo_supp' not in reports
     _vizo_supp_data = ('vizo_supp' in reports) or _want_supp_pdf
-    if _vizo_data or _vizo_supp_data:
+    _want_tct_pdf = 'tct_pdf' in reports
+    _tct_pdf_only = _want_tct_pdf and 'tct' not in reports
+    _tct_data = ('tct' in reports) or _want_tct_pdf
+    if _vizo_data or _vizo_supp_data or _tct_data:
         import copy as _copy
         _pdf_config = _copy.deepcopy(config)
         _pdf_hist = _copy.deepcopy(hist)
+        # Display-only rename: the PDF renders from _pdf_config, so its titles
+        # show ``display_name``; the real ``credit_union`` is preserved under
+        # ``_lookup_credit_union`` so prior-report/sidecar lookups still match.
+        if _pdf_config.get('display_name'):
+            _pdf_config.setdefault('_lookup_credit_union',
+                                   _pdf_config.get('credit_union'))
+            _pdf_config['credit_union'] = _pdf_config['display_name']
 
     for rpt_type in reports:
-        if rpt_type in ('vizo_pdf', 'vizo_supp_pdf'):
+        if rpt_type in ('vizo_pdf', 'vizo_supp_pdf', 'tct_pdf'):
             continue  # rendered from data after the loop, not a workbook tab
         try:
             if rpt_type == 'tct':
@@ -13205,6 +13310,43 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         except Exception as _pdf_exc:  # noqa: BLE001
             print(f"  Warning: vizo supplemental PDF generation failed: {_pdf_exc}")
 
+    # TCT Migration PDF + ACL sidecar -- rendered from data (variant='tct'), so
+    # they run whether or not the TCT workbook is produced (a PDF-only run never
+    # touches the .xlsx). Uses the pristine pre-loop snapshot of config/hist.
+    if _tct_data:
+        _safe_cu = cu.replace(' ', '_').replace('/', '-')
+        _tbase = f"{snapshot_date}_CECL_Migration_{_safe_cu}_TCT_Model"
+        try:
+            from cecl_report_web import acl_store
+            from cecl_report_web import from_data as _fd
+            from report_tct import compute_acl_environmental as _tct_compute_acl
+            _env = _tct_compute_acl(
+                df, grades, _pdf_config, _pdf_hist, snapshot_date)
+            if _env.get('acl_pools'):
+                _shape = _fd._acl_current_shape(
+                    _env['acl_pools'], _env['acl_summary'], _env['acl_impaired'])
+                acl_store.write_acl_snapshot(RPT_DIR, cu, snapshot_date, _shape,
+                                             model_name='TCT_Model')
+                print(f"  Wrote TCT ACL sidecar for {snapshot_date}")
+        except Exception as _sc_exc:  # noqa: BLE001
+            print(f"  TCT ACL sidecar skipped: {_sc_exc}")
+        if _want_tct_pdf:
+            try:
+                from cecl_report_web.assembly import render_report_pdf_from_data
+                pdf_bytes = render_report_pdf_from_data(
+                    client_name, snapshot_date, _pdf_config,
+                    grades=grades, hist=_pdf_hist, df=df, variant='tct')
+                pdf_path = os.path.join(RPT_DIR, _tbase + '.pdf')
+                with open(pdf_path, 'wb') as _pf:
+                    _pf.write(pdf_bytes)
+                print(f"  Saved tct PDF{' (PDF only)' if _tct_pdf_only else ''}: "
+                      f"{pdf_path}")
+                saved.append(pdf_path)
+                log_report_generation(client_name, cu, snapshot_date,
+                                      'tct_pdf', pdf_path, success=True)
+            except Exception as _pdf_exc:  # noqa: BLE001
+                print(f"  Warning: tct PDF generation failed: {_pdf_exc}")
+
     if saved:
         print(f"\n  {len(saved)} report(s) saved to {RPT_DIR}")
     else:
@@ -13244,7 +13386,7 @@ Examples:
     parser.add_argument('--client', help='Client config name (e.g., "franklin")')
     parser.add_argument('--date', help='Snapshot date (YYYY-MM-DD), defaults to latest')
     parser.add_argument('--reports', nargs='+',
-                        choices=['tct', 'vizo', 'vizo_supp', 'vizo_pdf', 'vizo_supp_pdf'],
+                        choices=['tct', 'vizo', 'vizo_supp', 'vizo_pdf', 'vizo_supp_pdf', 'tct_pdf'],
                         help='Report types to generate (overrides config)')
     parser.add_argument('--all', action='store_true', help='Generate for all clients')
     parser.add_argument('--list', action='store_true', help='List available clients')

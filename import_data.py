@@ -907,6 +907,18 @@ def _read_tabular(file_path, ext, header, config=None, **read_kw):
             read_kw = {**read_kw, 'encoding': enc}
         return pd.read_csv(file_path, header=header, sep=delim,
                            engine='python', **read_kw)
+    # Optional worksheet selection for multi-sheet loan workbooks. When a
+    # CU delivers its loan data on a named tab of a workbook that also holds
+    # other tabs (e.g. OceanAir's "Credit Migration Data File" whose loans
+    # live on "4. Sample Loan Export Data"), ``loan_sheet`` picks that tab.
+    # Absent/blank -> pandas default (first sheet), so single-sheet files
+    # are unaffected.
+    sheet = None
+    if config:
+        sheet = config.get('loan_sheet') or config.get('sheet_name')
+    if sheet not in (None, '') and 'sheet_name' not in read_kw:
+        return pd.read_excel(file_path, header=header, sheet_name=sheet,
+                             **read_kw)
     return pd.read_excel(file_path, header=header, **read_kw)
 
 
@@ -1698,11 +1710,14 @@ def import_file(file_path, config, snapshot_date, credit_pull_scores=None,
     else:
         clean_data['business_risk_rating'] = None
 
-    # When original FICO is 0 but current is known, treat as unchanged (WARM convention)
-    mask = (clean_data['original_fico_score'] == 0) & (clean_data['current_fico_score'] > 0)
-    if mask.any():
-        clean_data.loc[mask, 'original_fico_score'] = clean_data.loc[mask, 'current_fico_score']
-        print(f"    Original FICO gap-fill: {mask.sum()} loans set original = current")
+    # When original FICO is 0 but current is known, treat as unchanged (WARM convention).
+    # Opt out (``original_fico_gap_fill: false``) to keep no-original loans as
+    # 'Not Reported' original so they show migration from no-score -> a grade.
+    if config.get('original_fico_gap_fill', True):
+        mask = (clean_data['original_fico_score'] == 0) & (clean_data['current_fico_score'] > 0)
+        if mask.any():
+            clean_data.loc[mask, 'original_fico_score'] = clean_data.loc[mask, 'current_fico_score']
+            print(f"    Original FICO gap-fill: {mask.sum()} loans set original = current")
 
     clean_data = clean_data.dropna(subset=['current_balance'])
     if config.get('include_negative_balances'):
@@ -1939,6 +1954,11 @@ def process_client(client_name, specific_file=None, scan_folder_override=None):
                     )
                 except (TypeError, ValueError):
                     per_file_cfg['header_row'] = 0
+            # Per-extract worksheet selection for multi-sheet loan workbooks.
+            # When present, the loan data is read from this named tab (e.g.
+            # "4. Sample Loan Export Data") instead of the first sheet.
+            if matched_extract.get('loan_sheet') not in (None, ''):
+                per_file_cfg['loan_sheet'] = matched_extract.get('loan_sheet')
             # Phase 9.22: per-extract ``pool_code_split`` override. When
             # present on the matched extract (including ``""`` meaning
             # "no split"), it wins over the CU-level value. CUMA-style

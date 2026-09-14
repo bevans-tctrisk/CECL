@@ -199,7 +199,8 @@ def render_report_pdf(report_path: str | Path, cu: str, snap: str,
 
 def build_pages_from_data(client_name: str, snapshot_date: str, config: dict,
                           grades=None, hist: dict | None = None, df=None,
-                          *, supplemental: bool = False) -> list[dict]:
+                          *, supplemental: bool = False,
+                          variant: str = "vizo") -> list[dict]:
     """Render every modelled page from report DATA (not a workbook).
 
     Uses :func:`cecl_report_web.from_data.build_report_model`, so the PDF is
@@ -208,7 +209,7 @@ def build_pages_from_data(client_name: str, snapshot_date: str, config: dict,
     from . import from_data as FD
     model = FD.build_report_model(
         client_name, snapshot_date, config, grades=grades, hist=hist, df=df,
-        supplemental=supplemental)
+        supplemental=supplemental, variant=variant)
     pages: list[dict] = []
     for template, ctx, landscape in model["pages"]:
         pages.append({"full": R.render_html(template, **ctx),
@@ -219,11 +220,12 @@ def build_pages_from_data(client_name: str, snapshot_date: str, config: dict,
 def render_report_html_from_data(client_name: str, snapshot_date: str,
                                  config: dict, grades=None,
                                  hist: dict | None = None, df=None,
-                                 *, supplemental: bool = False) -> str:
+                                 *, supplemental: bool = False,
+                                 variant: str = "vizo") -> str:
     """One self-contained HTML doc with every modelled page (browser preview)."""
     pages = build_pages_from_data(
         client_name, snapshot_date, config, grades, hist, df,
-        supplemental=supplemental)
+        supplemental=supplemental, variant=variant)
     css = R.load_css()
     body = "\n".join(_fragment(p["full"]) for p in pages)
     cu = (config or {}).get("credit_union") or client_name
@@ -237,13 +239,14 @@ def render_report_html_from_data(client_name: str, snapshot_date: str,
 def render_report_pdf_from_data(client_name: str, snapshot_date: str,
                                 config: dict, grades=None,
                                 hist: dict | None = None, df=None,
-                                *, supplemental: bool = False) -> bytes:
+                                *, supplemental: bool = False,
+                                variant: str = "vizo") -> bytes:
     """Full multi-page PDF built from data, each page in its own orientation."""
     from pypdf import PdfWriter, PdfReader
 
     pages = build_pages_from_data(
         client_name, snapshot_date, config, grades, hist, df,
-        supplemental=supplemental)
+        supplemental=supplemental, variant=variant)
     writer = PdfWriter()
     for p in pages:
         reader = PdfReader(io.BytesIO(

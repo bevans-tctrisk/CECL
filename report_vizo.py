@@ -425,6 +425,13 @@ def _other_allowance_considerations(config):
     return out
 
 
+def _display_cu(config):
+    """Credit-union name shown on the report -- ``display_name`` when set,
+    else the real ``credit_union`` (which stays the DB/filename/lookup key)."""
+    return ((config or {}).get('display_name')
+            or (config or {}).get('credit_union') or '')
+
+
 def _snap_display(snap):
     try:
         dt = pd.to_datetime(snap)
@@ -818,10 +825,10 @@ def _sheet_report_index(wb, cu, snap, supplemental=False):
     tab_name = "Report Index" if not supplemental else "Report Index (2)"
     ws = wb.create_sheet(tab_name)
 
-    # Theme-colored fonts matching template (theme=4 = accent blue, theme=1 = dark text)
-    theme4_14b = Font(name='Calibri', bold=True, size=14, color='1B4F72')
+    # Heading fonts matching the report's brand teal (0D4D5E) accent.
+    theme4_14b = Font(name='Calibri', bold=True, size=14, color='0D4D5E')
     theme1_12  = Font(name='Calibri', size=12, color='000000')
-    theme4_12b = Font(name='Calibri', bold=True, size=12, color='1B4F72')
+    theme4_12b = Font(name='Calibri', bold=True, size=12, color='0D4D5E')
 
     if not supplemental:
         # ── Column widths ──
@@ -2767,11 +2774,16 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
     r += 2
     ws.cell(row=r, column=1, value="Impaired Loans").font = V12B
     ws.cell(row=r, column=10, value="Allowance").font = V12B
-    for lbl in ["Delinquent Loans", "Known Losses", "Repossessions",
-                "Foreclosed Real Estate", "Deceased", "Bankruptcy"]:
+    # Render every impaired category present in the data (data-driven, matching
+    # the PDF renderer) so non-standard buckets such as "Other Impaired Loans"
+    # appear and the listed lines reconcile to the Total Specifically Identified
+    # Allowance. Falls back to the standard set only when the data has none.
+    _std_impaired = ["Delinquent Loans", "Known Losses", "Repossessions",
+                     "Foreclosed Real Estate", "Deceased", "Bankruptcy"]
+    _impaired_labels = [k for k in acl_impaired
+                        if not str(k).upper().startswith('HIDE')] or _std_impaired
+    for lbl in _impaired_labels:
         imp_val = acl_impaired.get(lbl, 0)
-        if lbl.upper().startswith('HIDE'):
-            continue
         r += 1
         ws.cell(row=r, column=1, value=lbl).font = V12
         ws.cell(row=r, column=11, value=imp_val).number_format = ACCT
@@ -2805,6 +2817,7 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
             'acl_balance': acl_bal, 'adjustment': adjustment,
         }
         _imp['_acl_impaired_computed'] = dict(acl_impaired)
+        _imp['_acl_oac_computed'] = list(oac_rows)
 
     r += 1
     ws.cell(row=r, column=1, value="Total Specifically Identified Allowance").font = V12B
@@ -2879,6 +2892,7 @@ def compute_acl_environmental(df, grades, config, hist, snap):
         'acl_pools': imp.get('_acl_pools_computed', {}),
         'acl_summary': imp.get('_acl_summary_computed', {}),
         'acl_impaired': imp.get('_acl_impaired_computed', {}),
+        'acl_oac': imp.get('_acl_oac_computed', []),
     }
 
 
@@ -6214,7 +6228,7 @@ def _sheet_impaired_loans(wb, cu, snap):
         return None
 
     ws = wb.create_sheet("Impaired Loans")
-    _summary_title(ws, cu, snap, "Impaired Loans - ASC 310-10")
+    _summary_title(ws, cu, snap, "Impaired Loans - ASC 326-20")
 
     r = 5
     _summary_header(ws, r, ["Impairment Category", "Allowance"], [42, 20])
@@ -6316,8 +6330,9 @@ def _sheet_summary_variance(wb, cu, snap, config):
                        os.environ.get('CECL_WORKSPACE_ROOT')
                        or os.path.dirname(os.path.abspath(__file__)),
                        'Reports'))
-        safe_cu = cu.replace(' ', '_').replace('/', '-')
-        path, prior_snap = _find_prior_report(rpt_dir, safe_cu, "Vizo_Model", snap)
+        safe_cu = (config.get('credit_union') or cu).replace(' ', '_').replace('/', '-')
+        _pin = (config.get('change_analysis') or {}).get('compare_to')
+        path, prior_snap = _find_prior_report(rpt_dir, safe_cu, "Vizo_Model", snap, pin=_pin)
         if path:
             pwb = _oxl.load_workbook(path, data_only=True)
             if ACL_SHEET in pwb.sheetnames:
@@ -6333,10 +6348,10 @@ def _sheet_summary_variance(wb, cu, snap, config):
     for col, width in (('A', 8.4), ('B', 42.0), ('C', 18.1), ('D', 8.4)):
         ws.column_dimensions[col].width = width
 
-    BAND = PatternFill('solid', fgColor=Color(theme=4))     # accent1 teal
-    F_BAND = Font(name='Calibri', bold=True, size=16, color=Color(theme=0))
-    F_TITLE = Font(name='Calibri', bold=True, size=16)
-    F_BODY = Font(name='Calibri', size=16)
+    BAND = PatternFill('solid', fgColor='0D4D5E')          # accent1 teal (explicit)
+    F_BAND = Font(name='Calibri', bold=True, size=11, color='FFFFFF')
+    F_TITLE = Font(name='Calibri', bold=True, size=12)
+    F_BODY = Font(name='Calibri', size=12)
     DATE_FMT = 'm/d/yyyy'
 
     def _to_date(value):
@@ -6382,7 +6397,7 @@ def _sheet_summary_variance(wb, cu, snap, config):
         ("Total Expected Losses on Loans", "needed", "total_allow_needed"),
         ("Current ACL Balance", "balance", "acl_balance"),
         ("Adjustment", "adjustment", "adjustment"),
-        ("ACL/Total Loans", "ratio", "ratio"),
+        ("Expected Losses/Total Loans", "ratio", "ratio"),
     ]
     CUR_TOP, PRIOR_TOP, CHG_TOP = 10, 16, 22
 
@@ -6667,7 +6682,7 @@ def _reorder_vizo_main(wb):
 
 def compose_vizo_main(client, snap, df, config, grades, hist=None):
     """Build complete Vizo-format main CECL Credit Migration workbook."""
-    cu = config['credit_union']
+    cu = _display_cu(config)
     pools = _ordered_pools(df, hist)
     wb = Workbook()
     _apply_vizo_theme(wb)
@@ -6820,14 +6835,20 @@ def compose_vizo_main(client, snap, df, config, grades, hist=None):
     # numbers the report the way it will actually print.
     _add_page_numbers(wb)
 
-    safe_cu = cu.replace(' ', '_').replace('/', '-')
+    # Recalculate formulas on open so formula-driven summary cells are never
+    # blank when the saved workbook is opened without a manual recalc.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # noqa: BLE001
+        pass
+    safe_cu = (config.get('credit_union') or cu).replace(' ', '_').replace('/', '-')
     fname = f"{snap}_CECL_Migration_{safe_cu}_Vizo_Model.xlsx"
     return wb, fname
 
 
 def compose_vizo_supp(client, snap, df, config, grades, hist=None):
     """Build complete Vizo-format supplemental workbook."""
-    cu = config['credit_union']
+    cu = _display_cu(config)
     wb = Workbook()
     _apply_vizo_theme(wb)
 
@@ -6846,6 +6867,12 @@ def compose_vizo_supp(client, snap, df, config, grades, hist=None):
     idx_idx = wb.sheetnames.index("Report Index (2)")
     wb.move_sheet("> Historical Trends Balance", offset=idx_idx + 1 - trend_idx)
 
-    safe_cu = cu.replace(' ', '_').replace('/', '-')
+    # Recalculate formulas on open so formula-driven summary cells are never
+    # blank when the saved workbook is opened without a manual recalc.
+    try:
+        wb.calculation.fullCalcOnLoad = True
+    except Exception:  # noqa: BLE001
+        pass
+    safe_cu = (config.get('credit_union') or cu).replace(' ', '_').replace('/', '-')
     fname = f"{snap}_CECL_Supplemental_{safe_cu}_Vizo_Model.xlsx"
     return wb, fname

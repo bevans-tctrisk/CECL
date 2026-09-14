@@ -33,6 +33,7 @@ class ChartSpec:
     categories: list[str] = field(default_factory=list)
     series: list[dict] = field(default_factory=list)
     value_format: str | None = None  # 'pct' | 'currency' | None
+    options: dict = field(default_factory=dict)  # outline / center_title / prefer_colors
 
 
 @dataclass
@@ -50,6 +51,14 @@ class CoverPage:
     footer: str | None = None           # e.g. "© 2026 TCT Risk Solutions"
     top_logo: str | None = None         # data: URI (Vizo logo)
     bottom_logo: str | None = None      # data: URI (TCT logo)
+    # --- TCT-cover extras (mirrors report_tct._sheet_cover) ---
+    variant: str = "vizo"               # 'vizo' | 'tct' -> which cover template
+    features: list[str] = field(default_factory=list)  # feature bullets under the title
+    prepared_for: str | None = None     # "Prepared For:" label
+    period_label: str | None = None     # "For Period Ending" label
+    presented_by: str | None = None     # "Presented by:" label
+    logo: str | None = None             # data: URI (single centered TCT logo)
+    footer_lines: list[str] = field(default_factory=list)  # multi-line address footer
 
 
 @dataclass
@@ -285,6 +294,7 @@ class NarrativeSection:
 
     heading: str
     body: str
+    table: Any = None  # optional TableSection rendered right after the body
 
 
 @dataclass
@@ -294,6 +304,7 @@ class NarrativePage:
     credit_union: str
     title: str
     sections: list[NarrativeSection] = field(default_factory=list)
+    heading: str | None = None  # optional centered section header under the title
 
 
 @dataclass
