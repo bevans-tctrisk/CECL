@@ -7204,16 +7204,19 @@ def load_standalone_impaired(config, snap, df=None):
             prov_val = 0.0
         acl_impaired[cat_str] = prov_val
 
-    # ── Recompute per-type provision from raw inputs (opt-in) ──
+    # ── Recompute per-type provision from raw inputs (default ON) ──
     # The CU's own file carries a provision table + summary column that can be
-    # stale or broken; when ``impaired_engine`` is set, redo the provision from
-    # the raw input columns using the WARM "Impaired Loans" tab formulas so the
-    # number no longer depends on the file's cached (often #VALUE!) calculations.
-    if config.get('impaired_engine'):
+    # stale or broken; the calculated columns are never trusted. Redo the
+    # provision from the raw input columns using the WARM "Impaired Loans" tab
+    # formulas so the number depends only on the raw inputs + the provision-%
+    # assumptions. Opt out per CU with ``impaired_engine: false``.
+    if config.get('impaired_engine', True):
         try:
             import impaired_rebuild
-            _pct = (config.get('impaired_provision_pct')
-                    or impaired_rebuild.WARM_PROVISION_PCT)
+            # None -> the engine reads the CU's OWN provision-% table from the
+            # file; a config override is only for CUs whose file table is known
+            # stale (e.g. Bridgeton). Never force another CU's percentages.
+            _pct = config.get('impaired_provision_pct')
             _eng = impaired_rebuild.rebuild(found, provision_pct=_pct)
             _eng_prov = {t: s['provision'] for t, s in _eng.summary.items()}
             # Safety guard: only override when the engine actually parsed the

@@ -140,36 +140,83 @@ class ImpairedResult:
     pivot_balance_removed: dict = field(default_factory=dict)
 
 
+def _norm(v) -> str:
+    return str(v).strip().lower() if v is not None else ""
+
+
+def _find_data_header(ws) -> Optional[int]:
+    """Row index of the per-loan data header (Impairment Type + Member), or None.
+    The raw data rows begin on the following row."""
+    for r in range(1, min(ws.max_row, 80) + 1):
+        if (_norm(ws.cell(row=r, column=1).value) == "impairment type"
+                and _norm(ws.cell(row=r, column=2).value).startswith("member")):
+            return r
+    return None
+
+
 def _read_provision_pct(ws) -> dict:
-    """Impairment Type -> provision percentage from the tab's own A/B table."""
+    """Locate the provision-% table (header 'Impairment Type | Provision Percentage')
+    and read Type -> percent pairs below it. Falls back to the legacy fixed rows."""
+    hdr = None
+    for r in range(1, min(ws.max_row, 40) + 1):
+        if (_norm(ws.cell(row=r, column=1).value) == "impairment type"
+                and "provision" in _norm(ws.cell(row=r, column=2).value)):
+            hdr = r
+            break
     pct = {}
-    for r in range(_PROV_FIRST_ROW, _PROV_LAST_ROW + 1):
+    rows = (range(hdr + 1, hdr + 30) if hdr is not None
+            else range(_PROV_FIRST_ROW, _PROV_LAST_ROW + 1))
+    for r in rows:
         name = ws.cell(row=r, column=1).value
-        p = ws.cell(row=r, column=2).value
-        if _blank(name) or str(name).strip().upper() == "HIDE":
+        if _blank(name):
+            if hdr is not None:
+                break
             continue
-        pct[str(name).strip()] = _num(p)
+        n = str(name).strip()
+        if n.lower() == "total":
+            break
+        if n.upper() == "HIDE":
+            continue
+        pct[n] = _num(ws.cell(row=r, column=2).value)
     return pct
 
 
-def _find_first_data_row(ws) -> int:
-    """Locate the data header (Impairment Type / Member) and return the next row."""
-    for r in range(1, min(ws.max_row, 60) + 1):
-        a = ws.cell(row=r, column=1).value
-        b = ws.cell(row=r, column=2).value
-        if (isinstance(a, str) and a.strip().lower() == "impairment type"
-                and isinstance(b, str) and b.strip().lower().startswith("member")):
-            return r + 1
-    return 2
-
-
 def _pick_sheet(wb):
-    """Return (worksheet, (first_row, last_row)) preferring the WARM tab."""
+    """Return (worksheet, (first_row, last_row)) for the impaired data-entry tab.
+
+    Detects the tab robustly (its name may carry a leading space, an 'ASC 310-10'
+    suffix, or be 'Spec Fund') by finding the one with a real data header, and
+    derives the data range from that header -- rather than trusting fixed row
+    positions. Helper tabs (Instructions / Management Adjustment / pivots) are
+    skipped."""
+    _skip = ("instruction", "management adjustment", "tdr", "pivot", "readme", "help")
+    cands = []
+    for name in wb.sheetnames:
+        low = name.strip().lower()
+        if any(s in low for s in _skip):
+            continue
+        ws = wb[name]
+        hdr = _find_data_header(ws)
+        if hdr is not None:
+            score = (2 if ("impaired" in low or "spec fund" in low) else 1, ws.max_row)
+            cands.append((score, name, ws, hdr))
+    if cands:
+        cands.sort(key=lambda x: x[0], reverse=True)
+        _, _name, ws, hdr = cands[0]
+        return ws, (hdr + 1, ws.max_row)
     for name in ("Impaired Loans", "Spec Fund"):
         if name in wb.sheetnames:
             return wb[name], _SHEET_RANGES[name]
     ws = wb[wb.sheetnames[0]]
-    return ws, (_find_first_data_row(ws), ws.max_row)
+    return ws, (2, ws.max_row)
+
+
+def _read_period(ws):
+    """Return the 'Report for Period Ending' value (scans for the label)."""
+    for r in range(1, 12):
+        if "report for period" in _norm(ws.cell(row=r, column=1).value):
+            return ws.cell(row=r, column=2).value
+    return ws.cell(row=3, column=2).value
 
 
 def rebuild(
@@ -192,7 +239,7 @@ def rebuild(
     if not prov or not any(v for v in prov.values()):
         prov = dict(WARM_PROVISION_PCT)
     res = ImpairedResult(provision_pct=prov)
-    res.period = ws.cell(row=3, column=2).value  # "Report for Period Ending"
+    res.period = _read_period(ws)  # "Report for Period Ending"
 
     for r in range(first_row, last_row + 1):
         itype = ws.cell(row=r, column=_COL["impairment_type"]).value
