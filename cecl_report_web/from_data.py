@@ -2198,13 +2198,24 @@ def build_supplemental_appendix(client_name: str, config: dict) -> NarrativePage
 _GRADE_LINE_COLORS = ["#0E7E9E", "#B4453F", "#6E8A00", "#E0A400",
                       "#5F5F5F", "#8E5FA8", "#00857C", "#C77DA0"]
 
+#: TCT brand grade-line ramp from the website foundation palette (best grade
+#: navy -> teal-green -> turquoise -> light blue -> indigo; worst grade reserved
+#: red; Not Reported neutral gray).
+_TCT_GRADE_LINE_COLORS = ["#004783", "#2D897A", "#2BDBD4", "#84C4F3",
+                          "#2A2594", "#C0453C", "#9AA7B4", "#6E8A00"]
+
+
+def _grade_line_colors(variant: str) -> list:
+    return _TCT_GRADE_LINE_COLORS if variant == "tct" else _GRADE_LINE_COLORS
+
 
 def _hist_trends_specs(client_name, snapshot_date, config, hist, df,
-                       grades) -> list[ChartSpec]:
+                       grades, variant: str = "vizo") -> list[ChartSpec]:
     """One per-pool line chart (a line per grade, balance over the pool's WARM
     window) for each risk-rated pool.  Mirrors report_vizo._sheet_hist_trends."""
     import report_vizo as _rv
 
+    line_colors = _grade_line_colors(variant)
     cfg = config or {}
     no_score = cfg.get("no_score_label", "Not Reported")
     gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
@@ -2240,7 +2251,7 @@ def _hist_trends_specs(client_name, snapshot_date, config, hist, df,
             series.append({
                 "name": g,
                 "values": [float(x or 0) for x in vals],
-                "colors": [_GRADE_LINE_COLORS[gi % len(_GRADE_LINE_COLORS)]],
+                "colors": [line_colors[gi % len(line_colors)]],
             })
         if not series:
             continue
@@ -2251,14 +2262,15 @@ def _hist_trends_specs(client_name, snapshot_date, config, hist, df,
 
 def build_hist_trends_page(client_name: str, snapshot_date: str, config: dict,
                            hist: dict | None = None, df: Any = None,
-                           grades: Any = None) -> dict | None:
+                           grades: Any = None, variant: str = "vizo") -> dict | None:
     """Supplemental '> Historical Trends Balance' -- per-pool line charts.
     Returns a template context ({cu, title, heading, charts}) or None."""
     import report_vizo as _rv
 
     if df is None:
         return None
-    specs = _hist_trends_specs(client_name, snapshot_date, config, hist, df, grades)
+    specs = _hist_trends_specs(client_name, snapshot_date, config, hist, df,
+                              grades, variant)
     if not specs:
         return None
     cu = (config or {}).get("credit_union") or client_name
@@ -2490,7 +2502,7 @@ def _build_tct_pages(client_name: str, snapshot_date: str, config: dict,
 
         # Historical Trends Balance (per-pool line charts).
         trends = build_hist_trends_page(client_name, snapshot_date, config, hist,
-                                        df=df, grades=grades)
+                                        df=df, grades=grades, variant="tct")
         if trends is not None:
             pages.append(("hist_trends.html", trends, True))
 
