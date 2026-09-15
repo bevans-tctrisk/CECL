@@ -1,5 +1,5 @@
-{% extends "base.html" %}
-{% block title %}Run New Quarter — {{ short_name }}{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}Run New Quarter â€” {{ short_name }}{% endblock %}
 {% block content %}
 <div class="card">
   <h2>Run New Quarter</h2>
@@ -10,7 +10,7 @@
 
 {% if stage == "awaiting_mappings" %}
   <div style="background:#fff8e7; border:1px solid #d6940a; padding:12px 16px; border-radius:6px; margin-bottom:18px;">
-    <h3 style="margin-top:0; color:#8a5a00;">⚠ New loan code(s) detected</h3>
+    <h3 style="margin-top:0; color:#8a5a00;">âš  New loan code(s) detected</h3>
     <p style="margin:6px 0;">
       Staged {{ staged_count }} file(s). Found
       <strong>{{ unmapped_codes|length }} loan code(s)</strong>
@@ -27,7 +27,7 @@
       5300 backfill / monthly aggregation and only surfaces here because
       it doesn't resolve via your pool map <em>or</em> the NCUA canonical
       fallback. NCUA-style labels that auto-route via canonical fallback
-      (e.g. "First Liens" → "Mortgage Loan") are filtered out and don't
+      (e.g. "First Liens" â†’ "Mortgage Loan") are filtered out and don't
       need attention here.
     </p>
     <p style="margin:6px 0;">
@@ -41,7 +41,7 @@
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
     <input type="hidden" name="stage" value="mapped">
     <input type="hidden" name="period" value="{{ staged_period }}">
-    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf','tct_pdf'] %}
       {% if staged_reports and staged_reports.get(r) %}
         <input type="hidden" name="{{ r }}" value="on">
       {% endif %}
@@ -65,19 +65,19 @@
             <input type="hidden" name="map_code" value="{{ u.code }}">
           </td>
           <td>{{ u.count }}</td>
-          <td><span class="muted">{{ u.source or '—' }}</span></td>
+          <td><span class="muted">{{ u.source or 'â€”' }}</span></td>
           <td>
             <select name="map_pool">
-              <option value="" selected>— choose pool —</option>
+              <option value="" selected>â€” choose pool â€”</option>
               {% for p in all_pools %}
                 <option value="{{ p }}">{{ p }}</option>
               {% endfor %}
               <option value="{{ cfg.default_pool or 'Ignore' }}">{{ cfg.default_pool or 'Ignore' }}</option>
-              <option value="__new__">+ New pool…</option>
+              <option value="__new__">+ New poolâ€¦</option>
             </select>
           </td>
           <td>
-            <input type="text" name="map_pool_new" placeholder="(only if “New pool…” above)" style="width:240px;">
+            <input type="text" name="map_pool_new" placeholder="(only if â€œNew poolâ€¦â€ above)" style="width:240px;">
           </td>
         </tr>
         {% endfor %}
@@ -89,7 +89,7 @@
       <a class="btn" href="{{ url_for('run.new_quarter', short_name=short_name) }}">Cancel</a>
     </div>
     <p class="muted" style="margin-top:8px;">
-      Selecting <em>+ New pool…</em> creates a fresh pool. Reporting
+      Selecting <em>+ New poolâ€¦</em> creates a fresh pool. Reporting
       conventions (risk-rated, life-of-loan, ACL months) for new pools
       can be configured later on the
       <a href="{{ url_for('run.edit_pool_map', short_name=short_name) }}">Pool Map editor</a>
@@ -101,8 +101,8 @@
     <h3 style="margin-top:0; color:#1a4480;">Balance Adjustment Review</h3>
     <p style="margin:6px 0;">
       Files were staged and loans imported successfully. Review the
-      per-pool comparison below — monthly balance file vs the freshly
-      imported loan extract — then click <strong>Continue → Run
+      per-pool comparison below â€” monthly balance file vs the freshly
+      imported loan extract â€” then click <strong>Continue â†’ Run
       Reports</strong> to produce the reports. Mirrors the wizard's
       Step 14 (Balance Adjustment).
     </p>
@@ -137,7 +137,7 @@
           {% if row.loan_codes %}
             <details style="margin-top:2px;">
               <summary style="cursor:pointer;"><strong>{{ row.pool }}</strong>
-                <span class="muted" style="font-weight:normal;">({{ row.loan_codes|length }} code{{ '' if row.loan_codes|length == 1 else 's' }} — click to reassign)</span>
+                <span class="muted" style="font-weight:normal;">({{ row.loan_codes|length }} code{{ '' if row.loan_codes|length == 1 else 's' }} â€” click to reassign)</span>
               </summary>
               <table style="margin-top:6px; font-size:90%; border-collapse:collapse; background:#fafafa;">
                 <thead>
@@ -159,7 +159,7 @@
                             style="display:flex; gap:6px; margin:0;">
                         <input type="hidden" name="stage" value="balance_remapped">
                         <input type="hidden" name="period" value="{{ staged_period }}">
-                        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
+                        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf','tct_pdf'] %}
                           {% if staged_reports and staged_reports.get(r) %}
                             <input type="hidden" name="{{ r }}" value="on">
                           {% endif %}
@@ -186,16 +186,16 @@
           {% endif %}
         </td>
         <td style="text-align:right;">
-          {% if row.monthly is not none %}${{ "{:,.2f}".format(row.monthly) }}{% else %}—{% endif %}
+          {% if row.monthly is not none %}${{ "{:,.2f}".format(row.monthly) }}{% else %}â€”{% endif %}
         </td>
         <td style="text-align:right;">
-          {% if row.loans is not none %}${{ "{:,.2f}".format(row.loans) }}{% else %}—{% endif %}
+          {% if row.loans is not none %}${{ "{:,.2f}".format(row.loans) }}{% else %}â€”{% endif %}
         </td>
         <td style="text-align:right;{% if row.diff is not none and (row.diff > 1 or row.diff < -1) %} color:#b03a2e; font-weight:600;{% endif %}">
-          {% if row.diff is not none %}${{ "{:,.2f}".format(row.diff) }}{% else %}—{% endif %}
+          {% if row.diff is not none %}${{ "{:,.2f}".format(row.diff) }}{% else %}â€”{% endif %}
         </td>
         <td style="text-align:right;{% if row.pct is not none and (row.pct > 1 or row.pct < -1) %} color:#b03a2e;{% endif %}">
-          {% if row.pct is not none %}{{ "{:,.2f}".format(row.pct) }}%{% else %}—{% endif %}
+          {% if row.pct is not none %}{{ "{:,.2f}".format(row.pct) }}%{% else %}â€”{% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -207,7 +207,7 @@
           ${{ "{:,.2f}".format(comparison.totals.diff) }}
         </td>
         <td style="text-align:right;">
-          {% if comparison.totals.monthly %}{{ "{:,.2f}".format(comparison.totals.diff / comparison.totals.monthly * 100.0) }}%{% else %}—{% endif %}
+          {% if comparison.totals.monthly %}{{ "{:,.2f}".format(comparison.totals.diff / comparison.totals.monthly * 100.0) }}%{% else %}â€”{% endif %}
         </td>
       </tr>
     </tbody>
@@ -226,7 +226,7 @@
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
     <input type="hidden" name="stage" value="balance_checked">
     <input type="hidden" name="period" value="{{ staged_period }}">
-    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf','tct_pdf'] %}
       {% if staged_reports and staged_reports.get(r) %}
         <input type="hidden" name="{{ r }}" value="on">
       {% endif %}
@@ -249,10 +249,10 @@
     <p class="muted" style="margin:6px 0;">
       Source: <code>{{ impaired.filename }}</code>
       {% if impaired.period_ending %}
-        &nbsp;·&nbsp; Period ending: <strong>{{ impaired.period_ending }}</strong>
+        &nbsp;Â·&nbsp; Period ending: <strong>{{ impaired.period_ending }}</strong>
       {% endif %}
       {% if impaired.cu_name %}
-        &nbsp;·&nbsp; CU: {{ impaired.cu_name }}
+        &nbsp;Â·&nbsp; CU: {{ impaired.cu_name }}
       {% endif %}
     </p>
     {% if impaired.error %}
@@ -306,7 +306,7 @@
             action="{{ url_for('run.new_quarter', short_name=short_name) }}">
         <input type="hidden" name="stage" value="impaired_remapped">
         <input type="hidden" name="period" value="{{ staged_period }}">
-        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf','tct_pdf'] %}
           {% if staged_reports and staged_reports.get(r) %}
             <input type="hidden" name="{{ r }}" value="on">
           {% endif %}
@@ -328,7 +328,7 @@
               <td style="text-align:right;">{{ iv.counts.get(code, 0) }}</td>
               <td>
                 <select name="map_pool" style="min-width:280px;">
-                  <option value="">(leave unmapped — will use default)</option>
+                  <option value="">(leave unmapped â€” will use default)</option>
                   {% for p in (iv.pool_choices or []) %}
                   <option value="{{ p }}">{{ p }}</option>
                   {% endfor %}
@@ -356,7 +356,7 @@
     <div style="margin-bottom:18px;">
       <h4 style="margin:0 0 4px;">Grade &amp; Pool Distribution
         <span class="muted" style="font-weight:400; font-size:85%;">
-          — grade &amp; pool resolved from the AIRES loan data{% if impaired.source %}
+          â€” grade &amp; pool resolved from the AIRES loan data{% if impaired.source %}
           ({{ impaired.source }}){% endif %}
         </span>
       </h4>
@@ -443,14 +443,14 @@
             <td>{{ row.credit_grade or '' }}</td>
             <td>{% if _unmatched %}<span style="color:#b03a2e;">No</span>{% else %}<span style="color:#2d662d;">Yes</span>{% endif %}</td>
             <td style="text-align:right;">
-              {% if row.current_balance is not none %}${{ "{:,.2f}".format(row.current_balance|float) }}{% else %}—{% endif %}
+              {% if row.current_balance is not none %}${{ "{:,.2f}".format(row.current_balance|float) }}{% else %}â€”{% endif %}
             </td>
             <td style="text-align:right;">
-              {% if row.balance_from_loan_report is not none %}${{ "{:,.2f}".format(row.balance_from_loan_report|float) }}{% else %}—{% endif %}
+              {% if row.balance_from_loan_report is not none %}${{ "{:,.2f}".format(row.balance_from_loan_report|float) }}{% else %}â€”{% endif %}
             </td>
             <td style="text-align:right;">
               {% set _bd = row.balance_difference if row.balance_difference is defined else row.balance_diff %}
-              {% if _bd is not none %}${{ "{:,.2f}".format(_bd|float) }}{% else %}—{% endif %}
+              {% if _bd is not none %}${{ "{:,.2f}".format(_bd|float) }}{% else %}â€”{% endif %}
             </td>
           </tr>
           {% endfor %}
@@ -468,7 +468,7 @@
         action="{{ url_for('run.new_quarter', short_name=short_name) }}">
     <input type="hidden" name="stage" value="impaired_checked">
     <input type="hidden" name="period" value="{{ staged_period }}">
-    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
+    {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf','tct_pdf'] %}
       {% if staged_reports and staged_reports.get(r) %}
         <input type="hidden" name="{{ r }}" value="on">
       {% endif %}
@@ -514,7 +514,7 @@
       <form method="post" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
         <input type="hidden" name="stage" value="impaired_none">
         <input type="hidden" name="period" value="{{ staged_period }}">
-        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf','tct_pdf'] %}
           {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
         {% endfor %}
         <button class="btn btn-success" type="submit">Confirm &mdash; no impaired loans &rarr; Run Reports</button>
@@ -531,7 +531,7 @@
       <form method="post" enctype="multipart/form-data" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
         <input type="hidden" name="stage" value="impaired_uploaded">
         <input type="hidden" name="period" value="{{ staged_period }}">
-        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf','tct_pdf'] %}
           {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
         {% endfor %}
         <input type="file" name="impaired_file" accept=".xlsx,.xlsm" required style="margin-bottom:10px; display:block;">
@@ -584,7 +584,7 @@
       <form method="post" action="{{ url_for('run.new_quarter', short_name=short_name) }}">
         <input type="hidden" name="stage" value="balance_none">
         <input type="hidden" name="period" value="{{ staged_period }}">
-        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf'] %}
+        {% for r in ['tct','vizo','vizo_supp','impdet','mgmt_adj_napkin','acl_funding','vizo_pdf','vizo_supp_pdf','tct_pdf'] %}
           {% if staged_reports and staged_reports.get(r) %}<input type="hidden" name="{{ r }}" value="on">{% endif %}
         {% endfor %}
         <button class="btn" type="submit">Proceed anyway &rarr;</button>
@@ -615,7 +615,7 @@
 
     <label for="folder_path" style="margin-top:14px;"><strong>or paste a folder path</strong></label>
     <input id="folder_path" type="text" name="folder_path"
-           placeholder="e.g. Z:\Shared\Clients\…\2026-03"
+           placeholder="e.g. Z:\Shared\Clients\â€¦\2026-03"
            style="max-width:600px;">
     <p class="muted" style="margin-top:4px;">
       All <code>.xlsx / .xlsm / .xls / .csv</code> files in that folder
@@ -642,6 +642,9 @@
     <label><input type="checkbox" name="acl_funding"
            {% if cfg.reports is not defined or cfg.reports.get('acl_funding', True) %}checked{% endif %}>
       ACL Funding Worksheet</label>
+    <label><input type="checkbox" name="tct_pdf"
+           {% if cfg.reports is defined and cfg.reports.get('tct_pdf', cfg.reports.get('tct', False)) %}checked{% endif %}>
+      TCT Migration PDF <span class="muted">(standalone or with TCT)</span></label>
     <label><input type="checkbox" name="vizo_pdf"
            {% if cfg.reports is defined and cfg.reports.get('vizo_pdf', False) %}checked{% endif %}>
       Vizo Migration PDF <span class="muted">(standalone or with Vizo)</span></label>
@@ -657,8 +660,8 @@
           <em>Allowance for Credit Loss Balance</em> (R125 of the
           <code>ACL Env by Pool Mgmt Adj</code> tab) is read from the
           monthly balance file row configured in the wizard
-          (<code>cfg.acl.row</code>). When that row is blank/zero — or
-          if you want to force a value for this quarter — use one of
+          (<code>cfg.acl.row</code>). When that row is blank/zero â€” or
+          if you want to force a value for this quarter â€” use one of
           the overrides below. The choice is persisted to this CU's
           YAML so future quarters carry it forward (manual values are
           stored per-quarter under <code>acl.history</code>; 5300 field
@@ -666,7 +669,7 @@
         </p>
         <label style="display:block; margin:6px 0;">
           <input type="radio" name="acl_mode" value="default" checked>
-          <strong>Default</strong> — read from monthly balance file;
+          <strong>Default</strong> â€” read from monthly balance file;
           fall back to NCUA 5300 (probes
           <code>{% if cfg.acl and cfg.acl.solr_fields %}{{ cfg.acl.solr_fields|join(', ') }}{% else %}AAS0048{% endif %}</code>)
           when the file row is empty.
@@ -679,7 +682,7 @@
                  style="width:160px; margin-left:6px;">
           dollars
           <span class="muted" style="margin-left:6px; font-size:90%;">
-            (saved as <code>acl.history[{{ cfg.report_period or 'snapshot' }}]</code> — overrides the file and the 5300 fallback for this quarter)
+            (saved as <code>acl.history[{{ cfg.report_period or 'snapshot' }}]</code> â€” overrides the file and the 5300 fallback for this quarter)
           </span>
         </label>
         <label style="display:block; margin:6px 0;">

@@ -42,9 +42,9 @@
         <td class="num b">{{ row.balance | acct0 }}</td>
         <td class="num b">{{ row.specific_id | acct2 }}</td>
         <td class="num b">{{ row.llc_balance | acct0 }}</td>
-        <td class="num b">{{ row.base_loss_rate | pct4 }}</td>
-        <td class="num b">{{ row.mgmt_adj | pct4 }}</td>
-        <td class="num b">{{ row.allowance_factor | pct4 }}</td>
+        <td class="num b">{% if row.base_loss_rate is not none %}{{ row.base_loss_rate | pct4 }}{% endif %}</td>
+        <td class="num b">{% if row.mgmt_adj is not none %}{{ row.mgmt_adj | pct4 }}{% endif %}</td>
+        <td class="num b">{% if row.allowance_factor is not none %}{{ row.allowance_factor | pct4 }}{% endif %}</td>
         <td class="num b">{{ row.allowance_before_env | acct0 }}</td>
         <td class="num b">{{ row.env_factor | pct2 }}</td>
         <td class="num b">{{ row.env_allowance | acct0 }}</td>

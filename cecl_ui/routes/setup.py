@@ -361,6 +361,7 @@ def _default_state() -> dict[str, Any]:
             "acl_funding": True,
             "vizo_pdf": False,
             "vizo_supp_pdf": False,
+            "tct_pdf": True,
         },
         # sample file analysis (populated by sample step)
         "sample": None,  # type: dict | None
@@ -13923,6 +13924,7 @@ def step9_reports():
             "acl_funding": request.form.get("acl_funding") == "on",
             "vizo_pdf": request.form.get("vizo_pdf") == "on",
             "vizo_supp_pdf": request.form.get("vizo_supp_pdf") == "on",
+            "tct_pdf": request.form.get("tct_pdf") == "on",
         }
         if not any(sel.values()):
             flash(
@@ -13982,6 +13984,7 @@ def _build_review_summary(state: dict[str, Any]) -> dict[str, Any]:
     reports = state.get("reports", {}) or {}
     selected_reports = [name for name, on in (
         ("TCT", reports.get("tct")),
+        ("TCT Migration PDF", reports.get("tct_pdf")),
         ("Vizo", reports.get("vizo")),
         ("Vizo Supplemental", reports.get("vizo_supp")),
         ("Improved/Deteriorated", reports.get("impdet")),

@@ -339,6 +339,8 @@ def build_acl_env(client_name: str, snapshot_date: str, config: dict,
         if not pdata:
             continue
         pool_rows.append(AclPoolRow(pool=pool, kind="header"))
+        _visible_grades = [g for g in (pdata.get("grades") or {})
+                           if not str(g).upper().startswith("HIDE")]
         for g, gv in (pdata.get("grades") or {}).items():
             if str(g).upper().startswith("HIDE"):
                 continue
@@ -350,12 +352,17 @@ def build_acl_env(client_name: str, snapshot_date: str, config: dict,
                 allowance_before_env=gv.get("allow_before")))
         t = pdata.get("total") or {}
         _bal, _spec = t.get("balance"), t.get("spec_id")
+        # Risk-rated pools (with per-grade rows) leave the Total row's rate
+        # columns blank -- those vary by grade; only NRR single-line pools show
+        # a pool-level rate. Mirrors the workbook.
+        _blank_rates = bool(_visible_grades)
         pool_rows.append(AclPoolRow(
             pool="Total", kind="total",
             balance=_bal, specific_id=_spec,
             llc_balance=((_bal or 0) - (_spec or 0)) if _bal is not None else None,
-            base_loss_rate=t.get("base_rate"), mgmt_adj=t.get("mgmt_adj"),
-            allowance_factor=t.get("factor"),
+            base_loss_rate=None if _blank_rates else t.get("base_rate"),
+            mgmt_adj=None if _blank_rates else t.get("mgmt_adj"),
+            allowance_factor=None if _blank_rates else t.get("factor"),
             allowance_before_env=t.get("allow_before"),
             env_factor=t.get("env_factor"), env_allowance=t.get("env_allow"),
             total_allowance=t.get("total_allow")))

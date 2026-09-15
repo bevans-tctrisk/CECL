@@ -84,6 +84,18 @@
       </label>
 
       <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
+        <input type="checkbox" name="tct_pdf"
+               {% if state.reports.get('tct_pdf', False) %}checked{% endif %}>
+        <span>
+          <strong>TCT Migration PDF</strong>
+          <div class="help">Render the TCT Migration report as a polished,
+            brand-styled PDF built directly from the report data rather than the
+            workbook. Can run on its own (PDF only, no spreadsheet) or alongside
+            the TCT report.</div>
+        </span>
+      </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
         <input type="checkbox" name="vizo_pdf"
                {% if state.reports.get('vizo_pdf', False) %}checked{% endif %}>
         <span>
