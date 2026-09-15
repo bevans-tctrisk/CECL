@@ -212,6 +212,10 @@ def build_pages_from_data(client_name: str, snapshot_date: str, config: dict,
         supplemental=supplemental, variant=variant)
     pages: list[dict] = []
     for template, ctx, landscape in model["pages"]:
+        # TCT renders carry a theme flag so the templates apply the TCT
+        # navy/cyan brand palette; Vizo renders are untouched.
+        if variant == "tct":
+            ctx = {**ctx, "theme": "tct"}
         pages.append({"full": R.render_html(template, **ctx),
                       "landscape": landscape})
     return pages

@@ -462,6 +462,50 @@ tfoot { display: table-footer-group; }
   width: 100%; height: 100%;
 }
 
+/* ============================================================
+   TCT brand theme. Scoped to `.theme-tct` so the Vizo report keeps
+   its own teal/olive/maroon identity untouched. Colours are the TCT
+   website foundation palette: navy #004783 (primary) · teal-green
+   #2d897a (improved / logo swoosh) · turquoise #2bdbd4 · light blue
+   #84c4f3 · indigo #2a2594. Deteriorated uses a reserved controlled
+   red #C0453C (the brand has no red; red is kept for the risk cue).
+   ============================================================ */
+.theme-tct .tbl-section-title,
+.theme-tct .narrative-page .narr-heading { color: #004783; }
+
+.theme-tct .grid td[style*="0D4D5E"] { /* generic grid teal fills -> navy */
+  background: #004783 !important;
+}
+
+/* Page title block (CU name / section subhead) in brand navy. */
+.theme-tct .rpt-cu,
+.theme-tct .rpt-subhead { color: #004783; }
+
+/* Cover title/subtitle anchored in brand navy. */
+.theme-tct .cover-tct-title,
+.theme-tct .cover-tct-subtitle { color: #004783; }
+.theme-tct .cover-tct-period-label,
+.theme-tct .cover-tct-cu { color: #004783; }
+
+/* CECL Adjustment box border -> navy. */
+.theme-tct .cecl-box { border-color: #004783; }
+
+/* Risk-change matrix: navy header band; teal-green improved /
+   controlled-red deteriorated cells (retire olive + maroon). */
+.theme-tct .rc-matrix .hd,
+.theme-tct .rc-summary .hd { background: #004783; }
+.theme-tct .rc-matrix .improved     { background: #2D897A; }
+.theme-tct .rc-matrix .deteriorated { background: #C0453C; }
+
+/* Net Credit Change table bands. */
+.theme-tct .ncc-table tr.imp td.bal, .theme-tct .ncc-table tr.imp td.pct { background: #2D897A; }
+.theme-tct .ncc-table tr.det td.bal, .theme-tct .ncc-table tr.det td.pct { background: #C0453C; }
+.theme-tct .ncc-table tr.unc td.bal, .theme-tct .ncc-table tr.unc td.pct { background: #004783; }
+
+/* Data-table header bands (ACL, generic tables). */
+.theme-tct .acl-table .hd,
+.theme-tct .data-table th { background: #004783; color: #fff; }
+
 
 
 

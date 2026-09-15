@@ -54,17 +54,18 @@ def _hexn(c):
     return c if c.startswith("#") else "#" + c
 
 
-def _semantic(name):
+def _semantic(name, theme=None):
     """Colour a series/slice must always carry, whatever order it appears in.
 
     Teal always means Improved and maroon always means Deteriorated
     (confirmed 2026-09-01). Position in the workbook decides nothing, so a
     tab that happens to list the series the other way round still reads the
-    same way to a client.
+    same way to a client. ``theme="tct"`` uses the TCT navy/cyan palette.
     """
     if not name:
         return None
-    return SEMANTIC.get(str(name).strip().lower())
+    from .chart_chassis import semantic_map
+    return semantic_map(theme).get(str(name).strip().lower())
 
 
 def _fill_hex(spPr) -> str | None:
@@ -288,7 +289,8 @@ def _legend(items: list[tuple[str, str]], x: int, y: int,
 
 
 def _svg_bar(series: list[dict], cats: list[str], title: str | None,
-             *, horizontal: bool, stacked: bool, prefer_colors: bool = False) -> str:
+             *, horizontal: bool, stacked: bool, prefer_colors: bool = False,
+             theme: str | None = None) -> str:
     from .format import excel_format
 
     top, right = 30, 14
@@ -311,7 +313,7 @@ def _svg_bar(series: list[dict], cats: list[str], title: str | None,
             raw = [_hexn(c) for c in pts]
             if len({c for c in raw if c}) > 1 and i < len(raw) and raw[i]:
                 return raw[i]
-        base = (_semantic(s.get("name")) or _restep(s.get("color"))
+        base = (_semantic(s.get("name"), theme) or _restep(s.get("color"))
                 or PALETTE[si % len(PALETTE)])
         pts = [_restep(x) for x in pts]
         distinct = {p for p in pts if p}
@@ -618,7 +620,8 @@ def _to_chassis_spec(spec: dict) -> dict | None:
     }
     if bar_dir == "bar" and grouping == "stacked":
         return {**common, "kind": "diverging_stacked_bar",
-                "value_format": "pct1", "width": 620, "title_size": 22}
+                "value_format": "pct1", "width": 620, "title_size": 22,
+                "options": spec.get("options") or {}}
     if bar_dir == "col" and grouping == "clustered" and len(series) > 1:
         opts = spec.get("options") or {}
         cser = []
@@ -636,17 +639,21 @@ def _to_chassis_spec(spec: dict) -> dict | None:
 
 
 def render_ncc_doughnut(imp: float, det: float, unc: float,
-                        *, size: int = 150) -> str:
-    """Exploded Net Credit Change doughnut: Improved (green) and Deteriorated
-    (red) slices pulled out, Unchanged (teal) seated -- colours matched to the
-    on-page Risk Change matrix fills (re-stepped _MIG_COLORS)."""
+                        *, size: int = 150, theme: str = "vizo") -> str:
+    """Exploded Net Credit Change doughnut: Improved and Deteriorated slices
+    pulled out, Unchanged seated -- colours matched to the on-page Risk Change
+    matrix fills. ``theme="tct"`` uses the TCT navy/cyan brand palette."""
     import math
     cx = cy = size / 2.0
     rad = size * 0.40
     inner = rad * 0.55
-    segs = [(max(0.0, imp), "#6E8A00", 11.0),
-            (max(0.0, det), "#B4453F", 11.0),
-            (max(0.0, unc), "#0D4D5E", 0.0)]
+    if theme == "tct":
+        c_imp, c_det, c_unc = "#2D897A", "#C0453C", "#004783"
+    else:
+        c_imp, c_det, c_unc = "#6E8A00", "#B4453F", "#0D4D5E"
+    segs = [(max(0.0, imp), c_imp, 11.0),
+            (max(0.0, det), c_det, 11.0),
+            (max(0.0, unc), c_unc, 0.0)]
     total = sum(v for v, _, _ in segs) or 1.0
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" '
              f'width="{size}" height="{size}" class="chart">']
@@ -699,7 +706,8 @@ def render_chart_svg(spec: dict) -> str:
     horizontal = spec.get("bar_dir") == "bar"
     stacked = spec.get("grouping") == "stacked"
     return _svg_bar(series, cats, title, horizontal=horizontal, stacked=stacked,
-                    prefer_colors=bool(opts.get("prefer_colors")))
+                    prefer_colors=bool(opts.get("prefer_colors")),
+                    theme=opts.get("theme"))
 
 
 def render_charts_for_sheet(report_path: str | Path, sheet: str) -> list[str]:

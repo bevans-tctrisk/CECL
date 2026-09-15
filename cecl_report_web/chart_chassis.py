@@ -119,6 +119,22 @@ SEMANTIC = {
     "unchanged": "#9A9A93",
 }
 
+#: TCT brand variant of the migration-direction palette, from the website
+#: foundation colours (teal-green improved, navy unchanged/net). Used when a
+#: chart spec carries ``options.theme == "tct"`` so the Vizo charts keep the
+#: exact Excel hexes above.
+TCT_SEMANTIC = {
+    "improved": "#2D897A",
+    "deteriorated": "#C0453C",
+    "net": "#004783",
+    "unchanged": "#004783",
+}
+
+
+def semantic_map(theme: str | None = None) -> dict:
+    """Return the semantic colour map for the given brand theme."""
+    return TCT_SEMANTIC if theme == "tct" else SEMANTIC
+
 THEME = {
     "surface": "#ffffff",
     "ink": "#1a1a18",        # primary text
@@ -814,13 +830,14 @@ def resolve_1d_collisions(positions: Sequence[float], min_gap: float,
     return out
 
 
-def _color(series: Sequence[dict], i: int) -> str:
+def _color(series: Sequence[dict], i: int, theme: str | None = None) -> str:
     c = series[i].get("color")
     if c:
         return c
     name = str(series[i].get("name") or "").strip().lower()
-    if name in SEMANTIC:
-        return SEMANTIC[name]
+    smap = semantic_map(theme)
+    if name in smap:
+        return smap[name]
     return PALETTE[i % len(PALETTE)]
 
 
@@ -855,6 +872,7 @@ def render_diverging_stacked_bar(spec: dict) -> str:
     series = list(spec.get("series") or [])
     n = len(cats)
     opts = spec.get("options") or {}
+    theme = opts.get("theme")
     w = float(spec.get("width") or 620)
 
     rows = [[effective_values(s, n)[i] for s in series] for i in range(n)]
@@ -938,7 +956,7 @@ def render_diverging_stacked_bar(spec: dict) -> str:
                 x_lo += GAP / 2
             else:
                 x_hi -= GAP / 2
-            attrs = _mark_attrs(series[si], _color(series, si))
+            attrs = _mark_attrs(series[si], _color(series, si, theme))
             p.append(svg_rect(x_lo, y, x_hi - x_lo, bar_h,
                               fill=attrs["fill"], stroke=attrs["stroke"],
                               stroke_width=1.6, rx=2))
@@ -986,6 +1004,7 @@ def render_clustered_column(spec: dict) -> str:
     outline = bool(opts.get("outline"))
     no_axis = bool(opts.get("no_value_axis"))
     ow = float(opts.get("outline_width", 1.6))
+    theme = opts.get("theme")
     w = float(spec.get("width") or 560)
     h = float(spec.get("height") or 300)
 
@@ -999,7 +1018,7 @@ def render_clustered_column(spec: dict) -> str:
     tfmt = tick_formatter(vfmt, ticks)
     fmt = axis_formatter(vfmt, ticks + flat)
 
-    legend_items = [(str(s.get("name") or f"Series {i+1}"), _color(series, i))
+    legend_items = [(str(s.get("name") or f"Series {i+1}"), _color(series, i, theme))
                     for i, s in enumerate(series)]
     center = bool(opts.get("center_title"))
     head_svg, head_y = header(Frame(w, 0), spec.get("title"), spec.get("subtitle"),
@@ -1045,7 +1064,7 @@ def render_clustered_column(spec: dict) -> str:
             bx = gx + si * (bar_w + GAP)
             vy = yscale(v)
             y_top, y_bot = min(vy, base_y), max(vy, base_y)
-            color = _color(series, si)
+            color = _color(series, si, theme)
             if abs(v) < 1e-12:
                 # a visible zero tick beats an invisible bar: "Platinum
                 # improved = $0" is information, not absence of data

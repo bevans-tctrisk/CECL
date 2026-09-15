@@ -470,6 +470,27 @@ _NCC_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED)
 _RC_MIG_COLORS = ("6E8A00", "B4453F", "0D4D5E", "E0A400")
 _RC_NCC_COLORS = ("6E8A00", "B4453F", "0D4D5E")
 
+# TCT brand chart palette from the website foundation colours: improved teal-
+# green #2d897a (logo swoosh), deteriorated reserved red #C0453C, unchanged/net
+# navy #004783, Not Reported light blue #84c4f3.
+_TCT_RC_MIG_COLORS = ("2D897A", "C0453C", "004783", "84C4F3")
+_TCT_C_IMPROVED = "2D897A"
+_TCT_C_DETERIORATED = "C0453C"
+_TCT_C_NET = "004783"
+
+
+def _rc_mig_colors(variant: str) -> tuple:
+    """Migration slice colours (Improved/Deteriorated/Unchanged/Not Reported)
+    for the given brand variant."""
+    return _TCT_RC_MIG_COLORS if variant == "tct" else _RC_MIG_COLORS
+
+
+def _mig_series_colors(variant: str) -> tuple:
+    """(improved, deteriorated, net) chart colours for the given variant."""
+    if variant == "tct":
+        return _TCT_C_IMPROVED, _TCT_C_DETERIORATED, _TCT_C_NET
+    return _C_IMPROVED, _C_DETERIORATED, _C_NET
+
 
 def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
     """Adapt a semantic ChartSpec to the dict charts.render_chart_svg consumes."""
@@ -533,7 +554,8 @@ def _mig_status_series(data: dict, use_pct: bool = True) -> list[float] | None:
     return vals if any(vals) else None
 
 
-def risk_change_charts(hist: dict | None, pool_name: str | None = None) -> list[ChartSpec]:
+def risk_change_charts(hist: dict | None, pool_name: str | None = None,
+                       variant: str = "vizo") -> list[ChartSpec]:
     """DQ pie + CO bar for a Risk Change tab, from the migration-status dicts."""
     _imp = (hist or {}).get("impaired", {}) or {}
     if pool_name:
@@ -545,33 +567,49 @@ def risk_change_charts(hist: dict | None, pool_name: str | None = None) -> list[
     else:
         dq = _imp.get("dq_by_status") or {}
         co = _imp.get("co_by_status") or {}
+    mig_colors = _rc_mig_colors(variant)
     specs: list[ChartSpec] = []
     dq_vals = _mig_status_series(dq) or [0.0, 0.0, 0.0, 0.0]
     specs.append(ChartSpec(
         kind="pie", title="Delinquency by Credit Grade Migration",
         categories=list(_MIG_LABELS),
-        series=[{"name": "DQ", "values": dq_vals, "colors": list(_RC_MIG_COLORS)}],
+        series=[{"name": "DQ", "values": dq_vals, "colors": list(mig_colors)}],
         value_format="pct", options={"prefer_colors": True}))
     co_vals = _mig_status_series(co) or [0.0, 0.0, 0.0, 0.0]
     specs.append(ChartSpec(
         kind="bar_h", title="Charge off by Credit Grade Migration",
         categories=list(_MIG_LABELS),
-        series=[{"name": "CO", "values": co_vals, "colors": list(_RC_MIG_COLORS)}],
+        series=[{"name": "CO", "values": co_vals, "colors": list(mig_colors)}],
         value_format="pct", options={"prefer_colors": True}))
     return specs
 
 
-def _ncc_totals(df: Any, grades: Any, config: dict) -> tuple[float, float, float, float]:
-    """(improved, deteriorated, unchanged, total) balances from the matrix,
-    using the same migration-state rule as the Risk Change grid."""
+def _ncc_totals(df: Any, grades: Any, config: dict,
+                variant: str = "vizo") -> tuple[float, float, float, float]:
+    """(improved, deteriorated, unchanged, total) balances from the matrix.
+
+    ``variant="tct"`` uses the report engine's own ``_ncc`` (which counts
+    migrations to/from "Not Reported"), so the box ties to the TCT Executive
+    Summary and workbook exactly. ``variant="vizo"`` keeps the migration-state
+    rule (``_cell_state``), which excludes Not Reported -- the Vizo behavior the
+    doughnut was verified against.
+    """
     import report_vizo as _rv
     from cecl_engine import risk_change_matrix
+
+    total = float(df["current_balance"].sum())
+    if variant == "tct":
+        # Engine _ncc == Executive Summary Net Credit Change (report_tct and
+        # report_vizo share identical logic).
+        imp_pct, det_pct, _ = _rv._ncc(df, grades, config)
+        imp = imp_pct * total
+        det = det_pct * total
+        return imp, det, max(0.0, total - imp - det), total
 
     no_score = (config or {}).get("no_score_label", "Not Reported")
     n_top = int((config or {}).get("top_grades_double_drop", 3))
     gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
     matrix = risk_change_matrix(df, grades, no_score)
-    total = float(df["current_balance"].sum())
     imp = det = 0.0
     for i, g in enumerate(gl):
         for j, og in enumerate(gl):
@@ -584,9 +622,10 @@ def _ncc_totals(df: Any, grades: Any, config: dict) -> tuple[float, float, float
     return imp, det, max(0.0, total - imp - det), total
 
 
-def risk_change_ncc_chart(df: Any, grades: Any, config: dict) -> list[ChartSpec]:
+def risk_change_ncc_chart(df: Any, grades: Any, config: dict,
+                          variant: str = "vizo") -> list[ChartSpec]:
     """Net Credit Change doughnut (Improved / Deteriorated / Unchanged)."""
-    imp, det, unc, total = _ncc_totals(df, grades, config)
+    imp, det, unc, total = _ncc_totals(df, grades, config, variant)
     if total <= 0:
         return []
     return [ChartSpec(
@@ -598,12 +637,14 @@ def risk_change_ncc_chart(df: Any, grades: Any, config: dict) -> list[ChartSpec]
         value_format="pct")]
 
 
-def risk_change_by_grade_chart(df: Any, grades: Any, config: dict) -> list[ChartSpec]:
+def risk_change_by_grade_chart(df: Any, grades: Any, config: dict,
+                               variant: str = "vizo") -> list[ChartSpec]:
     """Risk Change by Grade: per-original-grade Deteriorated / Improved balances
     (clustered columns, Not Reported excluded) -- mirrors the Excel chart."""
     import report_vizo as _rv
     from cecl_engine import risk_change_matrix
 
+    c_imp, c_det, _ = _mig_series_colors(variant)
     no_score = (config or {}).get("no_score_label", "Not Reported")
     n_top = int((config or {}).get("top_grades_double_drop", 3))
     gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
@@ -631,20 +672,21 @@ def risk_change_by_grade_chart(df: Any, grades: Any, config: dict) -> list[Chart
         return []
     return [ChartSpec(
         kind="column", title="Risk Change by Grade", categories=cats,
-        series=[{"name": "Deteriorated", "values": det_by, "colors": [_C_DETERIORATED]},
-                {"name": "Improved", "values": imp_by, "colors": [_C_IMPROVED]}],
+        series=[{"name": "Deteriorated", "values": det_by, "colors": [c_det]},
+                {"name": "Improved", "values": imp_by, "colors": [c_imp]}],
         value_format="currency",
         options={"outline": True, "center_title": True,
                  "no_value_axis": True, "value_labels": "never",
                  "outline_width": 3.2})]
 
 
-def build_ncc_combo(df: Any, grades: Any, config: dict) -> str:
+def build_ncc_combo(df: Any, grades: Any, config: dict,
+                    variant: str = "vizo") -> str:
     """Net Credit Change: the Improved/Deteriorated/Unchanged/Portfolio/Net
     summary table beside an exploded doughnut -- one HTML fragment placed in a
     Risk Change chart cell. Colours match the on-page matrix fills."""
     from .charts import render_ncc_doughnut
-    imp, det, unc, total = _ncc_totals(df, grades, config)
+    imp, det, unc, total = _ncc_totals(df, grades, config, variant)
     if total <= 0:
         return ""
     net = imp - det
@@ -659,17 +701,21 @@ def build_ncc_combo(df: Any, grades: Any, config: dict) -> str:
                    f'<td class="pct">{pct * 100:.1f}%</td></tr>')
     table = '<table class="ncc-table"><tbody>' + "".join(trs) + '</tbody></table>'
     return ('<div class="ncc-combo"><div class="ncc-title">Net Credit Change</div>'
-            '<div class="ncc-body">' + table + render_ncc_doughnut(imp, det, unc)
+            '<div class="ncc-body">' + table
+            + render_ncc_doughnut(imp, det, unc, theme=variant)
             + '</div></div>')
 
 
 def impr_deter_charts(df: Any, grades: Any, config: dict,
-                      hist: dict | None = None) -> list[ChartSpec]:
+                      hist: dict | None = None,
+                      variant: str = "vizo") -> list[ChartSpec]:
     """The four Impr Deter charts: Improved/Deteriorated by grade (%), the
     Improved/Deteriorated diverging bar by pool, and Net Change by pool."""
     import report_vizo as _rv
     from cecl_engine import risk_change_matrix
 
+    c_imp, c_det, c_net = _mig_series_colors(variant)
+    _o = {"theme": "tct"} if variant == "tct" else {}
     no_score = (config or {}).get("no_score_label", "Not Reported")
     _imp = (hist or {}).get("impaired", {}) or {}
     gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
@@ -719,27 +765,27 @@ def impr_deter_charts(df: Any, grades: Any, config: dict,
         # the bottom grade (it can't deteriorate).
         specs.append(ChartSpec(
             kind="column", title="Improved Loans", categories=chart_grades[1:],
-            series=[{"name": "Improved", "values": imp_pct_g[1:], "colors": [_C_IMPROVED]}],
-            value_format="pct"))
+            series=[{"name": "Improved", "values": imp_pct_g[1:], "colors": [c_imp]}],
+            value_format="pct", options=_o))
         specs.append(ChartSpec(
             kind="column", title="Deteriorated Loans", categories=chart_grades[:-1],
-            series=[{"name": "Deteriorated", "values": det_pct_g[:-1], "colors": [_C_DETERIORATED]}],
-            value_format="pct"))
+            series=[{"name": "Deteriorated", "values": det_pct_g[:-1], "colors": [c_det]}],
+            value_format="pct", options=_o))
     if names:
         # Negate so Improved (teal) plots LEFT of the zero baseline and
         # Deteriorated (maroon) RIGHT; labels still show magnitude via abs().
         specs.append(ChartSpec(
             kind="diverging_bar", title="Improved / Deteriorated Loans",
             categories=names,
-            series=[{"name": "Improved", "values": [-v for v in p_imp], "colors": [_C_IMPROVED]},
-                    {"name": "Deteriorated", "values": [-v for v in p_det], "colors": [_C_DETERIORATED]}],
-            value_format="pct"))
+            series=[{"name": "Improved", "values": [-v for v in p_imp], "colors": [c_imp]},
+                    {"name": "Deteriorated", "values": [-v for v in p_det], "colors": [c_det]}],
+            value_format="pct", options=_o))
         # Net Change as a diverging bar: positive (net improvement) plots LEFT,
         # negative (net deterioration) RIGHT -- negate to flip onto that side.
         specs.append(ChartSpec(
             kind="diverging_bar", title="Net Change", categories=names,
-            series=[{"name": "Net", "values": [-v for v in p_net], "colors": [_C_NET]}],
-            value_format="pct"))
+            series=[{"name": "Net", "values": [-v for v in p_net], "colors": [c_net]}],
+            value_format="pct", options=_o))
     return specs
 
 
@@ -2402,6 +2448,18 @@ def _build_tct_pages(client_name: str, snapshot_date: str, config: dict,
     """
     import report_vizo as _rv
     model_name = "TCT_Model"
+
+    # Order every pool listing by the configured list order (exactly as
+    # report_tct.compose_tct does) instead of alphabetical: publish the merged
+    # order onto hist so all builders that read pool_order / _ordered_pools
+    # follow it. TCT-only -- hist here is the TCT render's own copy.
+    _imp = (hist or {}).get("impaired")
+    if isinstance(_imp, dict) and df is not None and len(df):
+        import report_tct as _rt
+        _warm = (config or {}).get("pool_order") or _imp.get("pool_order", [])
+        _imp["pool_order"] = _rt._merge_pool_orders(
+            _rt._sort_pools(list(df["loan_pool"].unique()), config), _warm)
+
     pages: list[tuple[str, dict, bool]] = [("cover_tct.html", {"cover": cover}, False)]
 
     # Introduction (TCT narrative)
@@ -2416,17 +2474,17 @@ def _build_tct_pages(client_name: str, snapshot_date: str, config: dict,
     if df is not None:
         # Risk Change by Credit Score -- grand-total migration matrix + charts.
         rc = build_risk_change(client_name, snapshot_date, df, config, grades, hist)
-        rc_charts = ([build_ncc_combo(df, grades, config)]
+        rc_charts = ([build_ncc_combo(df, grades, config, variant="tct")]
                      + render_chart_specs(
-                         risk_change_by_grade_chart(df, grades, config)
-                         + risk_change_charts(hist)))
+                         risk_change_by_grade_chart(df, grades, config, variant="tct")
+                         + risk_change_charts(hist, variant="tct")))
         rc_charts = [c for c in rc_charts if c]
         pages.append(("risk_change.html", {"page": rc, "charts": rc_charts}, True))
 
         # Improved Deteriorated Summary (CECL box + 4 migration charts).
         impd = build_impr_deter(client_name, snapshot_date, config, hist,
                                 df=df, grades=grades, variant="tct")
-        impd_charts = render_chart_specs(impr_deter_charts(df, grades, config, hist))
+        impd_charts = render_chart_specs(impr_deter_charts(df, grades, config, hist, variant="tct"))
         pages.append(("impr_deter.html",
                       {"page": impd, "charts": impd_charts}, True))
 
@@ -2447,19 +2505,19 @@ def _build_tct_pages(client_name: str, snapshot_date: str, config: dict,
                 continue
             _prc = build_risk_change(client_name, snapshot_date, _pdf, config,
                                      grades, hist, pool_name=_pool)
-            _pcharts = ([build_ncc_combo(_pdf, grades, config)]
+            _pcharts = ([build_ncc_combo(_pdf, grades, config, variant="tct")]
                         + render_chart_specs(
-                            risk_change_by_grade_chart(_pdf, grades, config)
-                            + risk_change_charts(hist, _pool)))
+                            risk_change_by_grade_chart(_pdf, grades, config, variant="tct")
+                            + risk_change_charts(hist, _pool, variant="tct")))
             _pcharts = [c for c in _pcharts if c]
             pages.append(("risk_change.html",
                           {"page": _prc, "charts": _pcharts}, True))
         _trc = build_risk_change(client_name, snapshot_date, df, config, grades,
                                  hist, pool_name="Total Loans")
-        _tcharts = ([build_ncc_combo(df, grades, config)]
+        _tcharts = ([build_ncc_combo(df, grades, config, variant="tct")]
                     + render_chart_specs(
-                        risk_change_by_grade_chart(df, grades, config)
-                        + risk_change_charts(hist)))
+                        risk_change_by_grade_chart(df, grades, config, variant="tct")
+                        + risk_change_charts(hist, variant="tct")))
         _tcharts = [c for c in _tcharts if c]
         pages.append(("risk_change.html",
                       {"page": _trc, "charts": _tcharts}, True))
