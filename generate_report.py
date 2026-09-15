@@ -7216,14 +7216,23 @@ def load_standalone_impaired(config, snap, df=None):
                     or impaired_rebuild.WARM_PROVISION_PCT)
             _eng = impaired_rebuild.rebuild(found, provision_pct=_pct)
             _eng_prov = {t: s['provision'] for t, s in _eng.summary.items()}
-            for _cat in list(acl_impaired.keys()):
-                acl_impaired[_cat] = _eng_prov.get(_cat, 0.0)
-            for _cat, _amt in _eng_prov.items():
-                acl_impaired.setdefault(_cat, _amt)
-            print(f"    Impaired engine: provision recomputed from raw inputs "
-                  f"= ${sum(_eng_prov.values()):,.2f} across "
-                  f"{len(_eng_prov)} categor(ies), {len(_eng.loans)} loan(s) "
-                  f"(WARM formulas)")
+            # Safety guard: only override when the engine actually parsed the
+            # file. Standalone impaired formats vary widely between CUs; if the
+            # engine sees no rows (layout mismatch) it must NOT blank out the
+            # provision — keep the file's own summary values instead.
+            if not _eng.loans or sum(_eng_prov.values()) <= 0:
+                print(f"    Impaired engine parsed {len(_eng.loans)} loan(s) / "
+                      f"$0 from {os.path.basename(found)}; keeping file summary "
+                      f"values (engine layout mismatch — not enabled for this CU)")
+            else:
+                for _cat in list(acl_impaired.keys()):
+                    acl_impaired[_cat] = _eng_prov.get(_cat, 0.0)
+                for _cat, _amt in _eng_prov.items():
+                    acl_impaired.setdefault(_cat, _amt)
+                print(f"    Impaired engine: provision recomputed from raw inputs "
+                      f"= ${sum(_eng_prov.values()):,.2f} across "
+                      f"{len(_eng_prov)} categor(ies), {len(_eng.loans)} loan(s) "
+                      f"(WARM formulas)")
         except Exception as _exc:
             print(f"    Impaired engine skipped ({_exc}); "
                   f"using file summary values")
