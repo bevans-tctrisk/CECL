@@ -365,6 +365,10 @@ def _prepare_for_recompute(warm: dict, config: dict | None = None) -> dict:
     # Drop the seed-quarter's frozen life-of-loan net charge-off so the base loss
     # rate recomputes from the rolled-forward charge-off/recovery history.
     warm.pop("warm_net_co", None)
+    # Drop the frozen total-in-portfolio so the exec summary recomputes it from
+    # the current grand balance + the (semi-static) non-extract adjustment,
+    # rather than showing the seed quarter's stale total.
+    warm.pop("total_in_portfolio", None)
     if real_pools:
         for mk in ("risk_rated", "acl_months"):
             if isinstance(warm.get(mk), dict):
