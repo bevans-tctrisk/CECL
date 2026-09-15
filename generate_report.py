@@ -12972,8 +12972,12 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             imp_now.update(baseline_imp)
         else:
             # Only merge historical CO/RC/DQ keys; preserve current impaired data.
+            # When seed-driven, keep warm_net_co OUT so the ACL base loss rate
+            # recomputes from the current charge-off/recovery history instead of a
+            # frozen prior-report net-charge-off total.
+            _skip = {'warm_net_co'} if config.get('warm_seed_driven') else set()
             for k, v in baseline_imp.items():
-                if k.startswith('warm_') and k not in imp_now:
+                if k.startswith('warm_') and k not in imp_now and k not in _skip:
                     imp_now[k] = v
         hist['impaired'] = imp_now
 

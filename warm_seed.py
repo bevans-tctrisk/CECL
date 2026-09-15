@@ -319,43 +319,52 @@ _FROZEN_KEYS = (
 )
 
 
-def _seed_rate_overrides(acl_pools: dict, risk_rated: dict) -> dict:
-    """Build ``base_loss_rate_by_pool_grade`` from the seed's per-grade effective
-    ``factor`` (= WARM base loss rate + its management adjustment). Applying that
-    frozen effective rate to the CURRENT balances reproduces the WARM's pooled
-    allowance and rolls forward as balances change. Risk-rated pools carry a rate
-    per grade; non-risk-rated pools carry a single ``Total`` rate."""
+def _seed_mgmt_adj_overrides(acl_pools: dict, risk_rated: dict) -> dict:
+    """Per-(pool, grade) management adjustment captured from the seed.
+
+    The management adjustment is the qualitative overlay the analyst sets in the
+    WARM; it is semi-static and must persist across quarters. The ACL *base loss
+    rate*, by contrast, is recomputed every quarter from the rolled-forward
+    charge-off/recovery history — so we freeze ONLY the mgmt adjustment here (not
+    the combined ``factor``) and let the engine recompute the base rate. Injected
+    as ``prior_mgmt_adj`` so ``_resolve_mgmt_adj_grade`` applies it on top of the
+    fresh base rate. Only risk-rated pools carry per-grade values; NRR pools take
+    their adjustment through the pool-total resolver (config-driven)."""
     ovr = {}
     for pool, pdata in (acl_pools or {}).items():
-        if risk_rated.get(pool, True):
-            gm = {g: (gv or {}).get("factor")
-                  for g, gv in (pdata.get("grades") or {}).items()
-                  if (gv or {}).get("factor") is not None}
-            if gm:
-                ovr[pool] = gm
-        else:
-            f = (pdata.get("total") or {}).get("factor")
-            if f is not None:
-                ovr[pool] = {"Total": f}
+        if not risk_rated.get(pool, True):
+            continue
+        gm = {g: (gv or {}).get("mgmt_adj")
+              for g, gv in (pdata.get("grades") or {}).items()
+              if (gv or {}).get("mgmt_adj") is not None}
+        if gm:
+            ovr[pool] = gm
     return ovr
 
 
 def _prepare_for_recompute(warm: dict, config: dict | None = None) -> dict:
     """Strip frozen seed-quarter values, drop the WARM parse's junk per-pool keys
     (it captures ~30 spurious ``risk_rated``/``acl_months`` entries such as
-    'Credit Grade Deteriorated Type 1'), and publish the WARM's frozen effective
-    loss rates into ``config['base_loss_rate_by_pool_grade']`` so the engine
-    recomputes each pool's allowance as those rates x the CURRENT balances."""
+    'Credit Grade Deteriorated Type 1'), and carry the seed's per-grade
+    management adjustment forward as ``prior_mgmt_adj`` so the engine recomputes
+    each pool's ACL base loss rate from the current charge-off history while
+    keeping the qualitative overlay stable."""
     warm = dict(warm)
     acl_pools = warm.get("acl_pools") or {}
     real_pools = set(acl_pools.keys())
     risk_rated = warm.get("risk_rated") or {}
-    if config is not None and acl_pools and not config.get("base_loss_rate_by_pool_grade"):
-        ovr = _seed_rate_overrides(acl_pools, risk_rated)
-        if ovr:
-            config["base_loss_rate_by_pool_grade"] = ovr
+    if acl_pools:
+        madj = _seed_mgmt_adj_overrides(acl_pools, risk_rated)
+        if madj:
+            existing = dict(warm.get("prior_mgmt_adj") or {})
+            for _p, _gm in madj.items():
+                existing.setdefault(_p, {}).update(_gm)
+            warm["prior_mgmt_adj"] = existing
     for k in _FROZEN_KEYS:
         warm.pop(k, None)
+    # Drop the seed-quarter's frozen life-of-loan net charge-off so the base loss
+    # rate recomputes from the rolled-forward charge-off/recovery history.
+    warm.pop("warm_net_co", None)
     if real_pools:
         for mk in ("risk_rated", "acl_months"):
             if isinstance(warm.get(mk), dict):
