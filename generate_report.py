@@ -5611,6 +5611,27 @@ def load_impaired_data(config, snap):
     return result
 
 
+def _load_impaired_or_seed(config, snap):
+    """Return the WARM/impaired data, preferring the captured seed over the
+    live CECL-Migration-WARM workbook when the CU is seed-driven.
+
+    The seed is ``load_impaired_data``'s own captured output, so returning it
+    keeps every downstream transform identical -- the report no longer needs
+    the live workbook. Opt-in per CU via ``warm_seed_driven: true``.
+    """
+    try:
+        import warm_seed
+        seed = warm_seed.load_seed(config, snap)
+    except Exception as _seed_exc:  # noqa: BLE001
+        print(f"    WARM seed load failed ({_seed_exc}); using live WARM")
+        seed = None
+    if seed:
+        print("    Loaded WARM/impaired data from SEED "
+              "(live CECL-Migration-WARM workbook not read)")
+        return seed
+    return load_impaired_data(config, snap)
+
+
 def load_impaired_from_tct_baseline(config, snap):
     """Load impaired-loan data from the previously-generated TCT model baseline.
 
@@ -7182,6 +7203,30 @@ def load_standalone_impaired(config, snap, df=None):
         except (ValueError, TypeError):
             prov_val = 0.0
         acl_impaired[cat_str] = prov_val
+
+    # ── Recompute per-type provision from raw inputs (opt-in) ──
+    # The CU's own file carries a provision table + summary column that can be
+    # stale or broken; when ``impaired_engine`` is set, redo the provision from
+    # the raw input columns using the WARM "Impaired Loans" tab formulas so the
+    # number no longer depends on the file's cached (often #VALUE!) calculations.
+    if config.get('impaired_engine'):
+        try:
+            import impaired_rebuild
+            _pct = (config.get('impaired_provision_pct')
+                    or impaired_rebuild.WARM_PROVISION_PCT)
+            _eng = impaired_rebuild.rebuild(found, provision_pct=_pct)
+            _eng_prov = {t: s['provision'] for t, s in _eng.summary.items()}
+            for _cat in list(acl_impaired.keys()):
+                acl_impaired[_cat] = _eng_prov.get(_cat, 0.0)
+            for _cat, _amt in _eng_prov.items():
+                acl_impaired.setdefault(_cat, _amt)
+            print(f"    Impaired engine: provision recomputed from raw inputs "
+                  f"= ${sum(_eng_prov.values()):,.2f} across "
+                  f"{len(_eng_prov)} categor(ies), {len(_eng.loans)} loan(s) "
+                  f"(WARM formulas)")
+        except Exception as _exc:
+            print(f"    Impaired engine skipped ({_exc}); "
+                  f"using file summary values")
 
     # ── Build member→grade lookup from df ──
     # The df's member_number column is the concatenated (member+suffix)
@@ -12536,7 +12581,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             pass
 
     # Load impaired data from WARM working file
-    impaired = load_impaired_data(config, snapshot_date)
+    impaired = _load_impaired_or_seed(config, snapshot_date)
     if impaired:
         hist['impaired'] = impaired
         # WARM workbooks ship with multi-year CO / Recoveries / DQ% +
@@ -13108,6 +13153,12 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             imp = hist.get('impaired', {})
             acl_sum = imp.get('acl_summary', {})
             acl_sum['acl_balance'] = acl_bal
+            # The parsed WARM summary carries an adjustment tied to the WARM's
+            # own ACL balance; recompute it against the overriding balance so
+            # Adjustment = Total Allowance Needed - (overridden) ACL Balance.
+            _tan = acl_sum.get('total_allow_needed')
+            if _tan is not None:
+                acl_sum['adjustment'] = _tan - acl_bal
             imp['acl_summary'] = acl_sum
             imp['acl_balance'] = acl_bal  # also at top level for report_vizo
             hist['impaired'] = imp
