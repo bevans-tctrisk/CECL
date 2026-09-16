@@ -177,8 +177,56 @@ def _read_provision_pct(ws) -> dict:
             break
         if n.upper() == "HIDE":
             continue
-        pct[n] = _num(ws.cell(row=r, column=2).value)
+        raw = ws.cell(row=r, column=2).value
+        # Preserve a non-numeric marker such as "Variable" so the per-loan rate
+        # can be resolved from the days-delinquent tier table instead.
+        if (isinstance(raw, str) and raw.strip()
+                and _num(raw) == 0 and raw.strip() != "0"):
+            pct[n] = raw.strip()
+        else:
+            pct[n] = _num(raw)
     return pct
+
+
+def _read_dq_tiers(ws) -> list:
+    """Read the variable-provision tier table (Minimum days -> Provision %).
+
+    Some CUs (e.g. Franklin) mark a type's provision as "Variable" and provide a
+    small side table of days-delinquent thresholds to a provision percentage.
+    Returns [(min_days, pct), ...] sorted by min_days descending, or []."""
+    hdr_row = min_col = pct_col = None
+    for r in range(1, min(ws.max_row, 30) + 1):
+        for c in range(1, min(ws.max_column, 30) + 1):
+            if _norm(ws.cell(row=r, column=c).value) == "provision %":
+                for cc in range(1, c):
+                    if _norm(ws.cell(row=r, column=cc).value) == "minimum":
+                        hdr_row, min_col, pct_col = r, cc, c
+                        break
+            if hdr_row is not None:
+                break
+        if hdr_row is not None:
+            break
+    if hdr_row is None:
+        return []
+    tiers = []
+    for r in range(hdr_row + 1, hdr_row + 20):
+        mn = ws.cell(row=r, column=min_col).value
+        pc = ws.cell(row=r, column=pct_col).value
+        if _blank(mn) and _blank(pc):
+            break
+        if _blank(mn):
+            continue
+        tiers.append((_num(mn), _num(pc)))
+    tiers.sort(key=lambda t: t[0], reverse=True)
+    return tiers
+
+
+def _dq_tier_pct(days: float, tiers: list) -> float:
+    """Provision % for a loan's days-delinquent, using the highest tier <= days."""
+    for min_days, pc in tiers:  # sorted descending
+        if days >= min_days:
+            return pc
+    return 0.0
 
 
 def _pick_sheet(wb):
@@ -238,6 +286,7 @@ def rebuild(
     # If the file's table is missing/all-zero, fall back to the WARM percentages.
     if not prov or not any(v for v in prov.values()):
         prov = dict(WARM_PROVISION_PCT)
+    dq_tiers = _read_dq_tiers(ws)  # for types marked "Variable"
     res = ImpairedResult(provision_pct=prov)
     res.period = _read_period(ws)  # "Report for Period Ending"
 
@@ -251,6 +300,7 @@ def rebuild(
         E = _num(ws.cell(row=r, column=_COL["current_balance"]).value)
         G = _num(ws.cell(row=r, column=_COL["balance_other"]).value)
         H = _num(ws.cell(row=r, column=_COL["collateral"]).value)
+        F_days = _num(ws.cell(row=r, column=_COL["days_delinquent"]).value)
         i_raw = ws.cell(row=r, column=_COL["allowance_provided"]).value
         overridden = not _blank(i_raw)
 
@@ -262,8 +312,15 @@ def rebuild(
         else:
             LH = L - H
             N_at_risk = 0.0 if LH <= 0 else (E if LH >= E else LH)
-        # Provision % (column O): 100% when the CU provided the amount directly.
-        O_pct = 1.0 if overridden else prov.get(itype, 0.0)
+        # Provision % (column O): 100% when the CU provided the amount directly;
+        # a "Variable" type resolves its rate from the days-delinquent tiers.
+        pct_spec = prov.get(itype, 0.0)
+        if overridden:
+            O_pct = 1.0
+        elif isinstance(pct_spec, str):
+            O_pct = _dq_tier_pct(F_days, dq_tiers)
+        else:
+            O_pct = pct_spec
         P_prov = N_at_risk * O_pct
         member = str(ws.cell(row=r, column=_COL["member"]).value or "").strip()
         suffix = str(ws.cell(row=r, column=_COL["suffix"]).value or "").strip()
@@ -279,7 +336,7 @@ def rebuild(
         loan = ImpairedLoan(
             impairment_type=itype, member=member, suffix=suffix, loan_type=loan_type,
             current_balance=E,
-            days_delinquent=_num(ws.cell(row=r, column=_COL["days_delinquent"]).value),
+            days_delinquent=F_days,
             balance_other=G, collateral=H,
             allowance_provided=None if not overridden else _num(i_raw),
             total_loans=L, ltv=(None if H == 0 else L / H),
@@ -313,8 +370,9 @@ def _print(res: ImpairedResult) -> None:
     print(hdr)
     for itype, s in res.summary.items():
         pct = res.provision_pct.get(itype, 0.0)
+        pct_s = f"{pct:>9.2%}" if isinstance(pct, (int, float)) else f"{str(pct):>9}"
         print(f"  {itype:28}{s['count']:>5}{s['amount_at_risk']:>20,.2f}"
-              f"{pct:>9.2%}{s['provision']:>15,.2f}{s['balance_removed']:>16,.2f}")
+              f"{pct_s}{s['provision']:>15,.2f}{s['balance_removed']:>16,.2f}")
     print(f"  {'TOTAL':28}{len(res.loans):>5}{res.total_amount_at_risk:>20,.2f}"
           f"{'':>9}{res.total_provision:>15,.2f}{res.total_balance_removed:>16,.2f}")
     if res.pivot_balance_removed:
