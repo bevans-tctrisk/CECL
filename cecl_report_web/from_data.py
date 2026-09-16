@@ -1899,7 +1899,16 @@ def _load_prior_acl(cu: str, snapshot_date: str, config: dict,
                                               snapshot_date, pin=_pin)
         if not path:
             return None, None
-        pwb = openpyxl.load_workbook(path, data_only=True)
+        # openpyxl parses pivot-table caches on load, which is pathologically
+        # slow on the WARM/prior workbooks' large pivots (utah: many hours). We
+        # only need the ACL sheet's cell values, so skip pivot-cache parsing.
+        import openpyxl.reader.workbook as _wbmod
+        _orig_pc = _wbmod.WorkbookParser.pivot_caches
+        _wbmod.WorkbookParser.pivot_caches = property(lambda self: {})
+        try:
+            pwb = openpyxl.load_workbook(path, data_only=True)
+        finally:
+            _wbmod.WorkbookParser.pivot_caches = _orig_pc
         prior = (_parse_acl_sheet(pwb[ACL_SHEET])
                  if ACL_SHEET in pwb.sheetnames else None)
         pwb.close()
