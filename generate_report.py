@@ -366,6 +366,8 @@ def _read_data_file(filepath):
     ext = os.path.splitext(filepath)[1].lower()
     if ext == '.csv':
         return _read_csv_any(filepath, header=None)
+    if ext in ('.txt', '.tsv'):
+        return _read_csv_any(filepath, header=None, sep=_sniff_delimiter(filepath))
     xl = pd.ExcelFile(filepath)
     parts = []
     for s in xl.sheet_names:
@@ -818,6 +820,13 @@ def load_chargeoff_recovery_history(config):
     Returns dict: {'chargeoffs': {year: {pool: amount}}, 'recoveries': {year: {pool: amount}}}"""
     data_dir = resolve_path(config.get('data_directory', ''))
     if not data_dir or not os.path.isdir(data_dir):
+        # Wizard-staged CUs keep their raw files under Raw_Uploads/<data_directory>.
+        _dd = config.get('data_directory', '')
+        if _dd and not os.path.isabs(_dd):
+            _alt = os.path.join(BASE, 'Raw_Uploads', _dd)
+            if os.path.isdir(_alt):
+                data_dir = _alt
+    if not data_dir or not os.path.isdir(data_dir):
         return {'chargeoffs': {}, 'recoveries': {}, 'years': []}
 
     historical_parse_cfg = config.get('historical_file_formats', {})
@@ -1196,7 +1205,8 @@ def load_chargeoff_recovery_history(config):
                 want_rc = False
                 if (_co_cfg is not None or _rc_cfg is not None) and (
                         fl.endswith('.xlsx') or fl.endswith('.xls')
-                        or fl.endswith('.csv')):
+                        or fl.endswith('.csv') or fl.endswith('.txt')
+                        or fl.endswith('.tsv')):
                     if _file_combined:
                         _skip = ('proposed' in fl or '3yr' in fl)
                         # Legacy combined mode gates purely on the filename
