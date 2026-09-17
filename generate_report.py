@@ -13053,8 +13053,12 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         acl_pools = dict(imp.get('acl_pools') or {})
         for _p, _vals in comm_allow.items():
             existing = dict(acl_pools.get(_p) or {})
-            existing['grades'] = existing.get('grades', {})
             _tot = dict(existing.get('total') or {})
+            # Only fill when the pool has no allowance yet (seed-driven /
+            # WARM-free); never override a WARM workbook's own figure.
+            if _tot.get('allow_before'):
+                continue
+            existing['grades'] = existing.get('grades', {})
             _tot.update({'balance': _vals['balance'],
                          'allow_before': _vals['allow_before'],
                          'env_factor': _vals['env_factor'],
