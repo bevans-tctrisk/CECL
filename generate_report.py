@@ -7060,6 +7060,219 @@ def find_standalone_impaired_file(config, snap):
         _dateless_impaired_candidates, snap_prefix)
 
 
+def load_impaired_txt(config, snap, df=None):
+    """Load impaired data from a pipe-delimited ``TCT.IMPAIRED_YYYYMM.txt``.
+
+    Some TCT credit unions (e.g. Erie) deliver impaired loans as a headerless
+    pipe file rather than the standard Impaired Loans workbook, and categorise
+    by code (DQ / DQ90 / REPO / BK / BKNOTDQ) with a per-category provision
+    percentage applied to the collateral-net balance.
+
+    Config block ``impaired_txt``:
+      ``category_pct``: {DQ: 0.25, DQ90: 1.0, REPO: 1.0, BK: 1.0, BKNOTDQ: 0.0}
+      ``file_pattern``: optional regex (default ``TCT\\.IMPAIRED_\\d{6}\\.txt$``)
+
+    Fields (pipe, no header): TYPE | account | loan_type | balance | days_dq |
+    (blank) | collateral_value | (blank). Amount at risk = max(0, balance -
+    collateral); provision = risk * pct[TYPE]. The full balance is removed from
+    the homogeneous pool (Specific Identification), mapped to the pool/grade the
+    loan actually sits in via the current extract. Returns the same shape as
+    :func:`load_standalone_impaired`, or ``{}`` when no file is found.
+    """
+    icfg = config.get('impaired_txt') or {}
+    if not icfg:
+        return {}
+    cat_pct = {str(k).strip().upper(): float(v)
+               for k, v in (icfg.get('category_pct') or {}).items()}
+    data_dir = config.get('data_directory', '')
+    search_dirs = []
+    if data_dir:
+        if os.path.isabs(data_dir):
+            search_dirs.append(data_dir)
+        else:
+            search_dirs.append(os.path.join(BASE, data_dir))
+            search_dirs.append(os.path.join(BASE, 'Raw_Uploads', data_dir))
+    ym = snap[:7].replace('-', '') if snap else ''  # YYYYMM
+    pat = icfg.get('file_pattern') or r'TCT\.IMPAIRED_\d{6}\.txt$'
+    found = None
+    for d in search_dirs:
+        if not (d and os.path.isdir(d)):
+            continue
+        for fn in sorted(os.listdir(d)):
+            if re.search(pat, fn, re.I) and (not ym or ym in fn):
+                found = os.path.join(d, fn)
+                break
+        if found:
+            break
+    if not found:
+        print(f"    Impaired txt: no file matching {pat!r} for {ym} in {search_dirs}")
+        return {}
+
+    print(f"    Loading impaired txt from: {os.path.basename(found)}")
+    # Build member -> (pool, grade) from the current extract so the balance is
+    # removed from the pool the loan is actually reserved in and graded there.
+    grade_lookup: dict = {}
+    pool_lookup: dict = {}
+    if df is not None and 'member_number' in df.columns:
+        _hasg = 'current_grade' in df.columns
+        _hasp = 'loan_pool' in df.columns
+        for _, r in df.iterrows():
+            mem = str(r['member_number']).strip()
+            if not mem:
+                continue
+            g = r['current_grade'] if _hasg else ''
+            p = (str(r['loan_pool']).strip()
+                 if (_hasp and pd.notna(r['loan_pool'])) else '')
+            keys = {mem, re.sub(r'\D+', '', mem)}
+            try:
+                keys.add(str(int(mem)))
+            except (TypeError, ValueError):
+                pass
+            for k in keys:
+                if not k:
+                    continue
+                grade_lookup.setdefault(k, g)
+                if p:
+                    pool_lookup.setdefault(k, p)
+
+    pool_map = config.get('pool_map', {})
+    default_pool = config.get('default_pool', 'Other/Uncategorized')
+    no_score = config.get('no_score_label', 'Not Reported')
+    acl_impaired: dict = {}
+    spec_id_by_pool: dict = {}
+    total_removed = 0.0
+    n = 0
+    with open(found, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            line = line.rstrip('\n')
+            if not line.strip():
+                continue
+            f = line.split('|')
+            if len(f) < 4:
+                continue
+            cat = f[0].strip().upper()
+            acct = f[1].strip()
+            ltype = f[2].strip()
+            try:
+                bal = float(f[3]) if f[3].strip() else 0.0
+            except ValueError:
+                bal = 0.0
+            try:
+                coll = float(f[6]) if len(f) > 6 and f[6].strip() else 0.0
+            except ValueError:
+                coll = 0.0
+            if bal <= 0:
+                continue
+            risk = max(0.0, bal - coll)
+            acl_impaired[cat] = acl_impaired.get(cat, 0.0) + risk * cat_pct.get(cat, 0.0)
+            key = str(int(acct)) if acct.isdigit() else acct
+            pool = (pool_lookup.get(key) or pool_lookup.get(acct)
+                    or pool_map.get(ltype, default_pool))
+            grade = (grade_lookup.get(key) or grade_lookup.get(acct) or no_score)
+            spec_id_by_pool.setdefault(pool, {}).setdefault(grade, 0.0)
+            spec_id_by_pool[pool][grade] += bal
+            total_removed += bal
+            n += 1
+
+    total_spec_allow = sum(acl_impaired.values())
+    print(f"    Impaired txt engine: {n} loan(s), spec allowance "
+          f"${total_spec_allow:,.2f} across {len(acl_impaired)} categor(ies), "
+          f"balance removed ${total_removed:,.2f}")
+    return {
+        'acl_impaired': acl_impaired,
+        'spec_id_by_pool': spec_id_by_pool,
+        'total_spec_id': total_spec_allow,
+    }
+
+
+def load_commercial_allowance(config, snap):
+    """Compute the per-loan commercial allowance from the ``Comm Ln Allowance``
+    workbook (Erie), for pools whose reserve is set loan-by-loan from a matrix
+    rating rather than the firm-wide FICO/loss-rate model.
+
+    Config block ``commercial_allowance``:
+      ``file_pattern``: regex for the workbook (default ``Comm Ln Allowance.*\\.xlsx$``)
+      ``pool``: destination pool name (default "Business")
+      ``header_row``: 1-based header row (default 2)
+      ``amount_col`` / ``balance_col``: 1-based columns for the per-loan
+        allowance amount and current balance (default 9 / 4)
+      ``env_factor``: environmental factor applied after (default 0.0)
+
+    The tab is picked by the snapshot month-end ``MMDDYY``. Returns
+    ``{pool: {'balance', 'allow_before', 'env_factor'}}`` or ``{}``.
+    """
+    ccfg = config.get('commercial_allowance') or {}
+    if not ccfg or not snap:
+        return {}
+    data_dir = config.get('data_directory', '')
+    search_dirs = []
+    if data_dir:
+        if os.path.isabs(data_dir):
+            search_dirs.append(data_dir)
+        else:
+            search_dirs.append(os.path.join(BASE, data_dir))
+            search_dirs.append(os.path.join(BASE, 'Raw_Uploads', data_dir))
+    pat = ccfg.get('file_pattern') or r'Comm Ln Allowance.*\.xlsx$'
+    found = None
+    for d in search_dirs:
+        if not (d and os.path.isdir(d)):
+            continue
+        for fn in sorted(os.listdir(d)):
+            if not fn.startswith('~$') and re.search(pat, fn, re.I):
+                found = os.path.join(d, fn)
+                break
+        if found:
+            break
+    if not found:
+        print(f"    Commercial allowance: no file matching {pat!r} in {search_dirs}")
+        return {}
+
+    # Target tab = MMDDYY of the snapshot month-end (e.g. 2026-08-31 -> 083126).
+    y, m, dday = snap[:4], snap[5:7], snap[8:10]
+    tab_target = f"{m}{dday}{y[2:]}"
+    hdr = int(ccfg.get('header_row', 2))
+    amt_col = int(ccfg.get('amount_col', 9))
+    bal_col = int(ccfg.get('balance_col', 4))
+    env = float(ccfg.get('env_factor', 0.0))
+    pool = ccfg.get('pool', 'Business')
+
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(found, data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"    Commercial allowance: cannot read {os.path.basename(found)}: {exc}")
+        return {}
+    ws = None
+    if tab_target in wb.sheetnames:
+        ws = wb[tab_target]
+    else:  # fall back to the latest tab matching the month+year
+        cands = [s for s in wb.sheetnames if s[:2] == m and s[-2:] == y[2:]]
+        if cands:
+            ws = wb[cands[-1]]
+    if ws is None:
+        print(f"    Commercial allowance: no tab {tab_target!r} in "
+              f"{os.path.basename(found)}")
+        return {}
+
+    allow_sum = bal_sum = 0.0
+    n = 0
+    for r in range(hdr + 1, ws.max_row + 1):
+        acct = ws.cell(row=r, column=1).value
+        if acct in (None, ''):
+            continue
+        try:
+            allow_sum += float(ws.cell(row=r, column=amt_col).value or 0)
+            bal_sum += float(ws.cell(row=r, column=bal_col).value or 0)
+            n += 1
+        except (TypeError, ValueError):
+            continue
+    print(f"    Commercial allowance ({ws.title}): {n} loan(s), balance "
+          f"${bal_sum:,.2f}, allow-before ${allow_sum:,.2f}, env {env:+.2f} "
+          f"-> total ${allow_sum * (1 + env):,.2f} [{pool}]")
+    return {pool: {'balance': bal_sum, 'allow_before': allow_sum,
+                   'env_factor': env}}
+
+
 def load_standalone_impaired(config, snap, df=None):
     """Load impaired-loan data from the standalone Impaired Loans file.
 
@@ -7073,6 +7286,10 @@ def load_standalone_impaired(config, snap, df=None):
       'total_spec_id': float
     or empty dict if file/tab not found.
     """
+    # Erie-style pipe-delimited TCT.IMPAIRED txt takes precedence when wired.
+    if config.get('impaired_txt'):
+        return load_impaired_txt(config, snap, df)
+
     data_dir = config.get('data_directory', '')
     if not data_dir:
         return {}
@@ -12826,6 +13043,27 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         imp['total_spec_id'] = standalone_imp['total_spec_id']
         hist['impaired'] = imp
 
+    # ── Per-loan commercial allowance (warm_allowance_pools, raw-driven) ──
+    # Inject the matrix-rated commercial allowance into acl_pools so the
+    # report's warm_allowance_pools pass-through picks it up without reading
+    # the WARM workbook (seed-driven CUs).
+    comm_allow = load_commercial_allowance(config, snapshot_date)
+    if comm_allow:
+        imp = hist.get('impaired', {})
+        acl_pools = dict(imp.get('acl_pools') or {})
+        for _p, _vals in comm_allow.items():
+            existing = dict(acl_pools.get(_p) or {})
+            existing['grades'] = existing.get('grades', {})
+            _tot = dict(existing.get('total') or {})
+            _tot.update({'balance': _vals['balance'],
+                         'allow_before': _vals['allow_before'],
+                         'env_factor': _vals['env_factor'],
+                         'spec_id': _tot.get('spec_id', 0.0)})
+            existing['total'] = _tot
+            acl_pools[_p] = existing
+        imp['acl_pools'] = acl_pools
+        hist['impaired'] = imp
+
     # ── Load wizard-entered impaired loans (highest precedence) ──
     # When the user has entered/uploaded impaired loans in the setup
     # wizard, those rows are the most current source of truth and
@@ -13220,6 +13458,11 @@ def generate_report(client_name, snapshot_date=None, reports=None):
         reports = ['tct']  # default fallback
 
     os.makedirs(RPT_DIR, exist_ok=True)
+    # Per-CU report destination. When the client config sets
+    # ``report_output_dir`` (from the wizard's Reports step), save this CU's
+    # reports there; blank falls back to the shared Reports/ folder.
+    out_dir = resolve_path(config.get('report_output_dir')) or RPT_DIR
+    os.makedirs(out_dir, exist_ok=True)
     saved = []
     failed_integrity = []
 
@@ -13269,7 +13512,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 print(f"  Unknown report type: {rpt_type}")
                 continue
 
-            output_path = os.path.join(RPT_DIR, fname)
+            output_path = os.path.join(out_dir, fname)
 
             # "All Loans" and "Risk Change-All Loans" tabs are intentionally
             # left unlocked so users can sort/filter. (Previously protected
@@ -13333,7 +13576,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             if _env.get('acl_pools'):
                 _shape = _fd._acl_current_shape(
                     _env['acl_pools'], _env['acl_summary'], _env['acl_impaired'])
-                acl_store.write_acl_snapshot(RPT_DIR, cu, snapshot_date, _shape)
+                acl_store.write_acl_snapshot(out_dir, cu, snapshot_date, _shape)
                 print(f"  Wrote ACL sidecar for {snapshot_date}")
         except Exception as _sc_exc:  # noqa: BLE001
             print(f"  ACL sidecar skipped: {_sc_exc}")
@@ -13343,7 +13586,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 pdf_bytes = render_report_pdf_from_data(
                     client_name, snapshot_date, _pdf_config,
                     grades=grades, hist=_pdf_hist, df=df)
-                pdf_path = os.path.join(RPT_DIR, _vbase + '.pdf')
+                pdf_path = os.path.join(out_dir, _vbase + '.pdf')
                 with open(pdf_path, 'wb') as _pf:
                     _pf.write(pdf_bytes)
                 print(f"  Saved vizo PDF{' (PDF only)' if _pdf_only else ''}: "
@@ -13365,7 +13608,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 client_name, snapshot_date, _pdf_config,
                 grades=grades, hist=_pdf_hist, df=df, supplemental=True)
             supp_pdf_path = os.path.join(
-                RPT_DIR,
+                out_dir,
                 f"{snapshot_date}_CECL_Supplemental_{_safe_cu}_Vizo_Model.pdf")
             with open(supp_pdf_path, 'wb') as _pf:
                 _pf.write(pdf_bytes)
@@ -13392,7 +13635,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             if _env.get('acl_pools'):
                 _shape = _fd._acl_current_shape(
                     _env['acl_pools'], _env['acl_summary'], _env['acl_impaired'])
-                acl_store.write_acl_snapshot(RPT_DIR, cu, snapshot_date, _shape,
+                acl_store.write_acl_snapshot(out_dir, cu, snapshot_date, _shape,
                                              model_name='TCT_Model')
                 print(f"  Wrote TCT ACL sidecar for {snapshot_date}")
         except Exception as _sc_exc:  # noqa: BLE001
@@ -13403,7 +13646,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 pdf_bytes = render_report_pdf_from_data(
                     client_name, snapshot_date, _pdf_config,
                     grades=grades, hist=_pdf_hist, df=df, variant='tct')
-                pdf_path = os.path.join(RPT_DIR, _tbase + '.pdf')
+                pdf_path = os.path.join(out_dir, _tbase + '.pdf')
                 with open(pdf_path, 'wb') as _pf:
                     _pf.write(pdf_bytes)
                 print(f"  Saved tct PDF{' (PDF only)' if _tct_pdf_only else ''}: "
@@ -13415,7 +13658,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 print(f"  Warning: tct PDF generation failed: {_pdf_exc}")
 
     if saved:
-        print(f"\n  {len(saved)} report(s) saved to {RPT_DIR}")
+        print(f"\n  {len(saved)} report(s) saved to {out_dir}")
     else:
         print(f"\n  No reports were generated.")
 
