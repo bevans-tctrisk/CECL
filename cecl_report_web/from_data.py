@@ -295,6 +295,11 @@ def _acl_data(config: dict, snapshot_date: str, hist: dict | None,
     acl_pools = _imp.get("_acl_pools_computed") or _imp.get("acl_pools") or {}
     acl_summary = _imp.get("_acl_summary_computed") or _imp.get("acl_summary") or {}
     acl_impaired = _imp.get("_acl_impaired_computed") or _imp.get("acl_impaired") or {}
+    # Seed-driven CUs carry only a PARTIAL acl_pools (the frozen warm_allowance
+    # passthrough pools); the full pool set must be recomputed from df, so don't
+    # let that partial dict short-circuit the compute below.
+    if (config or {}).get("warm_seed_driven") and not _imp.get("_acl_pools_computed"):
+        acl_pools = {}
     if not acl_pools and df is not None:
         computed = _eng.compute_acl_environmental(df, grades, config, hist, snapshot_date)
         acl_pools = computed.get("acl_pools") or {}
