@@ -360,8 +360,21 @@ def _prepare_for_recompute(warm: dict, config: dict | None = None) -> dict:
             for _p, _gm in madj.items():
                 existing.setdefault(_p, {}).update(_gm)
             warm["prior_mgmt_adj"] = existing
+    # Preserve the frozen seed allowance for small NRR "specific reserve" pools
+    # the firm-wide model cannot recompute without their GL balance (e.g. Erie's
+    # Courtesy Pay / Negative Share / Business Credit Card). Their seed-quarter
+    # allowance passes through via ``warm_allowance_pools``; balances are stable.
+    _frozen_allow = {
+        str(p).strip().lower()
+        for p in ((config or {}).get("seed_frozen_allowance_pools") or [])
+        if str(p).strip()
+    }
+    _preserved = {p: pd for p, pd in acl_pools.items()
+                  if p.strip().lower() in _frozen_allow} if _frozen_allow else {}
     for k in _FROZEN_KEYS:
         warm.pop(k, None)
+    if _preserved:
+        warm["acl_pools"] = _preserved
     # Drop the seed-quarter's frozen life-of-loan net charge-off so the base loss
     # rate recomputes from the rolled-forward charge-off/recovery history.
     warm.pop("warm_net_co", None)
