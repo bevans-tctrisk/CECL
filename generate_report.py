@@ -7273,6 +7273,92 @@ def load_commercial_allowance(config, snap):
                    'env_factor': env}}
 
 
+def load_gl_balances(config, snap):
+    """Read current-quarter pool balances from a GL balance-sheet TXT.
+
+    Pools whose balance lives only in the general ledger (not the loan extract)
+    -- e.g. Erie's Courtesy Pay (707000), Negative Share (707500), Business
+    Credit Card (702060), Student Loans (701190), Participation (706500/706550)
+    -- get their balance here so they recompute each quarter instead of being
+    frozen. Config block ``gl_balance_sheet``:
+      ``file_pattern``: regex (default ``485-.*GL Balance Sheet.*\\.TXT$``)
+      ``accounts``: {pool: [gl_account, ...]}
+    The file for the snapshot month is picked by its "MonthName YYYY" label.
+    Returns ``{pool: balance}``.
+    """
+    gcfg = config.get('gl_balance_sheet') or {}
+    if not gcfg or not snap:
+        return {}
+    acct_to_pool = {}
+    for pool, accts in (gcfg.get('accounts') or {}).items():
+        for a in (accts if isinstance(accts, (list, tuple)) else [accts]):
+            acct_to_pool[str(a).strip()] = pool
+    if not acct_to_pool:
+        return {}
+    data_dir = config.get('data_directory', '')
+    search_dirs = []
+    if data_dir:
+        if os.path.isabs(data_dir):
+            search_dirs.append(data_dir)
+        else:
+            search_dirs.append(os.path.join(BASE, data_dir))
+            search_dirs.append(os.path.join(BASE, 'Raw_Uploads', data_dir))
+    pat = gcfg.get('file_pattern') or r'485-.*GL Balance Sheet.*\.TXT$'
+    import calendar
+    want = f"{calendar.month_name[int(snap[5:7])]} {snap[:4]}".lower()  # 'august 2026'
+    found = None
+    for d in search_dirs:
+        if not (d and os.path.isdir(d)):
+            continue
+        cands = [f for f in sorted(os.listdir(d)) if re.search(pat, f, re.I)]
+        pref = [f for f in cands if want in f.lower()]
+        pick = pref or cands
+        if pick:
+            found = os.path.join(d, pick[0])
+            break
+    if not found:
+        print(f"    GL balances: no file matching {pat!r} ({want}) in {search_dirs}")
+        return {}
+
+    def _num(tok):
+        tok = tok.strip()
+        neg = tok.startswith('<') and tok.endswith('>')
+        tok = tok.strip('<>').replace(',', '')
+        try:
+            v = float(tok)
+        except ValueError:
+            return None
+        return -v if neg else v
+
+    num_at_end = re.compile(r'(<?[\d,]+\.\d{2}>?)\s*$')
+    raw = {}  # acct -> balance
+    pending_acct = None
+    with open(found, encoding='utf-8', errors='replace') as fh:
+        for line in fh:
+            m_acct = re.match(r'^\s*(\d{6})\b', line)
+            m_num = num_at_end.search(line.rstrip())
+            if m_acct:
+                acct = m_acct.group(1)
+                if acct in acct_to_pool:
+                    if m_num:
+                        raw[acct] = _num(m_num.group(1))
+                    else:
+                        pending_acct = acct  # balance wrapped to a later line
+                continue
+            if pending_acct and m_num:
+                raw[pending_acct] = _num(m_num.group(1))
+                pending_acct = None
+
+    balances = {}
+    for acct, pool in acct_to_pool.items():
+        if acct in raw and raw[acct] is not None:
+            balances[pool] = balances.get(pool, 0.0) + raw[acct]
+    if balances:
+        print(f"    GL balances ({os.path.basename(found)}): "
+              + ", ".join(f"{p} ${v:,.2f}" for p, v in balances.items()))
+    return balances
+
+
 def load_standalone_impaired(config, snap, df=None):
     """Load impaired-loan data from the standalone Impaired Loans file.
 
@@ -13066,6 +13152,24 @@ def generate_report(client_name, snapshot_date=None, reports=None):
             existing['total'] = _tot
             acl_pools[_p] = existing
         imp['acl_pools'] = acl_pools
+        hist['impaired'] = imp
+
+    # ── Current-quarter GL balances for GL-only pools (raw-driven) ──
+    # NRR pools whose balance lives only in the general ledger (Courtesy Pay,
+    # Negative Share, Business Credit Card, Student Loans, Participation) get
+    # their current balance so they recompute each quarter (balance x life-loss
+    # rate) instead of using a frozen seed balance.
+    gl_bals = load_gl_balances(config, snapshot_date)
+    if gl_bals:
+        imp = hist.get('impaired', {})
+        pbd = dict(imp.get('pool_bal_detail') or {})
+        for _p, _bal in gl_bals.items():
+            _d = dict(pbd.get(_p) or {})
+            _t = dict(_d.get('Total') or {})
+            _t['balance_sheet_total'] = _bal
+            _d['Total'] = _t
+            pbd[_p] = _d
+        imp['pool_bal_detail'] = pbd
         hist['impaired'] = imp
 
     # ── Load wizard-entered impaired loans (highest precedence) ──

@@ -3075,6 +3075,13 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
         return 0
 
     pools = _sort_pools(df['loan_pool'].unique(), config)
+    # Include GL-only NRR pools (Courtesy Pay etc.) that have no loan-extract
+    # rows so their life-loss rate is still computed from the CO/balance history.
+    _gl_only = set(config.get('not_risk_rated', []) or [])
+    _gl_only |= set(((_imp.get('pool_bal_detail') or {}).keys()))
+    for _p in _gl_only:
+        if _p and _p not in pools and not str(_p).strip().upper().startswith('HIDE'):
+            pools.append(_p)
 
     # Life loss per pool – matches Display Hist Bal formula
     co_data = hist.get('chargeoffs', {}) if hist else {}
@@ -3552,7 +3559,12 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             if nrr_spec_id == 0 and pool in spec_id_by_pool:
                 nrr_spec_id = sum(spec_id_by_pool[pool].values())
             nrr_calc_bal = nrr_balance - nrr_spec_id
-            nrr_base_rate = warm_total.get('base_rate', 0)
+            nrr_base_rate = warm_total.get('base_rate')
+            # Seed-driven / WARM-free: no frozen rate -> recompute from the
+            # rolled-forward charge-off history (net CO / avg balance) so the
+            # NRR pool's loss rate updates each quarter like the graded pools.
+            if nrr_base_rate is None:
+                nrr_base_rate = life_loss.get(pool, 0)
             # Config override: pin the WARM's blended base loss rate for a
             # balance-only NRR pool (overdraft / participations) via
             # ``base_loss_rate_by_pool_grade: {pool: {Total: rate}}``. The
