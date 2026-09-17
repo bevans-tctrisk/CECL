@@ -1169,6 +1169,26 @@ def load_chargeoff_recovery_history(config):
                     return v
             return None
 
+        def _lookup_pool_kw(raw_code, kw_map):
+            """Resolve pool via _lookup_pool, then a config ``pool_keyword_map``
+            (case-insensitive substring; ordered; a ``_default`` key catches the
+            rest). For free-text CO/recovery pool descriptions (e.g. bridgeton's
+            'Signature Unsecured' / 'Used Auto - FastCar')."""
+            p = _lookup_pool(raw_code)
+            if p:
+                return p
+            if kw_map:
+                s = str(raw_code or '').lower()
+                default = None
+                for kw, pool in kw_map.items():
+                    if str(kw).lower() in ('_default', 'default', '*'):
+                        default = pool
+                        continue
+                    if str(kw).lower() in s:
+                        return pool
+                return default
+            return None
+
         # Fallback for flat folders (no YYYY-MM quarter subfolders):
         # treat ``data_dir`` itself as a single bucket so wizard-style
         # CECL setups (Raw_Uploads/<short>/*.xlsx) get picked up. The
@@ -1332,7 +1352,8 @@ def load_chargeoff_recovery_history(config):
                     try:
                         df = _parse_chargeoff_file(filepath, parse_config=_co_cfg)
                         for _, row in df.iterrows():
-                            pool = _lookup_pool(row['code'])
+                            pool = _lookup_pool_kw(
+                                row['code'], (_co_cfg or {}).get('pool_keyword_map'))
                             if pool and pd.notna(row['amount']):
                                 row_year = file_default_year
                                 row_month = file_default_month
@@ -1364,7 +1385,8 @@ def load_chargeoff_recovery_history(config):
                     try:
                         df = _parse_recovery_file(filepath, parse_config=_rc_cfg)
                         for _, row in df.iterrows():
-                            pool = _lookup_pool(row['code'])
+                            pool = _lookup_pool_kw(
+                                row['code'], (_rc_cfg or {}).get('pool_keyword_map'))
                             if pool and pd.notna(row['amount']):
                                 row_year = file_default_year
                                 row_month = file_default_month
