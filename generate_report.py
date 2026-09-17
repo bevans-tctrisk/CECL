@@ -893,6 +893,134 @@ def _parse_cp_shares_file(filepath, date_col, pool_cols):
     return co_m, rc_m, co_y, rc_y
 
 
+def _find_latest_cumulative(data_dir, pattern):
+    """Return the most recent file under ``data_dir`` matching ``pattern``.
+
+    For CUs whose charge-off/recovery file is a CUMULATIVE register reissued
+    every quarter into a per-quarter subfolder (e.g. Tongass): reading them all
+    would multiply the history, so pick the single newest (by YYYY-MM folder
+    name, then mtime). Skips DNU / old-files / prior-years folders."""
+    rx = re.compile(pattern, re.IGNORECASE)
+    best = None
+    best_key = None
+    if not (data_dir and os.path.isdir(data_dir)):
+        return None
+    for root, _dirs, files in os.walk(data_dir):
+        low = root.lower()
+        if 'dnu' in low or 'old files' in low or 'prior years' in low:
+            continue
+        for f in files:
+            if f.startswith('~') or not rx.search(f):
+                continue
+            fp = os.path.join(root, f)
+            m = re.search(r'(20\d{2})[-_]?(\d{2})', os.path.basename(root))
+            fkey = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+            try:
+                key = (fkey, os.path.getmtime(fp))
+            except OSError:
+                key = (fkey, 0)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = fp
+    return best
+
+
+def _parse_co_tracking(filepath, cfg, pool_lookup):
+    """Parse a cumulative charge-off tracking register (row per charge-off).
+
+    Config keys (0-based): ``sheet``, ``account_col``, ``code_col`` (loan-type
+    code -> pool via ``pool_lookup``), ``amount_col``, ``date_col``,
+    ``has_header``. Returns (co_monthly, chargeoffs)."""
+    from openpyxl import load_workbook
+    co_m, co_y = {}, {}
+    try:
+        wb = load_workbook(filepath, data_only=True, read_only=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"    CO tracking: cannot read {os.path.basename(filepath)}: {exc}")
+        return co_m, co_y
+    sheet = cfg.get('sheet')
+    ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb[wb.sheetnames[0]]
+    ac = int(cfg.get('account_col', 0)); cc = int(cfg.get('code_col', 2))
+    amc = int(cfg.get('amount_col', 3)); dc = int(cfg.get('date_col', 4))
+    start = 2 if cfg.get('has_header', True) else 1
+    for row in ws.iter_rows(min_row=start, values_only=True):
+        if len(row) <= max(ac, cc, amc, dc):
+            continue
+        try:
+            amt = float(row[amc])
+        except (TypeError, ValueError):
+            continue
+        if not amt:
+            continue
+        dt = _cp_parse_date(row[dc])
+        if dt is None:
+            continue
+        pool = pool_lookup(row[cc])
+        if not pool:
+            continue
+        ym = (dt.year, dt.month)
+        _dm = co_m.setdefault(ym, {}); _dm[pool] = _dm.get(pool, 0) + amt
+        _dy = co_y.setdefault(dt.year, {}); _dy[pool] = _dy.get(pool, 0) + amt
+    wb.close()
+    return co_m, co_y
+
+
+def _parse_recovery_matrix(filepath, cfg):
+    """Parse a pool x month recovery matrix (Tongass 'Historical Recoveries').
+
+    Config: ``sheet``, ``header_row`` (1-based row of the date columns),
+    ``pool_col`` (0-based), ``first_date_col`` (0-based), ``pool_map``
+    {matrix-name -> report pool}. Stops at the first 'total' pool row (a later
+    summary section would otherwise double-count). Returns (rc_monthly,
+    recoveries)."""
+    from openpyxl import load_workbook
+    rc_m, rc_y = {}, {}
+    try:
+        wb = load_workbook(filepath, data_only=True, read_only=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"    Recovery matrix: cannot read {os.path.basename(filepath)}: {exc}")
+        return rc_m, rc_y
+    sheet = cfg.get('sheet')
+    ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb[wb.sheetnames[0]]
+    hdr_row = int(cfg.get('header_row', 2))
+    pool_col = int(cfg.get('pool_col', 0))
+    first_dc = int(cfg.get('first_date_col', 2))
+    name_map = {str(k).strip().lower(): v
+                for k, v in (cfg.get('pool_map') or {}).items()}
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if len(rows) < hdr_row:
+        return rc_m, rc_y
+    header = rows[hdr_row - 1]
+    datecols = {}
+    for c in range(first_dc, len(header)):
+        dt = _cp_parse_date(header[c])
+        if dt is not None:
+            datecols[c] = dt
+    for r in rows[hdr_row:]:
+        pname = r[pool_col] if pool_col < len(r) else None
+        if pname in (None, ''):
+            continue
+        if 'total' in str(pname).strip().lower():
+            break  # end of the recovery section; skip the summary block below
+        pool = name_map.get(str(pname).strip().lower())
+        if not pool:
+            continue
+        for c, dt in datecols.items():
+            if c >= len(r):
+                continue
+            try:
+                amt = float(r[c])
+            except (TypeError, ValueError):
+                continue
+            if not amt:
+                continue
+            ym = (dt.year, dt.month)
+            _dm = rc_m.setdefault(ym, {}); _dm[pool] = _dm.get(pool, 0) + amt
+            _dy = rc_y.setdefault(dt.year, {}); _dy[pool] = _dy.get(pool, 0) + amt
+    return rc_m, rc_y
+
+
 def load_chargeoff_recovery_history(config):
     """Load all historical charge-off and recovery data.
     Returns dict: {'chargeoffs': {year: {pool: amount}}, 'recoveries': {year: {pool: amount}}}"""
@@ -1477,6 +1605,42 @@ def load_chargeoff_recovery_history(config):
                 recoveries.setdefault(_y, {}).update(_pv)
             print(f"    Courtesy Pay & Shares ({os.path.basename(_cp_file)}): "
                   f"CO/recovery for {list(_pool_cols)}")
+
+    # Cumulative CO tracking register + pool x month recovery matrix (Tongass):
+    # read ONLY the latest file (per-quarter subfolders each hold a cumulative
+    # copy -> reading all would multiply the history).
+    _cot = config.get('co_tracking')
+    if _cot:
+        _cf = _find_latest_cumulative(
+            data_dir, _cot.get('file_pattern') or r'Charge off Tracking.*\.xlsx$')
+        if _cf:
+            cm3, cy3 = _parse_co_tracking(_cf, _cot, _lookup_pool)
+            for _ym, _pv in cm3.items():
+                _d = co_monthly.setdefault(_ym, {})
+                for _p, _v in _pv.items():
+                    _d[_p] = _d.get(_p, 0) + _v
+            for _y, _pv in cy3.items():
+                _d = chargeoffs.setdefault(_y, {})
+                for _p, _v in _pv.items():
+                    _d[_p] = _d.get(_p, 0) + _v
+            print(f"    CO tracking ({os.path.basename(_cf)}): "
+                  f"{len(cy3)} year(s)")
+    _rmx = config.get('recovery_matrix')
+    if _rmx:
+        _rf = _find_latest_cumulative(
+            data_dir, _rmx.get('file_pattern') or r'Historical Recoveries.*\.xlsx$')
+        if _rf:
+            rm3, ry3 = _parse_recovery_matrix(_rf, _rmx)
+            for _ym, _pv in rm3.items():
+                _d = rc_monthly.setdefault(_ym, {})
+                for _p, _v in _pv.items():
+                    _d[_p] = _d.get(_p, 0) + _v
+            for _y, _pv in ry3.items():
+                _d = recoveries.setdefault(_y, {})
+                for _p, _v in _pv.items():
+                    _d[_p] = _d.get(_p, 0) + _v
+            print(f"    Recovery matrix ({os.path.basename(_rf)}): "
+                  f"{len(ry3)} year(s)")
 
     all_years = sorted(set(list(chargeoffs.keys()) + list(recoveries.keys())))
     return {
