@@ -815,6 +815,84 @@ def _parse_recovery_file(filepath, parse_config=None):
     return result.dropna(subset=['amount'])
 
 
+def _cp_parse_date(val):
+    """Parse a Courtesy-Pay-&-Shares date cell (datetime, ISO string, or a
+    month-name label such as 'Janaury 2025' [sic]). Returns datetime or None."""
+    if isinstance(val, (pd.Timestamp, datetime)):
+        return val
+    if val is None:
+        return None
+    s = str(val).strip()
+    dt = pd.to_datetime(s, errors='coerce')
+    if pd.notna(dt):
+        return dt.to_pydatetime() if hasattr(dt, 'to_pydatetime') else dt
+    m = re.search(r'(19|20)\d{2}', s)
+    if not m:
+        return None
+    yr = int(m.group(0))
+    months = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
+              'august', 'september', 'october', 'november', 'december']
+    sl = s.lower()
+    for i, mo in enumerate(months, 1):
+        if mo[:3] in sl:
+            return datetime(yr, i, 1)
+    return None
+
+
+def _parse_cp_shares_file(filepath, date_col, pool_cols):
+    """Parse the 'Courtesy Pay & Shares' workbook.
+
+    Sheet1 has two labelled sections in the date column -- 'Recovery' then
+    'Loss' (charge-offs) -- each a month x pool matrix (one column per pool).
+    ``date_col`` / ``pool_cols`` values are 1-based column numbers. Returns
+    (co_monthly, rc_monthly, chargeoffs, recoveries) keyed the same way as the
+    loan CO/recovery parse.
+    """
+    from openpyxl import load_workbook
+    co_m, rc_m, co_y, rc_y = {}, {}, {}, {}
+    try:
+        wb = load_workbook(filepath, data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"    Courtesy Pay & Shares: cannot read "
+              f"{os.path.basename(filepath)}: {exc}")
+        return co_m, rc_m, co_y, rc_y
+    ws = wb[wb.sheetnames[0]]
+    section = None  # 'co' (Loss) or 'rc' (Recovery)
+    for r in range(1, ws.max_row + 1):
+        label = ws.cell(row=r, column=date_col).value
+        lab_s = str(label).strip().lower() if label is not None else ''
+        if lab_s.startswith('recover'):
+            section = 'rc'
+            continue
+        if lab_s.startswith('loss'):
+            section = 'co'
+            continue
+        if section is None or lab_s in ('total', ''):
+            continue
+        dt = _cp_parse_date(label)
+        if dt is None:
+            continue
+        ym = (dt.year, dt.month)
+        for pool, col in pool_cols.items():
+            try:
+                amt = float(ws.cell(row=r, column=col).value)
+            except (TypeError, ValueError):
+                continue
+            if not amt:
+                continue
+            if section == 'co':
+                _dm = co_m.setdefault(ym, {})
+                _dm[pool] = _dm.get(pool, 0) + amt
+                _dy = co_y.setdefault(dt.year, {})
+                _dy[pool] = _dy.get(pool, 0) + amt
+            else:
+                _dm = rc_m.setdefault(ym, {})
+                _dm[pool] = _dm.get(pool, 0) + amt
+                _dy = rc_y.setdefault(dt.year, {})
+                _dy[pool] = _dy.get(pool, 0) + amt
+    return co_m, rc_m, co_y, rc_y
+
+
 def load_chargeoff_recovery_history(config):
     """Load all historical charge-off and recovery data.
     Returns dict: {'chargeoffs': {year: {pool: amount}}, 'recoveries': {year: {pool: amount}}}"""
@@ -1346,6 +1424,37 @@ def load_chargeoff_recovery_history(config):
                                 rc_monthly[ym][pool] = rc_monthly[ym].get(pool, 0) + row['amount']
                     except Exception as e:
                         print(f"    Warning: Could not parse recovery file {filepath}: {e}")
+
+    # Courtesy Pay & Shares: overdraft charge-offs/recoveries for the NRR
+    # deposit pools (Courtesy Pay, Negative Share) live in their own workbook,
+    # not the loan CO/recovery files. Merge them in so those pools' loss rates
+    # roll forward too.
+    _cp_cfg = config.get('cp_shares_history')
+    if _cp_cfg:
+        _cp_pat = _cp_cfg.get('file_pattern') or r'Courtesy Pay.*Shares.*\.xlsx$'
+        _cp_file = None
+        for _root, _d, _files in os.walk(data_dir):
+            for _f in sorted(_files):
+                if not _f.startswith('~$') and re.search(_cp_pat, _f, re.IGNORECASE):
+                    _cp_file = os.path.join(_root, _f)
+                    break
+            if _cp_file:
+                break
+        if _cp_file:
+            _pool_cols = {p: int(c)
+                          for p, c in (_cp_cfg.get('pool_cols') or {}).items()}
+            _dc = int(_cp_cfg.get('date_col', 2))
+            cm2, rm2, cy2, ry2 = _parse_cp_shares_file(_cp_file, _dc, _pool_cols)
+            for _ym, _pv in cm2.items():
+                co_monthly.setdefault(_ym, {}).update(_pv)
+            for _ym, _pv in rm2.items():
+                rc_monthly.setdefault(_ym, {}).update(_pv)
+            for _y, _pv in cy2.items():
+                chargeoffs.setdefault(_y, {}).update(_pv)
+            for _y, _pv in ry2.items():
+                recoveries.setdefault(_y, {}).update(_pv)
+            print(f"    Courtesy Pay & Shares ({os.path.basename(_cp_file)}): "
+                  f"CO/recovery for {list(_pool_cols)}")
 
     all_years = sorted(set(list(chargeoffs.keys()) + list(recoveries.keys())))
     return {
