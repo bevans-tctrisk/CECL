@@ -3086,12 +3086,19 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     # Life loss per pool – matches Display Hist Bal formula
     co_data = hist.get('chargeoffs', {}) if hist else {}
     rc_data = hist.get('recoveries', {}) if hist else {}
+    co_monthly = hist.get('co_monthly', {}) if hist else {}
+    rc_monthly = hist.get('rc_monthly', {}) if hist else {}
     avg_bals = hist.get('avg_balances', {}) if hist else {}
     years = hist.get('years', []) if hist else []
     acl_months_map = _imp.get('acl_months', {})
     snap_year = int(snap[:4])
     snap_month = int(snap[5:7])
     warm_net_co = _imp.get('warm_net_co', {})
+    # When the CU drives CO/RC from raw monthly files, trim the window-start
+    # year to the window-start month so the loss rate matches the windowed
+    # 'ACL Net Charge offs' column (charge-offs before the life-of-loan window
+    # must not create a loss rate).
+    _trim_start_year = bool(config.get('prefer_raw_chargeoffs'))
     hbd = _imp.get('hist_bal_data', {})
     annual_grade_avg = {}
     for _pk, pdata in hbd.items():
@@ -3116,6 +3123,7 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
         pool_acl = acl_months_map.get(pool, 36)
         abs_first = (snap_year * 12 + snap_month) - pool_acl + 1
         pe = (abs_first - 1) // 12
+        earliest_month = abs_first - pe * 12
         pa = annual_grade_avg.get(pool, {})
         yr_tots = []
         for y in years:
@@ -3136,8 +3144,15 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             for y in years:
                 if y < pe:
                     continue
-                total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
-                             - abs(rc_data.get(y, {}).get(pool, 0) or 0)
+                if _trim_start_year and y == pe and earliest_month > 1:
+                    co_y = sum((co_monthly.get((y, m), {}) or {}).get(pool, 0) or 0
+                               for m in range(earliest_month, 13))
+                    rc_y = sum((rc_monthly.get((y, m), {}) or {}).get(pool, 0) or 0
+                               for m in range(earliest_month, 13))
+                    total_net += abs(co_y) - abs(rc_y)
+                else:
+                    total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
+                                 - abs(rc_data.get(y, {}).get(pool, 0) or 0)
         life_loss[pool] = total_net / avg_tot if avg_tot > 0 else 0
 
     # DQ variance per pool
