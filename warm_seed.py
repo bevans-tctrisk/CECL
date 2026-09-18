@@ -160,6 +160,91 @@ def _newest_warm_snapshot(config: dict) -> str | None:
     return f"{y:04d}-{mo:02d}-{monthrange(y, mo)[1]:02d}"
 
 
+def _read_bs_co_dq_pools(warm_path: str | None) -> dict:
+    """Read the WARM ``BS CO DQ Data Enter`` tab -> authoritative per-pool config.
+
+    That tab is the analyst's data-entry sheet: col A = Loan Pools, col B = Risk
+    Rated Yes/No, col G = ACL Months, col I = Pool Order. It is the source of
+    truth for which pools are risk-rated (per-grade FICO curve) vs flat
+    non-risk-rated (e.g. off-extract credit-card / solar balances). Returns
+    ``{pool_name: {'risk_rated': bool, 'acl_months': int|None, 'pool_order':
+    int|None}}``; empty dict on any failure (older WARMs may lack the tab)."""
+    out: dict = {}
+    if not warm_path or not os.path.isfile(warm_path):
+        return out
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(warm_path, read_only=True, data_only=True)
+    except Exception:
+        return out
+    try:
+        ws = None
+        for name in wb.sheetnames:
+            if name.strip().lower() == "bs co dq data enter":
+                ws = wb[name]
+                break
+        if ws is None:
+            return out
+        rows = list(ws.iter_rows(values_only=True))
+        hdr_i = None
+        for i, r in enumerate(rows):
+            if (r and isinstance(r[0], str) and "loan pool" in r[0].lower()
+                    and len(r) > 1 and isinstance(r[1], str)
+                    and "risk rated" in r[1].lower()):
+                hdr_i = i
+                break
+        if hdr_i is None:
+            return out
+        for r in rows[hdr_i + 1:]:
+            if not r or r[0] is None or not str(r[0]).strip():
+                continue
+            pool = str(r[0]).strip()
+            low = pool.lower()
+            if "grand total" in low:
+                break  # end of the pool table; sections below are not pools
+            if low.startswith("hide") or low in ("exclude", "total"):
+                continue
+            rr = (str(r[1]).strip().lower() if len(r) > 1 and r[1] is not None else "")
+            acl_m = None
+            if len(r) > 6 and r[6] is not None:
+                try:
+                    acl_m = int(float(r[6]))
+                except (TypeError, ValueError):
+                    acl_m = None
+            order = None
+            if len(r) > 8 and r[8] is not None:
+                try:
+                    order = int(float(r[8]))
+                except (TypeError, ValueError):
+                    order = None
+            out[pool] = {"risk_rated": rr == "yes",
+                         "acl_months": acl_m, "pool_order": order}
+    finally:
+        wb.close()
+    return out
+
+
+def _apply_bs_co_dq_to_config(config: dict, bs_pools: dict) -> None:
+    """Set ``not_risk_rated`` (and pool_order / acl_months_by_pool) on *config*
+    from the WARM's ``BS CO DQ Data Enter`` tab. Authoritative for risk-rated:
+    any pool the tab marks 'No' becomes flat non-risk-rated, so a CU never needs
+    the flags hand-maintained. Existing NRR entries (e.g. 'Ignore') are kept."""
+    if not bs_pools:
+        return
+    nrr = {p for p, v in bs_pools.items() if not v.get("risk_rated", True)}
+    nrr.update(config.get("not_risk_rated") or [])
+    config["not_risk_rated"] = sorted(nrr)
+    order = [p for p, _ in sorted(
+        ((p, v.get("pool_order")) for p, v in bs_pools.items()
+         if v.get("pool_order") is not None), key=lambda kv: kv[1])]
+    if order:
+        config["pool_order"] = order
+    acl_m = {p: v["acl_months"] for p, v in bs_pools.items()
+             if v.get("acl_months") is not None}
+    if acl_m:
+        config.setdefault("acl_months_by_pool", {}).update(acl_m)
+
+
 def build_seed(short_name: str, snap: str | None = None,
                workspace_root: str | None = None) -> dict:
     """Capture the WARM data for *short_name* into a durable JSON seed.
@@ -190,7 +275,15 @@ def build_seed(short_name: str, snap: str | None = None,
 
     warm_json = _jsonable(warm)
 
-    # Build a small validation/summary block so the capture can be eyeballed.
+    # Capture the authoritative per-pool config from the WARM's data-entry tab
+    # (risk-rated Yes/No, ACL months, pool order) so forward quarters don't need
+    # the flags hand-maintained.
+    _warm_path = None
+    try:
+        _warm_path = gr._find_prior_warm_xlsx(config, snap)
+    except Exception:  # noqa: BLE001
+        _warm_path = None
+    bs_co_dq_pools = _read_bs_co_dq_pools(_warm_path)
     hbd = warm.get("hist_bal_data") or {}
     months = 0
     for pdata in hbd.values():
@@ -219,6 +312,7 @@ def build_seed(short_name: str, snap: str | None = None,
         "source": "generate_report.load_impaired_data (CECL-Migration-WARM workbook)",
         "summary": summary,
         "key_roles": roles,
+        "bs_co_dq_pools": bs_co_dq_pools,
         "warm_data": warm_json,
     }
 
@@ -306,6 +400,10 @@ def load_seed(config: dict, snap: str | None = None,
     warm = manifest.get("warm_data")
     if not warm:
         return None
+    # Authoritative risk-rated / pool-order / ACL-months from the WARM's
+    # 'BS CO DQ Data Enter' tab (captured at seed-build). Applied to the live
+    # config so the model determines these from the WARM, not hand-config.
+    _apply_bs_co_dq_to_config(config, manifest.get("bs_co_dq_pools") or {})
     return _prepare_for_recompute(_rehydrate(warm), config)
 
 
