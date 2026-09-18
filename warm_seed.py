@@ -352,6 +352,15 @@ def _rehydrate(warm: dict) -> dict:
                 else:
                     rebuilt[k] = v
             warm[mk] = rebuilt
+    # Annual year-keyed CO/Rc/DQ series: JSON stringified the int year keys.
+    # Restore them to int so consumers that index by int year (the from_data
+    # CO/recovery page, the history overlay) find every year — not just the
+    # ACL-window start year, which alone reads the int-tuple monthly series.
+    for yk in ("warm_co", "warm_rc", "warm_net", "warm_dq_pct"):
+        series = warm.get(yk)
+        if isinstance(series, dict):
+            warm[yk] = {(int(k) if isinstance(k, str) and k.isdigit() else k): v
+                        for k, v in series.items()}
     return warm
 
 
