@@ -1372,12 +1372,15 @@ def generate_report(client, snap=None):
     # "All Loans" tab is intentionally left unlocked so users can sort/filter.
     # (Previously protected with a password; removed per user request.)
 
-    # Save
-    os.makedirs(RPT_DIR, exist_ok=True)
+    # Save — honour ``report_output_dir`` (set in the wizard / run page) so this
+    # report lands with the migration reports; fall back to the Reports/ folder.
+    _rod = config.get('report_output_dir')
+    out_dir = (_rod if os.path.isabs(_rod) else os.path.join(BASE, _rod)) if _rod else RPT_DIR
+    os.makedirs(out_dir, exist_ok=True)
     snap_prefix = snap[:7]   # "2025-12"
     safe_cu = cu.replace(' ', '_')
     fname = f"{snap_prefix} Improved Deteriorated Loans - {safe_cu}.xlsx"
-    out_path = os.path.join(RPT_DIR, fname)
+    out_path = os.path.join(out_dir, fname)
     wb.save(out_path)
     print(f"  Saved: {out_path}")
     return out_path
