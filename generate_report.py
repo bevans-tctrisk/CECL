@@ -2159,6 +2159,11 @@ def _load_monthly_balances_from_wizard(config, mb_cfg=None, with_labels=False):
 
     pool_col = _col_letter_to_idx(pool_col_letter)
     date_start_col = _col_letter_to_idx(date_col_letter)
+    # Optional detail-code column: when set, rows whose code cell is blank are
+    # pool subtotals (e.g. the Sample-Balances files repeat each pool as
+    # per-loan-type-code detail rows PLUS a code-less subtotal row); reading
+    # both double-counts the pool.
+    code_col = _col_letter_to_idx(mb_cfg.get('code_col'))
 
     try:
         if sheet:
@@ -2269,6 +2274,10 @@ def _load_monthly_balances_from_wizard(config, mb_cfg=None, with_labels=False):
         raw_label = df_raw.iloc[i, pool_col]
         if pd.isna(raw_label) or str(raw_label).strip() == '':
             continue
+        if code_col is not None:
+            cv = df_raw.iloc[i, code_col]
+            if pd.isna(cv) or str(cv).strip() == '':
+                continue  # code-less subtotal row -> skip to avoid double-count
         label = str(raw_label).strip()
         label_lc = label.lower()
 
