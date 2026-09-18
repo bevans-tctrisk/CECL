@@ -467,6 +467,25 @@ def _prepare_for_recompute(warm: dict, config: dict | None = None) -> dict:
             for _p, _gm in madj.items():
                 existing.setdefault(_p, {}).update(_gm)
             warm["prior_mgmt_adj"] = existing
+    # Non-risk-rated pools (MasterCard, Solar, ...) carry a POOL-TOTAL management
+    # adjustment (no per-grade rows), which the per-grade prior_mgmt_adj path
+    # above skips. Inject each NRR pool's seed ``total.mgmt_adj`` into
+    # ``config['mgmt_adj_by_pool']`` — the NRR resolver's manual override — so the
+    # analyst's overlay (e.g. MariSol MasterCard -2.00%) carries forward. Any
+    # pool already set in the config wins (hand-config beats the seed).
+    if acl_pools and config is not None:
+        _nrr = {str(p).strip().lower() for p in (config.get("not_risk_rated") or [])}
+        _mabp = dict(config.get("mgmt_adj_by_pool") or {})
+        for _pool, _pd in acl_pools.items():
+            _is_nrr = (not risk_rated.get(_pool, True)
+                       or _pool.strip().lower() in _nrr)
+            if not _is_nrr or _pool in _mabp:
+                continue
+            _ma = (_pd.get("total") or {}).get("mgmt_adj")
+            if _ma is not None and float(_ma) != 0:
+                _mabp[_pool] = float(_ma)
+        if _mabp:
+            config["mgmt_adj_by_pool"] = _mabp
     # Preserve the frozen seed allowance for small NRR "specific reserve" pools
     # the firm-wide model cannot recompute without their GL balance (e.g. Erie's
     # Courtesy Pay / Negative Share / Business Credit Card). Their seed-quarter
