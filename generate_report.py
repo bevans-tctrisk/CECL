@@ -1021,6 +1021,105 @@ def _parse_recovery_matrix(filepath, cfg):
     return rc_m, rc_y
 
 
+def _parse_monthly_dual_block_corc(data_dir, mdb_cfg, pool_map, default_pool=''):
+    """Parse a single 'Charge Off and Recovery' workbook with one sheet per
+    calendar month (e.g. 'August 2026'), each holding a charge-off block
+    (header row with 'Charge off Amount') on top and a recovery block (header
+    row with 'Recovery Amount') below. Opt in via
+    ``historical_file_formats.monthly_dual_block`` (bespoke MariSol layout).
+
+    Returns {'chargeoffs', 'recoveries', 'co_monthly', 'rc_monthly', 'years'}.
+    """
+    import datetime as _dt
+    empty = {'chargeoffs': {}, 'recoveries': {}, 'co_monthly': {},
+             'rc_monthly': {}, 'years': []}
+    pat = re.compile(mdb_cfg.get('file_pattern', r'(?i)Charge Off and Recovery.*\.xlsx$'))
+    found = None
+    for root, _dirs, files in os.walk(data_dir):
+        for f in files:
+            if f.startswith('~$'):
+                continue
+            if pat.search(f):
+                fp = os.path.join(root, f)
+                if found is None or os.path.getsize(fp) > os.path.getsize(found):
+                    found = fp
+    if not found:
+        print("    monthly_dual_block CO/RC: no matching workbook found")
+        return empty
+    print(f"    Using monthly dual-block CO/RC workbook: {os.path.basename(found)}")
+
+    def _pool_for(code):
+        if code is None:
+            return None
+        c = str(code).strip()
+        if not c or c.lower() in ('nan', 'none', 'total'):
+            return None
+        p = pool_map.get(c) or pool_map.get(c.upper()) or pool_map.get(c.lower())
+        return p or (default_pool or None)
+
+    def _col(cells, *keywords):
+        for i, v in enumerate(cells):
+            s = str(v).strip().lower() if v is not None else ''
+            if s and any(k in s for k in keywords):
+                return i
+        return None
+
+    chargeoffs, recoveries, co_monthly, rc_monthly = {}, {}, {}, {}
+    from openpyxl import load_workbook as _lw
+    wb = _lw(found, read_only=True, data_only=True)
+    for sn in wb.sheetnames:
+        try:
+            _d = _dt.datetime.strptime(str(sn).strip(), '%B %Y')
+            sheet_ym = (_d.year, _d.month)
+        except ValueError:
+            continue  # not a monthly data sheet
+        ws = wb[sn]
+        mode = ci_amt = ci_code = None
+        for row in ws.iter_rows(values_only=True):
+            cells = list(row)
+            joined = ' '.join(str(c).lower() for c in cells if c is not None)
+            if 'charge off amount' in joined:
+                mode = 'co'
+                ci_amt = _col(cells, 'charge off amount')
+                ci_code = _col(cells, 'collateral', 'loan type')
+                continue
+            if 'recovery amount' in joined:
+                mode = 'rc'
+                ci_amt = _col(cells, 'recovery amount')
+                ci_code = _col(cells, 'loan type', 'collateral')
+                continue
+            if mode is None or ci_amt is None or ci_code is None:
+                continue
+            amt = cells[ci_amt] if ci_amt < len(cells) else None
+            if not isinstance(amt, (int, float)):
+                continue
+            pool = _pool_for(cells[ci_code] if ci_code < len(cells) else None)
+            if not pool:
+                continue
+            # Each sheet IS the booking month, so the sheet name is the
+            # authoritative period (in-cell dates occasionally carry the
+            # original loan date and drift to spurious years).
+            ym = sheet_ym
+            annual = chargeoffs if mode == 'co' else recoveries
+            monthly = co_monthly if mode == 'co' else rc_monthly
+            annual.setdefault(ym[0], {})
+            annual[ym[0]][pool] = annual[ym[0]].get(pool, 0) + float(amt)
+            monthly.setdefault(ym, {})
+            monthly[ym][pool] = monthly[ym].get(pool, 0) + float(amt)
+    try:
+        wb.close()
+    except Exception:  # noqa: BLE001
+        pass
+    years = sorted(set(list(chargeoffs.keys()) + list(recoveries.keys())))
+    n_co = sum(len(v) for v in co_monthly.values())
+    n_rc = sum(len(v) for v in rc_monthly.values())
+    print(f"    monthly dual-block CO/RC: {len(co_monthly)} CO month(s) "
+          f"({n_co} cells), {len(rc_monthly)} RC month(s) ({n_rc} cells), "
+          f"years {years[:1]}..{years[-1:]} ")
+    return {'chargeoffs': chargeoffs, 'recoveries': recoveries,
+            'co_monthly': co_monthly, 'rc_monthly': rc_monthly, 'years': years}
+
+
 def load_chargeoff_recovery_history(config):
     """Load all historical charge-off and recovery data.
     Returns dict: {'chargeoffs': {year: {pool: amount}}, 'recoveries': {year: {pool: amount}}}"""
@@ -1039,6 +1138,14 @@ def load_chargeoff_recovery_history(config):
     chargeoff_parse_cfg = historical_parse_cfg.get('chargeoff')
     recovery_parse_cfg = historical_parse_cfg.get('recovery')
     pool_map = config.get('pool_map', {})
+
+    # Bespoke single-workbook, one-sheet-per-month, CO-block-over-RC-block
+    # layout (MariSol FCU). Handled entirely by its own parser.
+    mdb_cfg = historical_parse_cfg.get('monthly_dual_block')
+    if mdb_cfg:
+        return _parse_monthly_dual_block_corc(
+            data_dir, mdb_cfg, pool_map, config.get('default_pool', ''))
+
     quarters = _find_quarter_folders(data_dir)
 
     chargeoffs = {}  # {year: {pool: amount}}
@@ -5942,8 +6049,24 @@ def _load_impaired_or_seed(config, snap):
     if seed:
         print("    Loaded WARM/impaired data from SEED "
               "(live CECL-Migration-WARM workbook not read)")
-        return seed
-    return load_impaired_data(config, snap)
+        result = seed
+    else:
+        result = load_impaired_data(config, snap)
+    # ``prefer_raw_chargeoffs``: drop the WARM/seed charge-off & recovery
+    # series so the CU's OWN raw charge-off/recovery files drive both the
+    # CO/Recovery/Net-Loss tables and the loss-rate (allowance) computation.
+    if result and config.get('prefer_raw_chargeoffs'):
+        _drop = ('warm_co', 'warm_rc', 'warm_net', 'warm_co_totals',
+                 'warm_rc_totals', 'warm_net_co', 'warm_co_monthly',
+                 'warm_rc_monthly')
+        _stripped = [k for k in _drop if k in result]
+        for k in _stripped:
+            result.pop(k, None)
+        if _stripped:
+            print("    prefer_raw_chargeoffs: dropped seed/WARM CO/RC "
+                  f"({', '.join(_stripped)}); raw charge-off/recovery files "
+                  "now drive CO/RC and loss rates")
+    return result
 
 
 def load_impaired_from_tct_baseline(config, snap):
