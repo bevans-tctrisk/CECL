@@ -4377,6 +4377,28 @@ def _grade_pct_from_last_month(pdata):
     return {}
 
 
+def _normalize_hbd_lengths(hist_bal_data):
+    """Pad/truncate each pool's ``total`` and per-grade arrays to match its
+    ``dates`` length. Some WARM 'Grand Total' rows arrive with an empty
+    ``total`` list while ``dates``/``grades`` carry a full series; the
+    in-place fills and re-sorts in the extend helpers would otherwise index
+    past the end and abort the whole hist-bal extension.
+    """
+    if not hist_bal_data:
+        return
+    for _pd in hist_bal_data.values():
+        if not isinstance(_pd, dict):
+            continue
+        nd = len(_pd.get('dates', []))
+        t = list(_pd.get('total', []))
+        if len(t) != nd:
+            _pd['total'] = t[:nd] + [0.0] * (nd - len(t))
+        for g, v in (_pd.get('grades', {}) or {}).items():
+            v = list(v)
+            if len(v) != nd:
+                _pd['grades'][g] = v[:nd] + [0.0] * (nd - len(v))
+
+
 def extend_hist_bal_with_monthly(hist_bal_data, monthly_balances):
     """Extend hist_bal_data with pool-level monthly balance records.
 
@@ -4390,6 +4412,7 @@ def extend_hist_bal_with_monthly(hist_bal_data, monthly_balances):
     """
     if monthly_balances is None or monthly_balances.empty:
         return
+    _normalize_hbd_lengths(hist_bal_data)
 
     # Pre-compute grade percentage distributions per pool (before adding
     # new months) so back-fill and forward-fill both use the prior
@@ -4485,6 +4508,7 @@ def extend_hist_bal_with_db(hist_bal_data, df, snap, grades, config,
     no_score = config.get('no_score_label', 'Not Reported')
     snap_ts = pd.Timestamp(snap)
 
+    _normalize_hbd_lengths(hist_bal_data)
     for pool, pdata in hist_bal_data.items():
         existing_dates = [pd.Timestamp(d) for d in pdata.get('dates', [])]
         pdf = df[df['loan_pool'] == pool]
@@ -4528,6 +4552,43 @@ def extend_hist_bal_with_db(hist_bal_data, df, snap, grades, config,
             'grades': pool_grades,
             'total': [pdf['current_balance'].sum()],
         }
+
+
+def _fill_interior_hist_bal_gaps(hist_bal_data):
+    """Linearly interpolate interior all-zero placeholder months so the
+    Historical Trends Balance charts/tables are continuous.
+
+    WARM templates carry forward columns for the current quarter (e.g. Jun/Jul
+    before an Aug snapshot). When a seed-driven report has no loan snapshot for
+    those months they arrive as zero placeholders, dropping the chart lines to
+    $0. Only a month whose total is 0 AND sits BETWEEN two non-zero months is
+    filled (leading/trailing zeros — pool not yet originated or paid off — are
+    left alone). Display-only: months with a real balance are never touched,
+    and the allowance already excludes zero months from its averages.
+    """
+    if not hist_bal_data:
+        return
+    for pdata in hist_bal_data.values():
+        if not isinstance(pdata, dict):
+            continue
+        total = pdata.get('total') or []
+        n = len(total)
+        grades = pdata.get('grades') or {}
+        nz = [i for i in range(n) if (total[i] or 0)]
+        if len(nz) < 2:
+            continue
+        for a, b in zip(nz, nz[1:]):
+            if b - a <= 1:
+                continue
+            span = b - a
+            for i in range(a + 1, b):
+                if total[i]:
+                    continue
+                f = (i - a) / span
+                total[i] = total[a] + (total[b] - total[a]) * f
+                for vals in grades.values():
+                    if b < len(vals) and i < len(vals):
+                        vals[i] = vals[a] + (vals[b] - vals[a]) * f
 
 
 def _apply_co_recovery_overrides(co_rec, config):
@@ -13352,6 +13413,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
                 extend_hist_bal_with_monthly(hbd_warm, hist.get('monthly_balances'))
                 extend_hist_bal_with_db(hbd_warm, df, snapshot_date, grades,
                                         config, fill_empty_only=True)
+                _fill_interior_hist_bal_gaps(hbd_warm)
                 n_dates = max((len(d.get('dates', [])) for d in hbd_warm.values()),
                               default=0)
                 print(f"    Extended WARM hist bal to snapshot: "
@@ -13394,6 +13456,7 @@ def generate_report(client_name, snapshot_date=None, reports=None):
 
                 extend_hist_bal_with_monthly(hbd, hist.get('monthly_balances'))
                 extend_hist_bal_with_db(hbd, df, snapshot_date, grades, config)
+                _fill_interior_hist_bal_gaps(hbd)
                 n_dates = max(len(d.get('dates', [])) for d in hbd.values())
                 print(f"    Extended hist bal: {len(hbd)} pools, {n_dates} months")
 
