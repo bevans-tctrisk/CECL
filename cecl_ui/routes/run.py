@@ -587,6 +587,19 @@ def reports(short_name: str):
             selected.append(r)
     impdet = request.form.get("impdet") == "on"
 
+    # Persist the report output folder pasted in the Generate reports section so
+    # the pipeline writes there (blank clears it -> default Reports/ folder).
+    if "report_output_dir" in request.form:
+        _out_dir = (request.form.get("report_output_dir") or "").strip()
+        try:
+            ws = current_app.config["WORKSPACE_ROOT"]
+            _cfg = config_service.load_client_config(ws, short_name)
+            if (_cfg.get("report_output_dir") or "") != _out_dir:
+                _cfg["report_output_dir"] = _out_dir
+                config_service.save_client_config(ws, short_name, _cfg, overwrite=True)
+        except Exception as exc:  # noqa: BLE001
+            flash(f"Could not save report output folder: {exc}", "error")
+
     outputs: list[str] = []
     errors: list[str] = []
     hybrid_notes: list[str] = []
