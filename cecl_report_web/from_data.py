@@ -2693,9 +2693,6 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                            df=df, grades=grades)
         if acl is not None:
             pages.append(("acl_env.html", {"page": acl, "charts": []}, False))
-        for _env_pg in build_env_factor(client_name, snapshot_date, config, hist,
-                                        df=df, grades=grades):
-            pages.append(("table_page.html", {"page": _env_pg}, False))
         loss = build_loss_factor(client_name, snapshot_date, config, hist,
                                  df=df, grades=grades)
         if loss is not None:
@@ -2716,6 +2713,10 @@ def build_report_model(client_name: str, snapshot_date: str, config: dict,
                                         df=df, grades=grades)
         if impaired is not None:
             pages.append(("table_page.html", {"page": impaired}, False))
+        # Environmental Factor pages sit immediately before Change Analysis.
+        for _env_pg in build_env_factor(client_name, snapshot_date, config, hist,
+                                        df=df, grades=grades):
+            pages.append(("table_page.html", {"page": _env_pg}, False))
         chg = build_change_analysis(client_name, snapshot_date, config, hist,
                                     df=df, grades=grades)
         if chg is not None:
