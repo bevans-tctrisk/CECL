@@ -152,11 +152,18 @@
              value="{{ economic_data.get('foreclosures', '') }}">
     </label>
     <button class="btn btn-primary" type="submit">Save Economic Data</button>
+    <button class="btn" type="submit"
+            formaction="{{ url_for('run.fetch_economic', short_name=short_name) }}"
+            title="Auto-fetch unemployment, population and bankruptcies from BLS / Census / U.S. Courts for the State/County above">
+      Fetch Automatically
+    </button>
   </form>
   <p class="help" style="margin-top:8px;">
-    Unemployment rate is a decimal (e.g. <code>0.031</code> = 3.1%). For full
-    state/county auto-fetch from BLS / Census / U.S. Courts, use the setup
-    wizard's Economic Data step.
+    Unemployment rate is a decimal (e.g. <code>0.031</code> = 3.1%).
+    <strong>Fetch Automatically</strong> pulls unemployment (BLS), population
+    (Census) and bankruptcies (U.S. Courts) for the State/County above — the
+    same auto-fetch as the setup wizard's Economic Data step. Foreclosures has
+    no federal source; enter it manually.
   </p>
 </div>
 

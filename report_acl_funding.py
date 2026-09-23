@@ -73,6 +73,26 @@ def compose_acl_funding(client_name, snapshot_date, df, config, grades, hist):
     total_allow_needed = acl.get('total_allowance_needed', 0) or 0
     acl_bal = acl.get('acl_balance', 0) or 0
 
+    # Authoritative override: recompute the ACL totals the same way the report's
+    # ACL Env by Pool Mgmt Adj tab (and the PDF/sidecar) does, so the worksheet
+    # matches the report even when generated standalone. _compute_acl_totals
+    # relies on a pooled-allowance value stashed only while the main TCT/Vizo
+    # tab is built in the same run; alone it falls back to a recompute that
+    # omits balance adjustments (off-book participations), understating the total.
+    try:
+        _rep = config.get('reports') or {}
+        if _rep.get('vizo') and not _rep.get('tct'):
+            import report_vizo as _acl_src
+        else:
+            import report_tct as _acl_src
+        _sum = (_acl_src.compute_acl_environmental(
+            df, grades, config, hist, snapshot_date) or {}).get('acl_summary') or {}
+        if _sum.get('total_allow_needed') is not None:
+            total_allow_needed = _sum['total_allow_needed']
+            acl_bal = _sum.get('acl_balance', acl_bal) or 0
+    except Exception as _acl_exc:  # noqa: BLE001 - fall back to _compute_acl_totals
+        print(f"  ACL funding authoritative recompute skipped: {_acl_exc}")
+
     # Report month + the two following months.
     try:
         base = datetime.strptime(str(snapshot_date)[:10], '%Y-%m-%d')

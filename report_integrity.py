@@ -230,6 +230,58 @@ def _check_dq_co_blocks(z, warnings):
             f"see docs/pdf_migration/04_blank_charts.md")
 
 
+def _check_credit_migration(z, warnings):
+    """Red-flag a report whose credit migration is entirely zero.
+
+    The whole point of the ACL/Credit Migration report is to measure FICO
+    movement (Improved / Deteriorated). A workbook where every pool's
+    Total-Improved AND Total-Deteriorated is zero almost always means a
+    current-score source (credit pull) was never wired -- so original == current
+    for every loan and the migration collapses to nothing (see the Befit June
+    2026 core-conversion case). Zero migration is only legitimate once proven;
+    surface it loudly so setup isn't signed off on a silently empty report.
+    """
+    try:
+        import openpyxl  # noqa: PLC0415
+    except ImportError:
+        return
+    try:
+        wb = openpyxl.load_workbook(z.filename, data_only=True, read_only=True)
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        ws = next((s for s in wb.worksheets
+                   if s.title.strip().lower() == "improved deteriorated summary"), None)
+        if ws is None:
+            return  # older layout without the summary sheet -- can't assess
+        label_rows = 0
+        moved = 0.0
+        for row in ws.iter_rows():
+            label = None
+            val = None
+            for cell in row:
+                col = getattr(cell, "column", None)
+                if col == 1 and isinstance(cell.value, str):
+                    label = cell.value.strip().lower()
+                elif col == 2 and isinstance(cell.value, (int, float)):
+                    val = cell.value
+            if label in ("total-improved", "total-deteriorated"):
+                label_rows += 1
+                if isinstance(val, (int, float)):
+                    moved += abs(val)
+    finally:
+        wb.close()
+
+    if label_rows and moved == 0:
+        warnings.append(
+            "credit migration is ENTIRELY ZERO across all pools (Total-Improved "
+            "and Total-Deteriorated both $0). This is a RED FLAG: the report is "
+            "not complete until a current credit-score source (credit pull) is "
+            "confirmed wired and zero migration is proven, not assumed. Common "
+            "cause: original_fico == current_fico because no current-score pull "
+            "was mapped (e.g. after a core conversion).")
+
+
 CHECKS = (
     _check_xml_well_formed,
     _check_rels_targets_exist,
@@ -256,6 +308,7 @@ def validate_workbook(path) -> dict:
                 for check in CHECKS:
                     check(z, errors)
                 _check_dq_co_blocks(z, warnings)
+                _check_credit_migration(z, warnings)
     except (zipfile.BadZipFile, OSError) as exc:
         errors.append(f"cannot open as xlsx: {exc}")
     return {"ok": not errors, "errors": errors, "warnings": warnings,

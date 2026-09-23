@@ -2821,7 +2821,8 @@ def load_monthly_balances(config, with_labels=False):
     mb_cfg = config.get('monthly_balance') or {}
     mb_source = (mb_cfg.get('source') or '').strip().lower()
     if mb_source == 'manual':
-        return _load_monthly_balances_manual(mb_cfg)
+        _mdf, _malll = _load_monthly_balances_manual(mb_cfg)
+        return _collapse(_mdf), _merge_acl_history(_malll, config)
     if mb_source == 'per_month':
         df, alll = _load_monthly_balances_per_month(mb_cfg, acl_cfg=config.get('acl'))
         if not df.empty:

@@ -2555,22 +2555,11 @@ def _build_tct_pages(client_name: str, snapshot_date: str, config: dict,
         pages.append(("risk_change.html",
                       {"page": _trc, "charts": _tcharts}, True))
 
-    # Env Factor by Pool (+ Environmental Factor Ranges page).
-    for _env_pg in build_env_factor(client_name, snapshot_date, config, hist,
-                                    df=df, grades=grades):
-        pages.append(("table_page.html", {"page": _env_pg}, False))
-
     # ACL Env by Pool Mgmt Adj.
     acl = build_acl_env(client_name, snapshot_date, config, hist,
                         df=df, grades=grades, variant="tct")
     if acl is not None:
         pages.append(("acl_env.html", {"page": acl, "charts": []}, False))
-
-    # Pool_Balance Adjust.
-    ba = build_bal_adjust_detail(client_name, snapshot_date, config, hist,
-                                 df=df, grades=grades)
-    if ba is not None:
-        pages.append(("table_page.html", {"page": ba}, False))
 
     # Display HIst Bal (Loss Factor Calculation).
     loss = build_loss_factor(client_name, snapshot_date, config, hist,
@@ -2578,11 +2567,22 @@ def _build_tct_pages(client_name: str, snapshot_date: str, config: dict,
     if loss is not None:
         pages.append(("table_page.html", {"page": loss}, False))
 
-    # Display CO-Recov-DQ (Delinquency Calculation).
+    # Change Analysis (period over period) sits immediately after Loss Factor Calculation.
+    chg = build_change_analysis(client_name, snapshot_date, config, hist,
+                                df=df, grades=grades, model_name=model_name)
+    if chg is not None:
+        pages.append(("table_page.html", {"page": chg}, False))
+
+    # Display CO-Recov-DQ (Net Charge Off and Delinquency).
     codq = build_co_recov_dq(client_name, snapshot_date, config, hist,
                              df=df, grades=grades)
     if codq is not None:
         pages.append(("table_page.html", {"page": codq}, False))
+
+    # Environmental Factor pages sit immediately after Net Charge Off and Delinquency.
+    for _env_pg in build_env_factor(client_name, snapshot_date, config, hist,
+                                    df=df, grades=grades):
+        pages.append(("table_page.html", {"page": _env_pg}, False))
 
     # > Detail_HIst Balances (Loss Factor Historical Detail).
     hd = build_detail_hist_balances(client_name, snapshot_date, config, hist,
@@ -2596,11 +2596,11 @@ def _build_tct_pages(client_name: str, snapshot_date: str, config: dict,
     if cod is not None:
         pages.append(("table_page.html", {"page": cod}, True))
 
-    # Change Analysis (period over period) -- keyed on the TCT model.
-    chg = build_change_analysis(client_name, snapshot_date, config, hist,
-                                df=df, grades=grades, model_name=model_name)
-    if chg is not None:
-        pages.append(("table_page.html", {"page": chg}, False))
+    # Pool_Balance Adjust -- moved to the end of the report.
+    ba = build_bal_adjust_detail(client_name, snapshot_date, config, hist,
+                                 df=df, grades=grades)
+    if ba is not None:
+        pages.append(("table_page.html", {"page": ba}, False))
 
     return pages
 

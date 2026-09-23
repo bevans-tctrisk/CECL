@@ -797,6 +797,59 @@ def set_economic(short_name: str):
     return redirect(url_for("run.client_dashboard", short_name=short_name))
 
 
+@run_bp.route("/<short_name>/fetch-economic", methods=["POST"])
+def fetch_economic(short_name: str):
+    """Auto-fetch environmental factors from federal sources (BLS unemployment,
+    Census population, U.S. Courts bankruptcies) for the CU's state/county and
+    save them into ``cfg['economic_data']`` — the same auto-fetch the setup
+    wizard's Economic Data step performs. Foreclosures has no federal source
+    and is left unchanged.
+    """
+    ws = current_app.config["WORKSPACE_ROOT"]
+    cfg = config_service.load_client_config(ws, short_name)
+    econ = dict(cfg.get("economic_data") or {})
+
+    # Honor any just-typed State/County so the user can fetch without saving first.
+    st = (request.form.get("state") or econ.get("state") or "").strip()
+    cty = (request.form.get("county") or econ.get("county") or "").strip()
+    if not st:
+        flash("Set the State first, then fetch.", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+    try:
+        import fetch_econ_data
+        fetched = fetch_econ_data.fetch_economic_data(st, cty) or {}
+    except Exception as exc:  # noqa: BLE001
+        flash(f"Auto-fetch failed: {exc}", "error")
+        return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+    econ["state"] = st
+    econ["county"] = cty
+    got: list[str] = []
+    for key, label in (
+        ("unemployment_rate", "unemployment"),
+        ("population", "population"),
+        ("bankruptcies", "bankruptcies"),
+    ):
+        val = fetched.get(key)
+        if val not in (None, ""):
+            econ[key] = val
+            got.append(label)
+
+    cfg["economic_data"] = econ
+    config_service.save_client_config(ws, short_name, cfg, overwrite=True)
+    if got:
+        flash("Auto-fetched " + ", ".join(got)
+              + " from federal sources. Foreclosures has no federal source — "
+              "enter it manually if needed. Re-generate the report to apply it.",
+              "success")
+    else:
+        flash("Auto-fetch returned no values for "
+              f"{cty + ', ' if cty else ''}{st}. Enter values manually.",
+              "error")
+    return redirect(url_for("run.client_dashboard", short_name=short_name))
+
+
 @run_bp.route("/download")
 def download():
     """Stream a generated report file back to the browser."""
