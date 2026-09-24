@@ -31,7 +31,8 @@ from . import (
     acl_history_db, env_factor_writer, excel_recalc, impaired_loader,
     lol_writer, mapping_loader, mgmt_adj_writer, qfactor_loader,
     runs_service, solr_fetcher, template_loader,
-    tct_change_analysis, vizo_explanation_formatter, vizo_layout,
+    tct_change_analysis, unfunded_writer, vizo_explanation_formatter,
+    vizo_layout,
 )
 
 
@@ -911,16 +912,15 @@ def apply_env_factors_to_historical_data(
     """Write fresh environmental-factor values into the new quarter
     column on ``Historical Data`` rows 139-142.
 
-    Calls :func:`fetch_econ_data.fetch_economic_data` (same source as
-    the Migration Model) and writes results to ``{target_col}139``
-    (unemployment), ``{target_col}141`` (bankruptcies), and
-    ``{target_col}142`` (population). Foreclosures (``{target_col}140``)
-    has no federal API. For any row the fetch doesn't supply, the value
-    comes from ``econ_overrides`` (the CU's analyst-entered
-    ``economic_data``, keyed ``unemployment_rate``/``foreclosures``/
-    ``bankruptcies``/``population``) when present, else the prior
-    column. Target cells are always overwritten (the carry-clone may
-    leave stale source-label strings there).
+    Precedence per row: the CU's saved ``economic_data``
+    (``econ_overrides``, keyed ``unemployment_rate``/``foreclosures``/
+    ``bankruptcies``/``population`` — what the dashboard card shows and
+    the analyst may have hand-corrected, e.g. a county unemployment
+    rate in place of the statewide figure) wins. Only rows with no
+    saved value are filled from :func:`fetch_econ_data.fetch_economic_data`
+    (same source as the Migration Model); anything still missing falls
+    back to the prior column. Target cells are always overwritten (the
+    carry-clone may leave stale source-label strings there).
     """
     result: dict[str, Any] = {
         "ok": False,
@@ -941,8 +941,22 @@ def apply_env_factors_to_historical_data(
         result["error"] = f"invalid prior_col {prior_col!r}"
         return result
     overrides = econ_overrides or {}
+
+    def _num(v: Any) -> float | None:
+        try:
+            f = float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+        return f if f is not None and f != 0 else None
+
+    saved: dict[str, float] = {}
+    for _row, key in _ENV_FACTOR_ROW_MAP:
+        ov_num = _num(overrides.get(key))
+        if ov_num is not None:
+            saved[key] = ov_num
+    need_fetch = [key for _row, key in _ENV_FACTOR_ROW_MAP if key not in saved]
     fetched: dict[str, Any] = {}
-    if state_name:
+    if state_name and need_fetch:
         try:
             import importlib
             fed = importlib.import_module("fetch_econ_data")
@@ -950,7 +964,7 @@ def apply_env_factors_to_historical_data(
         except Exception as exc:  # noqa: BLE001
             result["error"] = f"fetch failed: {exc}"
             fetched = {}
-    else:
+    elif not state_name and need_fetch:
         result["error"] = "state_name empty; using prior column for all rows"
     try:
         wb = openpyxl.load_workbook(workbook_path)
@@ -963,29 +977,16 @@ def apply_env_factors_to_historical_data(
     ws = wb[sheet]
     cells_written: list[str] = []
     for row, key in _ENV_FACTOR_ROW_MAP:
-        value = fetched.get(key)
-        # Coerce empty / missing / non-numeric to None so we fall back.
-        if isinstance(value, str):
-            try:
-                value = float(value)
-            except (TypeError, ValueError):
-                value = None
-        if value is None or value == 0:
-            # Prefer an analyst-entered economic_data override, then the
-            # prior column's value.
-            ov = overrides.get(key)
-            try:
-                ov_num = float(ov) if ov not in (None, "") else None
-            except (TypeError, ValueError):
-                ov_num = None
-            if ov_num is not None and ov_num != 0:
-                value = ov_num
-                result["override_rows"].append(row)
+        if key in saved:
+            value: Any = saved[key]
+            result["override_rows"].append(row)
+        else:
+            value = _num(fetched.get(key))
+            if value is not None:
+                result["fetched"][key] = value
             else:
                 value = ws[f"{prior_col}{row}"].value
                 result["fallback_rows"].append(row)
-        else:
-            result["fetched"][key] = value
         coord = f"{target_col}{row}"
         ws[coord] = value
         cells_written.append(coord)
@@ -1244,6 +1245,8 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
 
         env_result = env_factor_writer.apply_env_factor_ranges(out_path)
 
+        unfunded_result = unfunded_writer.apply_unfunded(out_path, state)
+
         variant = _report_variant_from_state(state)
         variant_result = apply_report_variant(out_path, variant)
     except (PermissionError, OSError) as _saveexc:
@@ -1333,6 +1336,10 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         "env_factor_error": env_result["error"],
         "report_variant": variant_result["variant"],
         "report_variant_hidden": variant_result["hidden"],
+        "unfunded_applied": unfunded_result["applied"],
+        "unfunded_amount": unfunded_result["amount"],
+        "unfunded_undrawn": unfunded_result["undrawn"],
+        "unfunded_error": unfunded_result["error"],
         "errors": [],
     }
 
@@ -1522,6 +1529,8 @@ def run_multi_quarter(
     }
     env_result = {"ok": False, "applied_delq": 0, "applied_econ": 0,
                   "skipped": [], "error": ""}
+    unfunded_result: dict = {"applied": False, "amount": 0.0,
+                             "undrawn": 0.0, "error": ""}
     post_write_error: str = ""
     col_advance: dict = {}
     if successes > 0:
@@ -1562,6 +1571,7 @@ def run_multi_quarter(
             imp_rows = _impaired_rows_from_state(state)
             imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
             env_result = env_factor_writer.apply_env_factor_ranges(out_path)
+            unfunded_result = unfunded_writer.apply_unfunded(out_path, state)
             variant_result = apply_report_variant(
                 out_path, _report_variant_from_state(state)
             )
@@ -1647,6 +1657,10 @@ def run_multi_quarter(
         "env_factor_error": env_result["error"],
         "report_variant": variant_result["variant"],
         "report_variant_hidden": variant_result["hidden"],
+        "unfunded_applied": unfunded_result["applied"],
+        "unfunded_amount": unfunded_result["amount"],
+        "unfunded_undrawn": unfunded_result["undrawn"],
+        "unfunded_error": unfunded_result["error"],
         "prior_acl": prior_acl,
         "recalc": recalc_results,
         "db_captures": db_captures,
@@ -2062,6 +2076,8 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
 
         env_result = env_factor_writer.apply_env_factor_ranges(out_path)
 
+        unfunded_result = unfunded_writer.apply_unfunded(out_path, state)
+
         variant = _report_variant_from_state(state)
         variant_result = apply_report_variant(out_path, variant)
     except (PermissionError, OSError) as _saveexc:
@@ -2167,6 +2183,10 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "env_factor_error": env_result["error"],
         "report_variant": variant_result["variant"],
         "report_variant_hidden": variant_result["hidden"],
+        "unfunded_applied": unfunded_result["applied"],
+        "unfunded_amount": unfunded_result["amount"],
+        "unfunded_undrawn": unfunded_result["undrawn"],
+        "unfunded_error": unfunded_result["error"],
         "prior_acl": prior_acl,
         "errors": [],
     }
