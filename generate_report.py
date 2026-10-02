@@ -2315,6 +2315,35 @@ def _read_pdf_balance_table(path, sheet):
     return pd.DataFrame(normalized)
 
 
+def _month_name_header_dates(values, filename):
+    """Resolve header cells that are month names (``July``, ``Aug``) into
+    month-end Timestamps using the 4-digit year(s) in *filename*.
+
+    Returns a DatetimeIndex aligned to *values* (NaT for non-month cells), or
+    None when no cell is a month name or the filename carries no year. When
+    the months wrap (``Nov, Dec, Jan``) the year increments at the wrap; a
+    second year in the filename (``Nov 2025 - Jan 2026``) is honoured.
+    """
+    import calendar as _cal
+    stem = os.path.splitext(os.path.basename(str(filename or '')))[0]
+    years = [int(y) for y in re.findall(r'(?<!\d)(20\d{2})(?!\d)', stem)]
+    if not years:
+        return None
+    out, year, prev_mo, any_hit = [], years[0], None, False
+    for v in values:
+        mo = _SUPP_MONTH_NAMES.get(str(v).strip().lower()) if v is not None else None
+        if not mo:
+            out.append(pd.NaT)
+            continue
+        if prev_mo is not None and mo < prev_mo:
+            year = years[1] if len(years) > 1 else year + 1
+        prev_mo = mo
+        any_hit = True
+        out.append(pd.Timestamp(year=year, month=mo,
+                                day=_cal.monthrange(year, mo)[1]))
+    return pd.DatetimeIndex(out) if any_hit else None
+
+
 def _merge_acl_history(alll_by_date: dict, config: dict) -> dict:
     """Merge wizard-entered/manually-extracted ACL history from
     ``cfg["acl"]["history"]`` into the ALLL-by-date map loaded from the
@@ -2426,6 +2455,13 @@ def _load_monthly_balances_from_wizard(config, mb_cfg=None, with_labels=False):
 
     dates = pd.to_datetime(
         df_raw.iloc[hdr_idx, date_start_col:].values, errors='coerce')
+    # Header cells that are month NAMES ('July', 'Aug') with the year only in
+    # the filename ('Loan Breakdown Jul-Sep 2026.xlsx'): pandas parses a bare
+    # month name as year 0001, so resolve them to real month-ends instead.
+    _named = _month_name_header_dates(
+        df_raw.iloc[hdr_idx, date_start_col:].values, saved_path)
+    if _named is not None:
+        dates = _named
 
     # Optional label→pool translation map; when present, only rows whose
     # label appears in the map are included (translated to the pool
@@ -2486,7 +2522,14 @@ def _load_monthly_balances_from_wizard(config, mb_cfg=None, with_labels=False):
                     except (ValueError, TypeError):
                         pass
 
-    for i in range(hdr_idx + 1, df_raw.shape[0]):
+    # Optional first data row (1-based). Lets a workbook whose roll-up block
+    # sits BELOW a detail block (same labels in both) read only the roll-up.
+    try:
+        _dsr = int(mb_cfg.get('data_start_row') or 0)
+    except (TypeError, ValueError):
+        _dsr = 0
+    _first_i = max(hdr_idx + 1, _dsr - 1) if _dsr > 0 else hdr_idx + 1
+    for i in range(_first_i, df_raw.shape[0]):
         if i == acl_row_idx:
             continue  # already handled above
         raw_label = df_raw.iloc[i, pool_col]
