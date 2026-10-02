@@ -116,6 +116,14 @@ def _clean_id_series(s):
     return out
 
 
+def _clean_id(v):
+    """Scalar form of ``_clean_id_series``: None/NaN -> ''."""
+    if v is None or (isinstance(v, float) and v != v):
+        return ""
+    s = str(v).strip()
+    return s[:-2] if s.endswith(".0") and s[:-2].isdigit() else s
+
+
 def _derive_full_account(cfg_df, parse_cfg):
     """Mirror ``import_data.derive_member_account`` for a CO parse-config block.
 
@@ -466,6 +474,59 @@ def load_chargeoff_loans(config):
                 int(qlabel[5:7]) if len(qlabel) >= 7 else 12)
             frames.append(part)
             files.append(path)
+
+    # Cumulative charge-off tracking register (``co_tracking``, Tongass-style:
+    # one row per write-off with Account # / Suffix / Loan Type / Amount /
+    # Date). The report's CO history already reads it via
+    # generate_report._parse_co_tracking; mirror that here so the migration
+    # split sees the same loans.
+    cot = config.get("co_tracking") or {}
+    if cot and data_dir:
+        cf = gr._find_latest_cumulative(
+            data_dir, cot.get("file_pattern") or r"Charge off Tracking.*\.xlsx$")
+        if cf and cf not in seen:
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(cf, data_only=True, read_only=True)
+                sheet = cot.get("sheet")
+                ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb[wb.sheetnames[0]]
+                ac = int(cot.get("account_col", 0)); cc = int(cot.get("code_col", 2))
+                amc = int(cot.get("amount_col", 3)); dc = int(cot.get("date_col", 4))
+                sc = cot.get("suffix_col")  # optional separate loan-suffix column
+                sc = int(sc) if sc is not None else None
+                start = 2 if cot.get("has_header", True) else 1
+                recs = []
+                for row in ws.iter_rows(min_row=start, values_only=True):
+                    if len(row) <= max(ac, cc, amc, dc):
+                        continue
+                    try:
+                        amt = float(row[amc])
+                    except (TypeError, ValueError):
+                        continue
+                    if not amt:
+                        continue
+                    acct = _clean_id(row[ac])
+                    if not acct:
+                        continue
+                    if sc is not None and sc < len(row):
+                        acct = acct + _clean_id(row[sc])
+                    recs.append({"account": acct, "code": row[cc], "amount": amt,
+                                 "date": row[dc], "orig_score": float("nan"),
+                                 "curr_score": float("nan")})
+                wb.close()
+                if recs:
+                    part = pd.DataFrame(recs)
+                    part["date"] = gr._coerce_mixed_dates(part["date"].values).values
+                    part["file"] = os.path.basename(cf)
+                    _rp = str(config.get("report_period") or "")
+                    part["_fy"] = int(_rp[:4]) if _rp[:4].isdigit() else pd.Timestamp.today().year
+                    part["_fm"] = 12
+                    frames.append(part)
+                    files.append(cf)
+                    seen.add(cf)
+            except Exception as exc:  # noqa: BLE001
+                print(f"    CO migration split: could not read tracking register "
+                      f"{os.path.basename(cf)}: {exc}")
 
     if not frames:
         return pd.DataFrame(columns=cols), files

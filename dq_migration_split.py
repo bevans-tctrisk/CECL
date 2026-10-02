@@ -165,6 +165,94 @@ def _strip_bogus_dq_mappings(config):
     return cfg
 
 
+# Header names that unambiguously carry days past due. AIRES exports use
+# ``LNDDDEL``; Symitar/other cores spell it out.
+_DQ_HEADER_RX = re.compile(
+    r'^(lndddel|daysdelq|days_?delq|dq_?days|days_?dq|days_?past_?due|dpd)$'
+    r'|(delq|delinq|past\s*due|pastdue)[\s_]*(days?|dys)\b'
+    r'|\b(days?|dys)[\s_]*(delq|delinq|past\s*due|pastdue)',
+    re.IGNORECASE)
+_DQ_HEADER_REJECT_RX = re.compile(r'(date|amt|amount|bal|rate|count|flag|code|ind)',
+                                  re.IGNORECASE)
+
+
+def _extract_header(path, has_header=True, header_row=None):
+    """Column names of a loan extract (first sheet / csv), or []."""
+    import pandas as pd
+    if not has_header:
+        return []
+    try:
+        hr = int(header_row) if header_row else 1
+    except (TypeError, ValueError):
+        hr = 1
+    try:
+        if str(path).lower().endswith('.csv'):
+            df = pd.read_csv(path, nrows=0, skiprows=hr - 1, encoding_errors='ignore')
+        else:
+            df = pd.read_excel(path, nrows=0, header=hr - 1)
+    except Exception:  # noqa: BLE001
+        return []
+    return [str(c).strip() for c in df.columns]
+
+
+def _autodetect_dq_mapping(config):
+    """When no extract maps ``days_delinquent``, look for an unambiguous
+    days-past-due header on the configured extract file(s) and inject it
+    into a COPY of the config. Returns ``(config, found)``.
+
+    Lets the Delinquency-by-Credit-Grade chart populate for every CU whose
+    core exports the field (e.g. AIRES ``LNDDDEL``) without a wizard
+    re-visit; the match is logged so the analyst can pin it in the YAML.
+    """
+    folders = [config.get('loan_file_folder'), config.get('data_directory')]
+    folders = [f for f in folders if f and os.path.isdir(str(f))]
+    if not folders:
+        return config, False
+    cfg = dict(config)
+    extracts = [dict(e) for e in (cfg.get('loan_data_extracts') or [])]
+    specs = extracts or [None]
+    found = False
+    for spec in specs:
+        pat = (spec or {}).get('file_pattern') or cfg.get('file_pattern') or ''
+        try:
+            rx = re.compile(pat, re.IGNORECASE) if pat else None
+        except re.error:
+            rx = None
+        cm = dict((spec or cfg).get('column_mappings') or {})
+        mapped_vals = {str(v).strip().lower() for v in cm.values() if v is not None}
+        hit = None
+        for folder in folders:
+            for name in sorted(os.listdir(folder)):
+                if name.startswith('~$') or not name.lower().endswith(('.csv', '.xlsx', '.xls', '.xlsm')):
+                    continue
+                if rx is not None and not rx.search(name):
+                    continue
+                cols = _extract_header(os.path.join(folder, name),
+                                       (spec or cfg).get('has_header', True),
+                                       (spec or cfg).get('header_row'))
+                cands = [c for c in cols
+                         if _DQ_HEADER_RX.search(c) and not _DQ_HEADER_REJECT_RX.search(c)
+                         and c.lower() not in mapped_vals]
+                if len(cands) == 1:
+                    hit = cands[0]
+                    break
+            if hit:
+                break
+        if hit:
+            cm['days_delinquent'] = hit
+            if spec is None:
+                cfg['column_mappings'] = cm
+            else:
+                spec['column_mappings'] = cm
+            print(f"    NOTE: DQ migration split auto-detected days_delinquent column "
+                  f"{hit!r} on the loan extract (not mapped in the YAML; add "
+                  f"'days_delinquent: {hit}' to column_mappings to pin it).")
+            found = True
+    if extracts:
+        cfg['loan_data_extracts'] = extracts
+    return cfg, found
+
+
 def load_days_delinquent_by_account(config, snapshot_date, workspace_root):
     """``({full_account_string: days_delinquent},
     {(full_account_string, balance): days_delinquent})`` read from the loan
@@ -197,6 +285,8 @@ def load_days_delinquent_by_account(config, snapshot_date, workspace_root):
                      for ex in extracts)
     else:
         mapped = bool((safe_cfg.get('column_mappings') or {}).get('days_delinquent'))
+    if not mapped:
+        safe_cfg, mapped = _autodetect_dq_mapping(safe_cfg)
     if not mapped:
         print("    DQ migration split: no extract maps 'days_delinquent'; skipping.")
         return {}, {}
