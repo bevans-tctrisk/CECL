@@ -645,6 +645,12 @@ def _build_loan_index(loan_path: str | Path,
         return index
 
     mode = (ma.get("mode") or "fixed_suffix").lower()
+    # An explicitly mapped suffix column is the strongest signal of the
+    # account shape: honour it even when ``member_account`` still says
+    # fixed_suffix (Granco: ACCT NBR + NOTE 'A1', suffix_length 0 -> every
+    # note of a member collapsed to one '<member>-' key and nothing matched).
+    if suffix_col is not None and mode != "split":
+        mode = "split"
     # Honour an explicit suffix_length=0 (combined-fixed mode where the
     # member-number column already holds the full account, no suffix).
     # Plain ``int(... or 3)`` would silently override 0 -> 3 because 0 is
@@ -813,6 +819,9 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
         # First-in wins for duplicates; the primary index (padded form)
         # is authoritative when both exist.
         norm_index.setdefault(_nk, _v)
+    ci_index: dict[str, dict[str, Any]] = {}
+    for _k, _v in index.items():
+        ci_index.setdefault(_k.upper(), _v)
 
     # Phase 9.41 — account-reconstruction index. Keyed by the digits-only
     # combined account (member digits + suffix digits) captured when the
@@ -880,6 +889,9 @@ def lookup_from_loan_data(rows: list[dict[str, Any]],
             m, _, s = key.partition("-")
             alt = f"{m}-{s.lstrip('0') or '0'}"
             match = index.get(alt)
+        if match is None and key:
+            # Alphanumeric suffixes ('A1' vs 'a1'): case-insensitive key.
+            match = ci_index.get(key.upper())
         if match is None:
             # Phase 9.37b — try the leading-zero-normalised index
             match = norm_index.get(_strip_lead(key))
