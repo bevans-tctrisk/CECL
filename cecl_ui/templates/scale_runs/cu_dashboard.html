@@ -5,6 +5,17 @@
 <h2>{{ cu.credit_union }} <small class="muted">({{ cu.short_name }})</small></h2>
 <p class="muted">Latest report on disk: <strong>{{ cu.latest_period }}</strong></p>
 
+<p>
+  <a class="btn btn-secondary"
+     href="{{ url_for('scale_runs.edit_settings', short_name=cu.short_name) }}">
+    Edit Mgmt-Adj / ACL Months Settings
+  </a>
+  <a class="btn btn-secondary"
+     href="{{ url_for('scale_runs.upload_impaired_form', short_name=cu.short_name) }}">
+    Upload Impaired Loans Report
+  </a>
+</p>
+
 {% if not draft_present %}
   <div class="flash warning">
     No saved wizard draft was found for this CU. Open the SCALE wizard
@@ -12,6 +23,62 @@
     here will fail (the run needs Solr URL, q-factors, mgmt-adj,
     impaired settings, etc.).
   </div>
+{% endif %}
+
+{% if draft_present %}
+<div class="card">
+  <h3 style="margin-top:0;">Environmental Factors
+    <span class="muted" style="font-weight:normal;">(Economic Stress Index)</span></h3>
+  <p class="muted">
+    These feed the <strong>Env Factor by Pool</strong> tab. Click
+    <strong>Fetch from federal sources</strong> to pull the latest
+    <em>unemployment</em> (BLS), <em>population</em> (U.S. Census), and
+    <em>bankruptcies</em> (U.S. Courts) for this state.
+    <strong>Foreclosures</strong> has no federal source &mdash; enter it
+    manually. Values are saved to this CU and reused on every run.
+  </p>
+  <form method="post"
+        action="{{ url_for('scale_runs.save_economic', short_name=cu.short_name) }}">
+    <div style="display:flex; flex-wrap:wrap; gap:16px; align-items:flex-end;">
+      <label>State
+        <input type="text" name="econ_state"
+               value="{{ economic.get('state', '') }}" style="width:170px;">
+      </label>
+      <label>County
+        <input type="text" name="econ_county"
+               value="{{ economic.get('county', '') }}" style="width:170px;">
+      </label>
+      <label>Unemployment rate
+        <input type="text" name="econ_unemployment_rate"
+               value="{{ economic.get('unemployment_rate', '') }}"
+               placeholder="e.g. 0.038" style="width:120px;">
+        <span class="muted" style="display:block; font-size:11px;">decimal (0.038) or percent (3.8)</span>
+      </label>
+      <label>Population
+        <input type="text" name="econ_population"
+               value="{{ economic.get('population', '') }}"
+               placeholder="auto-fetch" style="width:140px;">
+      </label>
+      <label>Bankruptcies
+        <input type="text" name="econ_bankruptcies"
+               value="{{ economic.get('bankruptcies', '') }}"
+               placeholder="auto-fetch" style="width:140px;">
+      </label>
+      <label>Foreclosures
+        <input type="text" name="econ_foreclosures"
+               value="{{ economic.get('foreclosures', '') }}"
+               placeholder="manual" style="width:140px;">
+      </label>
+    </div>
+    <div style="margin-top:14px; display:flex; gap:10px;">
+      <button type="submit" class="btn btn-primary">Save</button>
+      <button type="submit" class="btn btn-secondary"
+              formaction="{{ url_for('scale_runs.fetch_economic', short_name=cu.short_name) }}">
+        Fetch from federal sources
+      </button>
+    </div>
+  </form>
+</div>
 {% endif %}
 
 <h3>Run a new quarter</h3>
@@ -70,6 +137,17 @@
       <option value="tct">TCT only</option>
       <option value="vizo">Vizo only</option>
     </select>
+  </div>
+
+  <div class="form-row">
+    <label for="cu_name_override">CU name override</label>
+    <input type="text" name="cu_name_override" id="cu_name_override"
+           value="{{ cu_name_override }}" style="width: 24em;"
+           placeholder="(optional — leave blank to use the 5300 name)">
+    <small class="muted">
+      When set, this name replaces the credit union name throughout the
+      SCALE report (Historical&nbsp;Data&nbsp;B2 and everything chained to it).
+    </small>
   </div>
 
   <fieldset class="form-row">

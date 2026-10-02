@@ -1,0 +1,263 @@
+"""Assemble a whole report: workbook -> all tabs -> one HTML doc / PDF.
+
+Each worksheet is dispatched to its renderer — the bespoke templates for
+the four special tabs (cover, Impr Deter, Risk Change, ACL Env) and the
+generic faithful grid for everything else. Sheet order is preserved from
+the workbook so the assembled document matches the report's tab order.
+
+Two outputs:
+  * :func:`render_report_html` — one scrollable HTML doc (browser preview).
+  * :func:`render_report_pdf`  — per-tab PDFs (each in its correct
+    orientation) merged into a single file, so wide tabs stay landscape.
+"""
+
+from __future__ import annotations
+
+import io
+from pathlib import Path
+
+from . import from_workbook as fw
+from . import render as R
+from . import charts as C
+from .model import CoverPage
+
+# Wide tabs render landscape; everything else portrait. A grid tab also
+# flips to landscape automatically when it has many columns (below).
+_LANDSCAPE_HINTS = ("risk change", "acl env", "hist bal", "co-recov", "co recov")
+_WIDE_COL_THRESHOLD = 12
+
+
+def _pdf_escape(s: str) -> str:
+    return s.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+
+
+def _number_overlay(width: float, height: float, text: str,
+                    font_size: int = 9) -> bytes:
+    """Build a one-page PDF (matching width/height) whose only content is
+    *text* centred near the bottom margin, drawn in base-14 Helvetica so no
+    font embedding is needed. Used to stamp "Page X of N" post-merge."""
+    tw = len(text) * font_size * 0.5  # Helvetica ~0.5em average advance
+    x = max(0.0, (width - tw) / 2.0)
+    y = 22.0  # points up from the page bottom
+    stream = (f"BT /F1 {font_size} Tf 0.33 0.33 0.31 rg "
+              f"{x:.2f} {y:.2f} Td ({_pdf_escape(text)}) Tj ET").encode("latin-1")
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.2f} {height:.2f}] "
+         f"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>").encode("latin-1"),
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n"
+        + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for i, o in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + o + b"\nendobj\n"
+    xref_pos = len(out)
+    out += b"xref\n0 " + str(len(objs) + 1).encode() + b"\n0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (b"trailer\n<< /Size " + str(len(objs) + 1).encode()
+            + b" /Root 1 0 R >>\nstartxref\n" + str(xref_pos).encode()
+            + b"\n%%EOF")
+    return out
+
+
+def _stamp_page_numbers(writer) -> None:
+    """Overlay 'Page X of N' onto every page of a PdfWriter, in place."""
+    from pypdf import PdfReader
+
+    total = len(writer.pages)
+    for idx, page in enumerate(writer.pages, start=1):
+        box = page.mediabox
+        overlay = PdfReader(io.BytesIO(_number_overlay(
+            float(box.width), float(box.height),
+            f"Page {idx} of {total}"))).pages[0]
+        page.merge_page(overlay)
+
+
+def find_report(ws_root: str | Path, credit_union: str, snapshot: str,
+                *, supplemental: bool = False) -> Path | None:
+    """Locate the generated Vizo workbook for a CU/period."""
+    safe_cu = credit_union.replace(" ", "_").replace("/", "-")
+    kind = "CECL_Supplemental" if supplemental else "CECL_Migration"
+    name = f"{snapshot}_{kind}_{safe_cu}_Vizo_Model.xlsx"
+    path = Path(ws_root) / "Reports" / name
+    if path.exists():
+        return path
+    # Fall back to a looser glob (handles minor CU-name punctuation drift).
+    hits = sorted((Path(ws_root) / "Reports").glob(
+        f"{snapshot}_{kind}_*Vizo_Model.xlsx"))
+    return hits[0] if hits else None
+
+
+def _fragment(full_html: str) -> str:
+    """Extract the <body> inner HTML from a rendered page."""
+    try:
+        return full_html.split("<body>", 1)[1].rsplit("</body>", 1)[0]
+    except IndexError:
+        return full_html
+
+
+def _render_sheet(report_path: Path, sheet: str, cu: str, snap: str,
+                  *, supplemental: bool) -> tuple[str, bool]:
+    """Return (full_html, landscape) for one worksheet."""
+    low = sheet.strip().lower()
+    landscape = any(h in low for h in _LANDSCAPE_HINTS)
+    try:
+        # Any embedded charts on this sheet, re-rendered as inline SVG.
+        try:
+            svgs = C.render_charts_for_sheet(report_path, sheet)
+        except Exception:  # noqa: BLE001
+            svgs = []
+        if "cover" in low:
+            cover = fw.load_cover(report_path, sheet)
+            cover.credit_union = cover.credit_union or cu
+            if supplemental:
+                cover.subtitle = "Supplemental Reports"
+            return R.render_html("cover.html", cover=cover), False
+        if "impr deter" in low or ("improved" in low and "deteriorated" in low):
+            page = fw.load_impr_deter(report_path)
+            return R.render_html("impr_deter.html", page=page, charts=svgs), False
+        if "risk change" in low or "risk chg" in low:
+            page = fw.load_risk_change(report_path, sheet)
+            return R.render_html("risk_change.html", page=page, charts=svgs), True
+        if "acl env" in low:
+            page = fw.load_acl_env(report_path)
+            return R.render_html("acl_env.html", page=page, charts=svgs), True
+        # Generic faithful grid for every other tab.
+        gpage = fw.load_grid(report_path, sheet, landscape=landscape)
+        ncols = max((len(r) for r in gpage.rows), default=0)
+        landscape = landscape or ncols > _WIDE_COL_THRESHOLD
+        return R.render_html("grid.html", page=gpage, charts=svgs), landscape
+    except Exception as exc:  # noqa: BLE001
+        # Never let one bad tab kill the whole preview.
+        return (f'<section class="page"><p style="color:#b00">'
+                f'Could not render tab “{sheet}”: {exc}</p></section>'), landscape
+
+
+def build_pages(report_path: str | Path, cu: str, snap: str,
+                *, supplemental: bool = False) -> list[dict]:
+    """Render every worksheet to a fragment + orientation, in tab order."""
+    from openpyxl import load_workbook
+    wb = load_workbook(report_path, read_only=True)
+    pages: list[dict] = []
+    for ws in wb.worksheets:
+        # Hidden sheets are working scratch -- ">Envir Fact Ranges" is
+        # merged into "Env Factor by Pool" and then hidden. Excel's own
+        # export skips them, so this path must too, or the client gets a
+        # page that is not meant to exist.
+        if ws.sheet_state != "visible":
+            continue
+        sheet = ws.title
+        full, landscape = _render_sheet(
+            Path(report_path), sheet, cu, snap, supplemental=supplemental)
+        pages.append({
+            "sheet": sheet,
+            "fragment": _fragment(full),
+            "full": full,
+            "landscape": landscape,
+        })
+    wb.close()
+    return pages
+
+
+def render_report_html(report_path: str | Path, cu: str, snap: str,
+                       *, supplemental: bool = False) -> str:
+    """One self-contained HTML doc with every tab (browser preview)."""
+    pages = build_pages(report_path, cu, snap, supplemental=supplemental)
+    css = R.load_css()
+    body = "\n".join(p["fragment"] for p in pages)
+    return (
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        f"<title>{cu} — CECL Report {snap}</title>"
+        f"<style>{css}</style></head><body>{body}</body></html>"
+    )
+
+
+def render_report_pdf(report_path: str | Path, cu: str, snap: str,
+                      *, supplemental: bool = False) -> bytes:
+    """Merge per-tab PDFs (each in its own orientation) into one file."""
+    from pypdf import PdfWriter, PdfReader
+
+    pages = build_pages(report_path, cu, snap, supplemental=supplemental)
+    writer = PdfWriter()
+    for p in pages:
+        pdf_bytes = R.render_pdf(p["full"], landscape=p["landscape"])
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        for pg in reader.pages:
+            writer.add_page(pg)
+    _stamp_page_numbers(writer)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+# ── From-data assembly (no workbook) ─────────────────────────────────
+
+def build_pages_from_data(client_name: str, snapshot_date: str, config: dict,
+                          grades=None, hist: dict | None = None, df=None,
+                          *, supplemental: bool = False,
+                          variant: str = "vizo") -> list[dict]:
+    """Render every modelled page from report DATA (not a workbook).
+
+    Uses :func:`cecl_report_web.from_data.build_report_model`, so the PDF is
+    built without the ``.xlsx`` being generated or read.
+    """
+    from . import from_data as FD
+    model = FD.build_report_model(
+        client_name, snapshot_date, config, grades=grades, hist=hist, df=df,
+        supplemental=supplemental, variant=variant)
+    pages: list[dict] = []
+    for template, ctx, landscape in model["pages"]:
+        # TCT renders carry a theme flag so the templates apply the TCT
+        # navy/cyan brand palette; Vizo renders are untouched.
+        if variant == "tct":
+            ctx = {**ctx, "theme": "tct"}
+        pages.append({"full": R.render_html(template, **ctx),
+                      "landscape": landscape})
+    return pages
+
+
+def render_report_html_from_data(client_name: str, snapshot_date: str,
+                                 config: dict, grades=None,
+                                 hist: dict | None = None, df=None,
+                                 *, supplemental: bool = False,
+                                 variant: str = "vizo") -> str:
+    """One self-contained HTML doc with every modelled page (browser preview)."""
+    pages = build_pages_from_data(
+        client_name, snapshot_date, config, grades, hist, df,
+        supplemental=supplemental, variant=variant)
+    css = R.load_css()
+    body = "\n".join(_fragment(p["full"]) for p in pages)
+    cu = (config or {}).get("credit_union") or client_name
+    return (
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        f"<title>{cu} \u2014 CECL Report {snapshot_date}</title>"
+        f"<style>{css}</style></head><body>{body}</body></html>"
+    )
+
+
+def render_report_pdf_from_data(client_name: str, snapshot_date: str,
+                                config: dict, grades=None,
+                                hist: dict | None = None, df=None,
+                                *, supplemental: bool = False,
+                                variant: str = "vizo") -> bytes:
+    """Full multi-page PDF built from data, each page in its own orientation."""
+    from pypdf import PdfWriter, PdfReader
+
+    pages = build_pages_from_data(
+        client_name, snapshot_date, config, grades, hist, df,
+        supplemental=supplemental, variant=variant)
+    writer = PdfWriter()
+    for p in pages:
+        reader = PdfReader(io.BytesIO(
+            R.render_pdf(p["full"], landscape=p["landscape"])))
+        for pg in reader.pages:
+            writer.add_page(pg)
+    _stamp_page_numbers(writer)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()

@@ -35,8 +35,24 @@ COLUMN_HEURISTICS: list[tuple[str, list[str]]] = [
     ("current_balance",      ["lndcbal", "current_balance", "current bal",
                               "curr_bal", "cur_bal", "balance", "bal"]),
     ("original_fico_score",  ["lndcrsc", "original_fico", "orig_fico",
-                              "orig_score", "original_score", "fico_score",
-                              "fico", "credit_score", "score"]),
+                              "orig_score", "original_score", "application_creditscore",
+                              "application_score",
+                              # Generic score columns default to the
+                              # ORIGINATION score. Most core/AIRES extracts
+                              # ship only the origination FICO; the current
+                              # score comes from the credit pull. So a plain
+                              # "Credit Score" / "FICO" / "Score" column maps
+                              # here, leaving current_fico_score unmapped
+                              # (none) by default. A genuinely-current column
+                              # (e.g. "Current FICO") still routes to
+                              # current_fico_score via its explicit keywords
+                              # below, since original claims only one column.
+                              "creditscore", "credit_score", "fico_score",
+                              "fico", "score"]),
+    ("current_fico_score",   ["current_fico", "current_score",
+                              "latest_credit_score", "last_credit_score",
+                              "primary_score", "current_credit_score",
+                              "updated_fico", "refresh_score", "refreshed_score"]),
     ("loan_pool_code",       ["lndalpc", "loan_pool", "pool_code", "loan_type",
                               "product_code", "loan_code", "pool", "product",
                               "type", "code"]),
@@ -44,19 +60,450 @@ COLUMN_HEURISTICS: list[tuple[str, list[str]]] = [
                               "apr"]),
     ("open_date",            ["lndopen", "open_date", "orig_date",
                               "origination_date", "open"]),
-    ("original_loan_amount", ["lndorg", "original_loan_amount", "orig_amt",
-                              "original_amount", "loan_amount", "orig"]),
+    ("original_loan_amount", ["lndorg", "original_loan_amount", "loan_original",
+                              "orig_amt", "orig_amount", "original_amount",
+                              "original_amnt", "loan_amount", "orig"]),
     ("total_available_credit", ["lndcrlim", "total_available_credit",
                                  "available_credit", "credit_limit",
                                  "line_of_credit", "loc_limit", "loc",
                                  "limit"]),
     ("days_delinquent",      ["lnddel", "days_delinquent", "dq_days",
                               "delinquent", "delinq", "dq"]),
+    ("business_risk_rating", ["business_risk_rating", "business_risk",
+                              "risk_rating", "risk_rate", "rr_grade",
+                              "brr"]),
 ]
+
+
+# Negative keywords per field: a candidate header whose normalised form
+# contains any of these tokens is skipped for that field. A member/account
+# NUMBER column is never the member NAME column, yet the bare ``"member"``
+# keyword otherwise grabs "Member Name" (which precedes the real "Account
+# Number" in AIRES/Symitar extracts), breaking the credit-pull join and the
+# suffix-length discovery.
+_FIELD_EXCLUDE: dict[str, tuple[str, ...]] = {
+    "member_number": ("name",),
+    # The bare ``"orig"`` keyword otherwise grabs non-amount "orig*" columns
+    # that precede the real amount header, e.g. "ORIG NBR PYMTS" (original
+    # number of payments) or "LOAN ORIGINAL DATE". Skip anything that reads as
+    # a date / payment-count / term / rate / score rather than a dollar amount.
+    "original_loan_amount": (
+        "date", "dt", "pymt", "payment", "nbr", "number", "count",
+        "term", "rate", "score", "delinq", "due",
+    ),
+}
 
 
 def _normalise(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower()).strip("_")
+
+
+# ---------- Date format validation ----------
+#
+# These are the literal values ``import_data.extract_snapshot_date`` knows
+# how to translate from the configured ``date_pattern`` regex groups.
+# Anything else silently falls through to the YYYY-MM branch and yields
+# garbage dates. Single source of truth so the wizard can validate user
+# picks before the YAML is written.
+
+ACCEPTED_DATE_FORMATS: tuple[str, ...] = (
+    "YYYY-MM",      # default: 2 capture groups (year, month)
+    "YYYYMMDD",     # 3 capture groups (year, month, day)
+    "MMDDYY",       # 3 capture groups (month, day, year[2 or 4 digits])
+    "MMYY",         # 2 capture groups (month, year[2 digits])
+    "MMYYYY",       # 2 capture groups (month, year[4 digits])
+    "YYYYQ",        # 2 capture groups (year, quarter[1-4])
+    "QYYYY",        # 2 capture groups (quarter, year)
+)
+
+DATE_FORMAT_LABELS: dict[str, str] = {
+    "YYYY-MM":  "YYYY-MM (e.g. 2025-12) - default; matches 2-group regex",
+    "YYYYMMDD": "YYYYMMDD (e.g. 20251231) - 3-group, year/month/day",
+    "MMDDYY":   "MMDDYY or MM-DD-YYYY (e.g. 12-31-25 or 12-31-2025)",
+    "MMYY":     "MMYY (e.g. 12-25)",
+    "MMYYYY":   "MMYYYY (e.g. 12-2025)",
+    "YYYYQ":    "YYYYQ (e.g. 2025Q4 or 2025-Q4)",
+    "QYYYY":    "QYYYY (e.g. Q4-2025)",
+}
+
+
+def validate_date_format(
+    date_pattern: str,
+    date_format: str,
+    sample_filename: str = "",
+) -> dict[str, Any]:
+    """Validate a (date_pattern, date_format) pair and resolve a sample.
+
+    Returns ``{ok, error, preview, recognized}``:
+      * ``recognized`` - True iff ``date_format`` is one ``import_data`` knows.
+      * ``ok`` - True iff the regex compiled and (if ``sample_filename``
+        given) successfully resolved to a date.
+      * ``preview`` - resolved ISO date string (e.g. ``"2025-12-31"``)
+        when a sample was supplied and the parse succeeded; else ``""``.
+      * ``error`` - human-readable string when something failed.
+    """
+    out: dict[str, Any] = {
+        "ok": False, "error": None, "preview": "",
+        "recognized": date_format in ACCEPTED_DATE_FORMATS,
+    }
+    if not out["recognized"]:
+        out["error"] = (
+            f"Date format {date_format!r} is not recognized. "
+            f"Pick one of: {', '.join(ACCEPTED_DATE_FORMATS)}."
+        )
+        return out
+    try:
+        re.compile(date_pattern)
+    except re.error as exc:
+        out["error"] = f"Invalid date_pattern regex: {exc}"
+        return out
+    if not sample_filename:
+        out["ok"] = True
+        return out
+    # Defer the import: import_data is a heavy module and we only need
+    # one function. This keeps wizard pages snappy.
+    try:
+        import import_data as _id  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"Could not import date resolver: {exc}"
+        return out
+    iso = _id.extract_snapshot_date(
+        sample_filename,
+        {"date_pattern": date_pattern, "date_format": date_format},
+    )
+    if not iso:
+        out["error"] = (
+            f"Could not extract a date from {sample_filename!r} "
+            f"using pattern {date_pattern!r} / format {date_format}."
+        )
+        return out
+    out["ok"] = True
+    out["preview"] = iso
+    return out
+
+
+# ---------- Member / Account number layout inference ----------
+#
+# Looks at the literal account-key cells from the loan extract and
+# proposes a ``member_account`` block (mode + delimiter / suffix length)
+# that the import pipeline knows how to split. The wizard previously
+# defaulted everyone to ``mode=fixed_suffix, suffix_length=3``; CUs
+# whose account column is e.g. ``000000470-06`` (delimiter) or
+# ``219044`` (no suffix) silently failed credit-pull joins until an
+# operator hand-edited the YAML.
+
+_DELIM_INFER_RX = re.compile(r"^\s*(\d+)([\-_LXlx/])(\d+)\s*$")
+_DIGITS_RX = re.compile(r"^\s*(\d+)\s*$")
+
+
+def infer_member_account_from_values(
+    values: list[Any],
+    sample_size: int = 50,
+) -> dict[str, Any] | None:
+    """Inspect raw values and propose a ``member_account`` mapping.
+
+    Returns ``None`` when the values are too sparse or ambiguous to
+    suggest anything useful (caller should fall back to its own
+    default). Otherwise returns a dict shaped like::
+
+        {"mode": "delimiter", "delimiter": "-", "suffix_length": 3,
+         "confidence": "high"|"medium"|"low",
+         "rationale": "human-readable explanation"}
+
+    The ``suffix_length`` field is always present so the dict can be
+    used as a drop-in replacement for the wizard's default; for
+    ``mode=delimiter`` it carries the *typical* observed suffix length
+    (informational; the importer ignores it). For ``mode=fixed_suffix``
+    it is the dominant trailing-segment length actually observed.
+    """
+    cleaned: list[str] = []
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, float) and v != v:  # NaN
+            continue
+        s = str(v).strip()
+        if not s or s.lower() in {"nan", "none"}:
+            continue
+        cleaned.append(s)
+        if len(cleaned) >= sample_size:
+            break
+    if len(cleaned) < 3:
+        return None
+
+    delim_hits: dict[str, list[int]] = {}
+    digit_only: list[str] = []
+    other = 0
+    for s in cleaned:
+        m = _DELIM_INFER_RX.match(s)
+        if m:
+            delim_hits.setdefault(m.group(2), []).append(len(m.group(3)))
+            continue
+        d = _DIGITS_RX.match(s)
+        if d:
+            digit_only.append(d.group(1))
+            continue
+        other += 1
+
+    total = len(cleaned)
+
+    # --- delimiter mode ---
+    if delim_hits:
+        # Pick the most-frequent delimiter. Promote it to delimiter mode
+        # only if it covers a clear majority and digit-only rows aren't.
+        best_delim, best_lens = max(
+            delim_hits.items(), key=lambda kv: len(kv[1])
+        )
+        share = len(best_lens) / total
+        if share >= 0.6:
+            # Most-common suffix length (informational).
+            suffix_len = max(set(best_lens), key=best_lens.count)
+            conf = "high" if share >= 0.85 else "medium"
+            return {
+                "mode": "delimiter",
+                "delimiter": best_delim if best_delim.lower() != "x" else best_delim.upper(),
+                "suffix_length": int(suffix_len),
+                "confidence": conf,
+                "rationale": (
+                    f"{len(best_lens)}/{total} sample values match "
+                    f"<digits>{best_delim}<digits>; suffix ~"
+                    f"{suffix_len} chars."
+                ),
+            }
+
+    # --- digit-only branch ---
+    # If everything is bare digits, decide between fixed_suffix and
+    # zero-suffix (member-only). Look at trailing-3 vs trailing-2 vs
+    # trailing-4 stability. If the last N chars vary widely AND the
+    # length itself varies widely, the column is probably the bare
+    # member number with no embedded suffix.
+    if digit_only and len(digit_only) / total >= 0.85:
+        lens = {len(s) for s in digit_only}
+        # If lengths are tightly clustered, prefer fixed_suffix=3 (the
+        # historical default); we can't tell from values alone whether
+        # the last 3 chars are a suffix or part of the member number,
+        # but fixed_suffix=3 has been the heuristic for years and the
+        # operator can override on Step 3.
+        if len(lens) <= 2 and min(lens) >= 6:
+            return {
+                "mode": "fixed_suffix",
+                "delimiter": "-",
+                "suffix_length": 3,
+                "confidence": "low",
+                "rationale": (
+                    f"All {len(digit_only)}/{total} values are digit-only "
+                    f"({sorted(lens)} chars); defaulting to "
+                    "fixed_suffix=3. Override if the column is the bare "
+                    "member number with no embedded suffix."
+                ),
+            }
+        # Highly variable digit-only lengths -> probably bare member
+        # numbers with no suffix portion.
+        return {
+            "mode": "fixed_suffix",
+            "delimiter": "-",
+            "suffix_length": 0,
+            "confidence": "medium",
+            "rationale": (
+                f"{len(digit_only)}/{total} digit-only values with "
+                f"variable lengths {sorted(lens)} - looks like a bare "
+                "member number with no suffix."
+            ),
+        }
+
+    return None
+
+
+# Header keywords that identify a member/borrower NAME column. Used by the
+# suffix-length discovery below to group a single member's loans together.
+# Ordered most-specific first. The bare ``"name"`` entry is matched *exactly*
+# (see below) and non-member name columns are rejected outright.
+_NAME_COL_KEYWORDS: tuple[str, ...] = (
+    "member name", "membername", "borrower name", "borrowername",
+    "customer name", "account name", "primary name", "owner name",
+    "name of member", "member", "borrower", "customer", "name",
+)
+
+# Tokens that disqualify a "...name" header from being the *member* name
+# (e.g. "Loan Type Name", "Product Name", "Officer Name", "City").
+_NAME_COL_REJECT: tuple[str, ...] = (
+    "type", "product", "officer", "branch", "collateral", "city", "state",
+    "code", "pool", "category", "description", "purpose", "insider",
+)
+
+
+def find_member_name_column(
+    headers: list[str],
+    body: "pd.DataFrame | None" = None,
+) -> str | None:
+    """Return the header most likely to hold the member/borrower NAME.
+
+    When ``body`` is supplied the candidate is validated as *textual*
+    (majority of sampled cells contain letters) so a numeric member-number
+    column is never picked by the trailing bare ``"name"`` keyword. Headers
+    for non-member name fields (loan type, product, officer ...) are
+    rejected. Returns ``None`` when nothing convincing is found.
+    """
+    norm = [(h, _normalise(h)) for h in headers]
+    for kw in _NAME_COL_KEYWORDS:
+        kw_n = _normalise(kw)
+        if not kw_n:
+            continue
+        for original, n in norm:
+            # The bare "name" fallback matches exactly; every other keyword
+            # matches as a substring.
+            if kw_n == "name":
+                if n != "name":
+                    continue
+            elif kw_n not in n:
+                continue
+            if any(bad in n for bad in _NAME_COL_REJECT):
+                continue
+            if body is not None and original in getattr(body, "columns", []):
+                vals = [
+                    str(v).strip()
+                    for v in body[original].head(40).tolist()
+                    if v is not None and str(v).strip()
+                    and str(v).strip().lower() not in {"nan", "none"}
+                ]
+                if vals:
+                    alpha = sum(1 for v in vals if any(c.isalpha() for c in v))
+                    if alpha / len(vals) < 0.5:
+                        continue  # mostly numeric -> not a name column
+            return original
+    return None
+
+
+def detect_suffix_from_name_groups(
+    accounts: list[Any],
+    names: list[Any],
+    max_suffix: int = 4,
+    min_groups: int = 8,
+    support_frac: float = 0.15,
+    min_support: int = 8,
+) -> dict[str, Any] | None:
+    """Discover the fixed loan-suffix width by grouping loans under one member.
+
+    Core banking systems key each loan as ``<member-number><loan-suffix>``
+    where the suffix is a fixed-width, sequentially-assigned counter
+    (``01``, ``02`` ...). A member's loans share the member-number prefix and
+    differ only in the suffix, so grouping a file's rows by member *name* and
+    inspecting the trailing digits that vary reveals the suffix width — the
+    exact manual method an analyst uses on a spreadsheet of duplicate names.
+
+    Two confounders are handled:
+
+    * **Sequential low numbers** (``01``, ``02``, ``03``) share a leading
+      zero, so a naive common-prefix undercounts the width by one. We take
+      the *largest* width corroborated by a meaningful fraction of members:
+      members who hold a loan numbered >= 10 (suffix ``83`` ...) expose the
+      true field width, while smaller observed widths are the same field
+      seen through those leading zeros.
+    * **Name collisions** (two different people sharing a common name) have
+      little/no shared account prefix, yielding an implausibly large width
+      that exceeds ``max_suffix`` and is discarded.
+
+    Returns ``{"suffix_length", "confidence", "rationale", "groups"}`` or
+    ``None`` when the evidence is too thin (caller keeps its own default).
+    """
+    import os as _os
+
+    def _na(a: Any) -> str:
+        if a is None:
+            return ""
+        return re.sub(r"\.0+$", "", str(a).strip())  # drop float-cast ".0"
+
+    def _nn(n: Any) -> str:
+        if n is None:
+            return ""
+        return re.sub(r"\s+", " ", str(n).strip().upper())
+
+    by_name: dict[str, set[str]] = {}
+    for a, n in zip(accounts, names):
+        acct = _na(a)
+        name = _nn(n)
+        if not acct or not acct.isdigit():
+            continue
+        if not name or name in {"NAN", "NONE"}:
+            continue
+        by_name.setdefault(name, set()).add(acct)
+
+    votes: dict[int, int] = {}
+    groups_used = 0
+    for accts in by_name.values():
+        if len(accts) < 2:
+            continue
+        cp = _os.path.commonprefix(sorted(accts))
+        widths = [len(a) - len(cp) for a in accts]
+        widths = [w for w in widths if 0 < w <= max_suffix]
+        if not widths:
+            continue  # collision / unrelated accounts under a shared name
+        groups_used += 1
+        top = max(widths)
+        votes[top] = votes.get(top, 0) + 1
+
+    if groups_used < min_groups or not votes:
+        return None
+
+    threshold = max(min_support, support_frac * groups_used)
+    supported = [w for w, c in votes.items() if c >= threshold]
+    if not supported:
+        return None
+    width = max(supported)
+    share = votes.get(width, 0) / groups_used
+    conf = "high" if share >= 0.30 else "medium" if share >= 0.15 else "low"
+    return {
+        "suffix_length": int(width),
+        "confidence": conf,
+        "rationale": (
+            f"{groups_used} member-name groups held 2+ loans; "
+            f"{votes.get(width, 0)} exposed a {width}-digit loan suffix "
+            f"(votes {dict(sorted(votes.items()))}). Accounts keyed as "
+            f"<member><{width}-digit suffix>."
+        ),
+        "groups": groups_used,
+    }
+
+
+_UNNAMED_RX = re.compile(r"^unnamed:\s*\d+(?:_level_\d+)*$", re.IGNORECASE)
+
+
+def _is_blank_header(s: str) -> bool:
+    """True for cells that should be treated as missing headers — empty,
+    pandas' synthetic ``Unnamed: 0`` placeholder, or the literal string
+    ``nan`` (which is what ``str(float('nan'))`` produces when a raw
+    Excel cell is empty)."""
+    if not s:
+        return True
+    low = s.lower()
+    if low == "nan":
+        return True
+    if _UNNAMED_RX.match(s):
+        return True
+    return False
+
+
+def _clean_header(cell: object, idx: int | None = None) -> str:
+    """Normalise a spreadsheet header cell: collapse any internal whitespace
+    (CR/LF, tabs, multi-space — common with wrap-text Excel cells) into a
+    single space and strip ends. Browsers do the same when round-tripping
+    `<option value="...">` on form submit, so the dropdown's selected value
+    will match the rendered options across saves only if we store the
+    normalised shape.
+
+    When the cell is blank/NaN/``Unnamed: N`` and a column index is
+    provided, returns ``col_<LETTER>`` (e.g. ``col_H`` for the 8th
+    column). This guarantees every dropdown option is unique even when
+    the source spreadsheet has multiple unlabelled columns — without it,
+    every blank column collapses to the same value and the form would
+    silently snap the user's pick to the leftmost blank column on save.
+    """
+    s = "" if cell is None else re.sub(r"\s+", " ", str(cell)).strip()
+    if _is_blank_header(s):
+        if idx is not None:
+            return f"col_{_excel_col_letter(idx)}"
+        return ""
+    return s
 
 
 def _excel_col_letter(idx: int) -> str:
@@ -73,23 +520,70 @@ def _excel_col_letter(idx: int) -> str:
     return s
 
 
+def _dedupe_headers(headers: list[str]) -> list[str]:
+    """Append a positional suffix to repeated header names.
+
+    Some workbooks (e.g. CUMA MTG Servicing reports) ship with duplicate
+    column labels in the header row. Pandas tolerates duplicates but
+    ``df[col]`` then returns a DataFrame instead of a Series, which
+    breaks downstream ``.tolist()`` / ``.dropna()`` calls. Suffix the
+    second+ occurrence with the Excel column letter to keep names unique.
+    """
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for i, h in enumerate(headers):
+        if h in seen:
+            seen[h] += 1
+            out.append(f"{h} ({_excel_col_letter(i)})")
+        else:
+            seen[h] = 1
+            out.append(h)
+    return out
+
+
 def _match_columns(headers: list[str]) -> dict[str, str]:
     """Return {system_field: matched_header} using the heuristics."""
     out: dict[str, str] = {}
     used: set[str] = set()
     norm_headers = [(h, _normalise(h)) for h in headers]
     for field, keywords in COLUMN_HEURISTICS:
+        exclude = _FIELD_EXCLUDE.get(field, ())
+        kws = [_normalise(kw) for kw in keywords]
+
+        def _ok(original: str, norm: str) -> bool:
+            if original in used:
+                return False
+            if exclude and any(x in norm for x in exclude):
+                return False
+            return True
+
         match: str | None = None
-        for kw in keywords:
-            kw_n = _normalise(kw)
+        # Pass 1 (preferred): a keyword is a SUBSTRING OF the header — a
+        # specific, high-confidence match. Keyword order carries priority.
+        for kw_n in kws:
+            if not kw_n:
+                continue
             for original, norm in norm_headers:
-                if original in used:
-                    continue
-                if kw_n in norm or norm in kw_n:
+                if _ok(original, norm) and kw_n in norm:
                     match = original
                     break
             if match:
                 break
+        # Pass 2 (fallback): the header is a substring of a keyword — an
+        # abbreviation like "bal" -> "balance". Only runs when no specific
+        # match exists, so a bare "Loan" header can't reverse-match the
+        # longer "loan_code"/"loan_pool" keywords and steal loan_pool_code
+        # from the real "Loan Code" column. Require >=3 chars so 1-2 char
+        # marker/flag columns ("L", "F", "SS") can't reverse-match a long
+        # keyword (e.g. "ss" inside "bu-ss-iness_risk_rating").
+        if not match:
+            for kw_n in kws:
+                for original, norm in norm_headers:
+                    if _ok(original, norm) and len(norm) >= 3 and norm in kw_n:
+                        match = original
+                        break
+                if match:
+                    break
         if match:
             out[field] = match
             used.add(match)
@@ -112,11 +606,177 @@ _DATE_RX_CANDIDATES: list[tuple[str, str]] = [
     ("YYYY_MM",       r"(20\d{2})_(\d{2})"),
     ("YYYYMM",        r"(20\d{2})(\d{2})(?!\d)"),
     ("MM-YYYY",       r"(\d{2})-(20\d{2})"),
+    # MM-DD-YY with separators (e.g. "12-31-25", "12_31_25"). Negative
+    # look-behind avoids matching the tail half of "2025-12-31" as "25-12-31".
+    ("MM-DD-YY",      r"(?<!\d)(\d{2})-(\d{2})-(\d{2})(?!\d)"),
+    ("MM_DD_YY",      r"(?<!\d)(\d{2})_(\d{2})_(\d{2})(?!\d)"),
     ("MMDDYY",        r"(\d{2})(\d{2})(\d{2})(?!\d)"),
+    # Quarter-end forms: "2025Q4", "2026-Q1", "2026_Q1".
+    ("YYYYQ",         r"(20\d{2})[-_ ]?[Qq]([1-4])(?!\d)"),
+    ("QYYYY",         r"(?<![A-Za-z])[Qq]([1-4])[-_ ]?(20\d{2})(?!\d)"),
     # Month-name forms — the import engine knows how to translate these.
     ("Mon_YYYY",      r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[-_ \.]+(20\d{2})"),
     ("YYYY_Mon",      r"(?i)(20\d{2})[-_ \.]+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"),
+    # Month-name + 2-digit year (e.g. "December 25", "Mar_26"). Placed
+    # AFTER the 4-digit forms so a full year wins when present. The
+    # import engine's month-name router normalizes the 2-digit year to
+    # 20xx. Trailing (?!\d) stops it grabbing the head of a longer number.
+    ("Mon_YY",        r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[-_ \.]+(\d{2})(?!\d)"),
 ]
+
+
+# Tokens that should be wildcarded in a filename pattern so the same
+# regex matches files dropped in other months / years.
+_MONTH_NAME_RX_GROUP = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+    r"jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+    r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+
+# Match candidates inside the original sample filename. Each entry is
+# (regex-to-find, regex-to-emit-into-pattern). Order matters: the
+# longest / most specific patterns win when matches overlap.
+_FNAME_GENERALIZE_RULES: list[tuple[re.Pattern[str], str]] = [
+    # Month-name + 4-digit year: "December 2025", "Mar_2026", "Sept-2024"
+    (re.compile(
+        rf"(?i)\b{_MONTH_NAME_RX_GROUP}[\s_\-\.]+20\d{{2}}\b"),
+     rf"{_MONTH_NAME_RX_GROUP}[\s_\-\.]+20\d{{2}}"),
+    # Month-name + 2-digit year: "Mar 26", "March_26"
+    (re.compile(
+        rf"(?i)\b{_MONTH_NAME_RX_GROUP}[\s_\-\.]+\d{{2}}(?!\d)"),
+     rf"{_MONTH_NAME_RX_GROUP}[\s_\-\.]+\d{{2}}"),
+    # YYYYMMDD (8 digits): "20251130" — match BEFORE YYYYMM so the day
+    # part doesn't get truncated.
+    (re.compile(
+        r"(?<!\d)20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?!\d)"),
+     r"20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"),
+    # MMDDYYYY (8 digits): "03312026"
+    (re.compile(
+        r"(?<!\d)(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])20\d{2}(?!\d)"),
+     r"(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])20\d{2}"),
+    # YYYY-MM-DD / YYYY_MM_DD: "2026-03-31"
+    (re.compile(
+        r"(?<!\d)20\d{2}[-_](?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12]\d|3[01])(?!\d)"),
+     r"20\d{2}[-_](?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12]\d|3[01])"),
+    # MM-DD-YYYY: "03-31-2026"
+    (re.compile(
+        r"(?<!\d)(?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12]\d|3[01])[-_]20\d{2}(?!\d)"),
+     r"(?:0[1-9]|1[0-2])[-_](?:0[1-9]|[12]\d|3[01])[-_]20\d{2}"),
+    # YYYY-MM / YYYY_MM / YYYYMM (any separator, optional)
+    (re.compile(r"(?<!\d)20\d{2}[-_]?(?:0[1-9]|1[0-2])(?!\d)"),
+     r"20\d{2}[-_]?(?:0[1-9]|1[0-2])"),
+    # MM-YYYY / MM_YYYY
+    (re.compile(r"(?<!\d)(?:0[1-9]|1[0-2])[-_]20\d{2}(?!\d)"),
+     r"(?:0[1-9]|1[0-2])[-_]20\d{2}"),
+    # MMYYYY (no separator): "092022"
+    (re.compile(r"(?<!\d)(?:0[1-9]|1[0-2])20\d{2}(?!\d)"),
+     r"(?:0[1-9]|1[0-2])20\d{2}"),
+    # YY-MM (e.g. "25-12 AIRES")
+    (re.compile(r"(?<!\d)\d{2}[-_](?:0[1-9]|1[0-2])(?!\d)"),
+     r"\d{2}[-_](?:0[1-9]|1[0-2])"),
+    # Bare 4-digit year (matched after the combined forms above)
+    (re.compile(r"(?<!\d)20\d{2}(?!\d)"), r"20\d{2}"),
+    # Bare month name (matched last so combined month+year wins first).
+    # Use letter-boundary lookarounds rather than ``\b`` so the rule
+    # also fires inside underscore-joined names like
+    # ``December_Loan_File_-_Upload.xlsx`` (``\b`` fails to match
+    # between a letter and an underscore — both are word chars).
+    (re.compile(rf"(?i)(?<![A-Za-z]){_MONTH_NAME_RX_GROUP}(?![A-Za-z])"),
+     _MONTH_NAME_RX_GROUP),
+    # Version suffix: "V2", "V3", "v10". Wildcards the digit so next
+    # quarter's "V3" file matches a pattern derived from a "V2" sample.
+    # Restricted to 1-2 digits and an explicit letter-boundary so generic
+    # words like "Vault123" don't get rewritten. Digits ARE allowed
+    # immediately before ``V`` so Vizo IDLR filenames that drop the
+    # separator between year and version (e.g. "TCP Aires June 2026V3.xlsx")
+    # still fire this rule — the trailing lookahead still gates against
+    # bare-numeric noise.
+    (re.compile(r"(?<![A-Za-z])[Vv]\d{1,2}(?![A-Za-z0-9])"),
+     r"[Vv]\d{1,2}"),
+    # Trailing numeric suffix like ".01" / ".001" / ".10" that Symitar
+    # / Vizo IDLR exports sometimes append to the baseline file
+    # (e.g. "airesln V2 DEC 2025.01.xlsx"). Wildcard as an OPTIONAL
+    # group so a pattern derived from a ".01"-suffixed baseline also
+    # matches the subsequent unsuffixed monthly drops. Anchored to
+    # end-of-stem so middle-of-name dotted tokens (e.g. ".v2.") aren't
+    # affected; restricted to 1-3 digits to avoid eating obvious
+    # non-suffix sequences.
+    (re.compile(r"\.\d{1,3}$"), r"(?:\.\d{1,3})?"),
+]
+
+
+def _generalize_filename_pattern(stem: str, ext_part: str) -> str:
+    """Build a case-insensitive ``file_pattern`` regex for ``stem`` that
+    wildcards every month-name and year token so the same regex still
+    matches next month's drop of the same file.
+
+    Tokens stay literal otherwise. Matches anchored ``^…\\.<ext>$``.
+    """
+    spans: list[tuple[int, int, str]] = []  # (start, end, replacement)
+    for rx, repl in _FNAME_GENERALIZE_RULES:
+        for m in rx.finditer(stem):
+            spans.append((m.start(), m.end(), repl))
+    # Resolve overlaps: keep the earliest-starting match; on ties prefer
+    # the longer one. Drop anything that overlaps a chosen span.
+    spans.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+    chosen: list[tuple[int, int, str]] = []
+    cursor = 0
+    for s, e, r in spans:
+        if s < cursor:
+            continue
+        chosen.append((s, e, r))
+        cursor = e
+    # Loosen runs of whitespace (escaped as ``\ ``), underscores, and
+    # escaped dashes (``\-``) so the pattern still matches across common
+    # CU naming variations:
+    #   - ``secure_filename`` rewrites spaces to underscores during upload
+    #     (sample ``December Loan File - Upload.xlsx`` → staged
+    #     ``December_Loan_File_-_Upload.xlsx``).
+    #   - Per-quarter drops sometimes lose the dash entirely
+    #     (``February Loan File Upload.xlsx``).
+    # Collapsing runs of any of {space, underscore, dash} to ``[\s_\-]+``
+    # lets one wizard-derived pattern match all three forms.
+    #
+    # CRITICAL: this collapse must run ONLY on escaped literal stem
+    # fragments — never on rule replacement strings. Rule replacements
+    # contain ``_`` and ``\-`` literals inside character classes like
+    # ``[\s_\-\.]+`` (combined month+year rule) and ``[-_]`` (date-format
+    # rules); applying the collapse to the whole body corrupts those
+    # classes into malformed nested classes (``[\s[\s_\-]+\.]+``) that
+    # silently never match any real filename.
+    _SEP_COLLAPSE_RX = re.compile(r"(?:\\ |_|\\-)+")
+    _SEP_REPL = r"[\\s_\\-]+"
+
+    def _collapse(s: str) -> str:
+        return _SEP_COLLAPSE_RX.sub(_SEP_REPL, s)
+
+    parts: list[str] = []
+    last = 0
+    for s, e, r in chosen:
+        if s > last:
+            parts.append(_collapse(re.escape(stem[last:s])))
+        parts.append(r)
+        last = e
+    if last < len(stem):
+        parts.append(_collapse(re.escape(stem[last:])))
+    body = "".join(parts) if parts else _collapse(re.escape(stem))
+    # Cross-match year+version pairs: a pattern derived from
+    # "...2026 V3.xlsx" (with space) should also match "...2026V3.xlsx"
+    # (Vizo IDLR sometimes drops the separator on new-quarter refresh
+    # drops). Rewrite ``20\d{2}[\s_\-]+[Vv]\d{1,2}`` and
+    # ``20\d{2}[Vv]\d{1,2}`` to a common ``20\d{2}[\s_\-]*[Vv]\d{1,2}``
+    # so patterns derived from EITHER shape match BOTH.
+    body = re.sub(
+        r"20\\d\{2\}(?:\[\\s_\\\-\]\+)?\[Vv\]\\d\{1,2\}",
+        r"20\\d{2}[\\s_\\-]*[Vv]\\d{1,2}",
+        body,
+    )
+    # Tolerate a trailing copy suffix like " (1)" that Windows / Egnyte / a
+    # browser append to duplicate downloads (e.g. a sample named
+    # "2025.05.31 Loan ARIES.xlsx" whose re-drop lands as
+    # "2025.05.31 Loan ARIES (1).xlsx"). Without this, that month's file
+    # silently fails the importer's file_pattern gate and is skipped.
+    return f"(?i)^{body}(?:\\s*\\(\\d+\\))?\\.{ext_part}$"
 
 
 def guess_filename_patterns(filename: str) -> dict[str, str]:
@@ -124,21 +784,21 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
 
     Returns a dict with ``file_pattern``, ``date_pattern`` and ``date_format``
     (one of ``"YYYY-MM"``, ``"MMDDYY"`` — the formats ``import_data`` knows).
+
+    The emitted ``file_pattern`` wildcards month names, 4-digit years,
+    YYYY-MM and MM-YYYY tokens so that next month's drop of the same
+    file still matches without regenerating the YAML.
     """
     p = Path(filename)
     stem = p.stem
     ext = p.suffix.lower().lstrip(".")
-    # File pattern: keep the leading alphabetic prefix, allow .* in the middle,
-    # accept either xlsx/xls if Excel, otherwise the file's own extension.
-    prefix_match = re.match(r"^([A-Za-z][A-Za-z0-9]*)", stem)
-    prefix = prefix_match.group(1) if prefix_match else stem
     if ext in {"xlsx", "xls"}:
         ext_part = r"(xlsx|xls)"
     elif ext == "csv":
         ext_part = "csv"
     else:
         ext_part = ext or r"(xlsx|xls|csv)"
-    file_pattern = f"{re.escape(prefix)}.*\\.{ext_part}$"
+    file_pattern = _generalize_filename_pattern(stem, ext_part)
 
     # Date pattern: scan filename for the first candidate that matches AND
     # produces a sensible month (1-12). Default = YYYY-MM with YYYY-MM format.
@@ -147,6 +807,13 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
     for desc, rx in _DATE_RX_CANDIDATES:
         m = re.search(rx, stem)
         if not m:
+            continue
+        # Month-name + 2-digit year is only trustworthy when NO 4-digit
+        # year appears in the name — otherwise a "Month DD YYYY" filename
+        # would have its day misread as a 2-digit year (e.g. "March 15
+        # 2025" -> "15"). Skip Mon_YY in that case and let a later /
+        # numeric candidate win.
+        if desc == "Mon_YY" and re.search(r"20\d{2}", stem):
             continue
         # Validate the match implies a real month-of-year, so we don't
         # save a regex that will explode at import time. Month-name forms
@@ -159,21 +826,39 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
             except (ValueError, IndexError):
                 continue
         elif desc.startswith(("MM-DD-YYYY", "MM_DD_YYYY", "MMDDYYYY",
+                              "MM-DD-YY", "MM_DD_YY",
                               "MM-YYYY", "MMDDYY")):
             try:
                 if not 1 <= int(m.group(1)) <= 12:
                     continue
             except (ValueError, IndexError):
                 continue
+        elif desc == "YYYYQ":
+            try:
+                if not 1 <= int(m.group(2)) <= 4:
+                    continue
+            except (ValueError, IndexError):
+                continue
+        elif desc == "QYYYY":
+            try:
+                if not 1 <= int(m.group(1)) <= 4:
+                    continue
+            except (ValueError, IndexError):
+                continue
         date_pattern = rx
         # Pick the date_format extract_snapshot_date expects. Month-first
         # 3-group patterns use 'MMDDYY' (it handles 2- or 4-digit years).
-        if desc in ("MM-DD-YYYY", "MM_DD_YYYY", "MMDDYYYY", "MMDDYY"):
+        if desc in ("MM-DD-YYYY", "MM_DD_YYYY", "MMDDYYYY",
+                    "MM-DD-YY", "MM_DD_YY", "MMDDYY"):
             date_format = "MMDDYY"
         elif desc in ("YYYY-MM-DD", "YYYY_MM_DD", "YYYYMMDD"):
             date_format = "YYYYMMDD"
         elif desc == "MM-YYYY":
             date_format = "MMYYYY"
+        elif desc == "YYYYQ":
+            date_format = "YYYYQ"
+        elif desc == "QYYYY":
+            date_format = "QYYYY"
         else:
             date_format = "YYYY-MM"
         break
@@ -187,7 +872,16 @@ def guess_filename_patterns(filename: str) -> dict[str, str]:
 def _looks_numeric(val: Any) -> bool:
     if val is None:
         return False
+    if isinstance(val, bool):
+        return False
     if isinstance(val, (int, float)):
+        # NaN is a float but not a "real" numeric value for header detection.
+        try:
+            import math
+            if isinstance(val, float) and math.isnan(val):
+                return False
+        except Exception:  # noqa: BLE001
+            pass
         return True
     s = str(val).strip().replace(",", "").replace("$", "").replace("(", "-").replace(")", "")
     if not s:
@@ -208,7 +902,22 @@ def _detect_has_header(df_no_header: "pd.DataFrame") -> bool:
     row1 = df_no_header.iloc[1].tolist()
     text_score_0 = sum(1 for v in row0 if v is not None and not _looks_numeric(v))
     num_score_1  = sum(1 for v in row1 if _looks_numeric(v))
-    return text_score_0 >= max(2, len(row0) // 2) and num_score_1 >= max(2, len(row1) // 2)
+    if text_score_0 >= max(2, len(row0) // 2) and num_score_1 >= max(2, len(row1) // 2):
+        return True
+    # Strong signal: row 0 has many short-string identifier-like cells AND
+    # zero numeric cells (typical AIRES / Symitar header rows). Row 1 just
+    # needs to have at least a couple of numeric cells anywhere — even text-
+    # heavy data rows usually carry balance/score/term numbers somewhere.
+    if num_score_1 >= 2:
+        row0_numeric = sum(1 for v in row0 if v is not None and _looks_numeric(v))
+        row0_strings = sum(1 for v in row0
+                           if v is not None
+                           and not _looks_numeric(v)
+                           and isinstance(v, str)
+                           and v.strip())
+        if row0_numeric == 0 and row0_strings >= 5:
+            return True
+    return False
 
 
 # ---------- Main entry ----------
@@ -261,10 +970,10 @@ def extract_pool_codes(
     if has_header:
         hdr_idx = max(0, (header_row or 1) - 1)
         headers = [
-            str(h).strip() if h is not None and str(h).strip()
-            else f"col_{_excel_col_letter(i)}"
+            _clean_header(h, i)
             for i, h in enumerate(raw.iloc[hdr_idx].tolist())
         ]
+        headers = _dedupe_headers(headers)
         body = raw.iloc[hdr_idx + 1:].reset_index(drop=True)
     else:
         headers = [f"col_{_excel_col_letter(i)}" for i in range(raw.shape[1])]
@@ -316,10 +1025,44 @@ def _score_header(header: str, keywords: tuple[str, ...]) -> int:
     return 0
 
 
+def _read_row_cells(file_path: str | Path, row_1based: int) -> list[str]:
+    """Return the raw cell values of ``row_1based`` (1-based) from
+    an .xlsx/.xls/.csv file as cleaned strings. Trailing empties are
+    trimmed; embedded blanks are preserved. Returns ``[]`` on any
+    parsing error or when the row is out of range."""
+    p = Path(file_path)
+    suffix = p.suffix.lower()
+    try:
+        import pandas as pd
+        if suffix in {".xlsx", ".xls"}:
+            raw = pd.read_excel(p, header=None, dtype=object,
+                                nrows=row_1based)
+        elif suffix == ".csv":
+            raw = pd.read_csv(p, header=None, dtype=object,
+                              keep_default_na=False, nrows=row_1based)
+        else:
+            return []
+        idx = row_1based - 1
+        if idx < 0 or idx >= len(raw):
+            return []
+        cells = [
+            "" if v is None or str(v).strip().lower() == "nan"
+            else str(v).strip()
+            for v in raw.iloc[idx].tolist()
+        ]
+        # Strip trailing blanks
+        while cells and cells[-1] == "":
+            cells.pop()
+        return cells
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def parse_pool_map_file(
     file_path: str | Path,
     code_col: str | None = None,
     name_col: str | None = None,
+    header_row: int | None = None,
 ) -> dict[str, Any]:
     """Read an uploaded loan-code -> pool-name map file (xlsx/csv).
 
@@ -338,25 +1081,69 @@ def parse_pool_map_file(
     """
     path = Path(file_path)
     suffix = path.suffix.lower()
+    # Convert 1-based header_row from caller to pandas' 0-based index;
+    # ``None`` means auto-detect.
+    hdr_idx: int | None
+    if header_row is None or header_row <= 0:
+        hdr_idx = None
+    else:
+        hdr_idx = int(header_row) - 1
+
     if suffix in {".xlsx", ".xls"}:
         import pandas as pd
-        df = pd.read_excel(path, dtype=object)
+        if hdr_idx is None:
+            # Read the first ~25 rows raw; pick the row with the most
+            # non-empty string cells as the header row.
+            raw = pd.read_excel(path, header=None, dtype=object, nrows=25)
+            best_row = 0
+            best_score = -1
+            for i in range(len(raw)):
+                row = raw.iloc[i]
+                score = sum(
+                    1 for v in row
+                    if v is not None
+                    and str(v).strip() != ""
+                    and str(v).strip().lower() != "nan"
+                )
+                if score > best_score:
+                    best_score = score
+                    best_row = i
+            hdr_idx = best_row
+        df = pd.read_excel(path, header=hdr_idx, dtype=object)
     elif suffix == ".csv":
         import pandas as pd
-        df = pd.read_csv(path, dtype=object, keep_default_na=False)
+        if hdr_idx is None:
+            raw = pd.read_csv(path, header=None, dtype=object,
+                              keep_default_na=False, nrows=25)
+            best_row = 0
+            best_score = -1
+            for i in range(len(raw)):
+                row = raw.iloc[i]
+                score = sum(
+                    1 for v in row
+                    if v is not None and str(v).strip() != ""
+                )
+                if score > best_score:
+                    best_score = score
+                    best_row = i
+            hdr_idx = best_row
+        df = pd.read_csv(path, header=hdr_idx, dtype=object,
+                         keep_default_na=False)
     else:
         raise ValueError(
             f"Unsupported pool-map file type '{suffix}'. "
             "Please upload an .xlsx, .xls, or .csv file."
         )
 
-    if df.empty or df.shape[1] < 2:
+    if df.shape[1] < 2:
         raise ValueError(
             "Pool-map file must have at least two columns "
             "(loan code and pool name)."
         )
 
-    headers = [str(h).strip() for h in df.columns.tolist()]
+    headers = [_clean_header(h, i) for i, h in enumerate(df.columns.tolist())]
+    headers = _dedupe_headers(headers)
+    df.columns = headers
 
     # Pick columns
     if code_col and code_col in headers:
@@ -400,6 +1187,7 @@ def parse_pool_map_file(
         "headers": headers,
         "code_column": code_h,
         "name_column": name_h,
+        "header_row": (hdr_idx + 1) if hdr_idx is not None else 1,
         "rows": rows,
         "row_count": len(rows),
     }
@@ -411,6 +1199,7 @@ def analyse_sample_file(
     max_pool_codes: int = 40,
     sample_rows: int = 5,
     header_row: int | None = None,
+    split_char: str | None = "/",
 ) -> dict[str, Any]:
     """Parse the uploaded sample and return wizard suggestions.
 
@@ -441,7 +1230,44 @@ def analyse_sample_file(
             raw = pd.read_excel(path, header=None, dtype=object)
         elif suffix == ".csv":
             import pandas as pd  # deferred: pandas cold-import is slow on network drives
-            raw = pd.read_csv(path, header=None, dtype=object, keep_default_na=False)
+            # Sniff a few bytes for BOM / common Windows credit-union CSV encodings.
+            # AIRES-style exports are sometimes UTF-16 LE (BOM ff fe) or Windows-1252.
+            try:
+                with open(path, "rb") as fh:
+                    head = fh.read(4)
+            except Exception:
+                head = b""
+            encodings_to_try: list[str | None] = []
+            if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
+                encodings_to_try = ["utf-16", "utf-8-sig", "cp1252", "latin-1"]
+            elif head.startswith(b"\xef\xbb\xbf"):
+                encodings_to_try = ["utf-8-sig", "cp1252", "latin-1"]
+            else:
+                encodings_to_try = [None, "utf-8-sig", "cp1252", "latin-1"]
+            # Auto-detect separator (handles tab-delimited .csv exports too).
+            last_exc: Exception | None = None
+            raw = None
+            for enc in encodings_to_try:
+                for sep in (None, ",", "\t", ";", "|"):
+                    try:
+                        raw = pd.read_csv(
+                            path,
+                            header=None,
+                            dtype=object,
+                            keep_default_na=False,
+                            encoding=enc,
+                            sep=sep,
+                            engine="python" if sep is None else "c",
+                        )
+                        last_exc = None
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_exc = exc
+                        continue
+                if raw is not None:
+                    break
+            if raw is None:
+                raise last_exc if last_exc else RuntimeError("Could not parse CSV")
         else:
             return {"ok": False, "error": f"Unsupported file type: {suffix}"}
     except Exception as exc:  # noqa: BLE001
@@ -459,10 +1285,10 @@ def analyse_sample_file(
             hdr_idx = min(header_row - 1, len(raw) - 1)
         header_row_used = hdr_idx + 1
         headers = [
-            str(h).strip() if h is not None and str(h).strip()
-            else f"col_{_excel_col_letter(i)}"
+            _clean_header(h, i)
             for i, h in enumerate(raw.iloc[hdr_idx].tolist())
         ]
+        headers = _dedupe_headers(headers)
         body = raw.iloc[hdr_idx + 1:].reset_index(drop=True)
         body.columns = headers
     else:
@@ -473,7 +1299,13 @@ def analyse_sample_file(
     # Column suggestions
     col_sugg = _match_columns(headers)
 
-    # Pool-code suggestions: distinct values from the pool column, if found
+    # Pool-code suggestions: distinct values from the pool column, if found.
+    # Phase 9.26: ``split_char`` (passed by the caller, default ``"/"``) gates
+    # the prefix-extraction step. Symitar/Episys-style codes ``11/New Car``
+    # need ``"/"`` so the seed becomes ``"11"``; CUMA mortgage codes like
+    # ``15/15 ARM`` need ``split_char=""`` (or ``None``) so the full label
+    # ``"15/15 ARM"`` survives — otherwise the seeded ``"15"`` collides with
+    # any future Symitar loan code 15.
     pool_codes: list[str] = []
     pool_col = col_sugg.get("loan_pool_code")
     if pool_col and pool_col in body.columns:
@@ -482,8 +1314,8 @@ def analyse_sample_file(
             code = _clean_code(raw_val)
             if not code:
                 continue
-            if "/" in code:
-                code = _clean_code(code.split("/")[0])
+            if split_char and split_char in code:
+                code = _clean_code(code.split(split_char)[0])
             if not code or code in seen:
                 continue
             seen.add(code)
@@ -502,6 +1334,45 @@ def analyse_sample_file(
 
     fname_guesses = guess_filename_patterns(original_filename)
 
+    # Member/account layout inference: peek at the column heuristically
+    # picked as the member-number column. Falls back gracefully when no
+    # such column was detected.
+    ma_suggestion: dict[str, Any] | None = None
+    member_col = col_sugg.get("member_number")
+    if member_col and member_col in body.columns:
+        try:
+            ma_suggestion = infer_member_account_from_values(
+                body[member_col].head(60).tolist()
+            )
+        except Exception:  # noqa: BLE001
+            ma_suggestion = None
+        # Refine the suffix WIDTH via member-name grouping when the account
+        # column is bare digits (fixed_suffix territory). This recovers cases
+        # like WSSC where each account is ``<member><2-digit loan suffix>`` but
+        # the values alone look like plain member numbers (variable length ->
+        # account-only heuristic guesses suffix_length=0). Skipped for
+        # delimiter-mode columns, where the suffix is already unambiguous.
+        try:
+            if ma_suggestion is None or ma_suggestion.get("mode") == "fixed_suffix":
+                name_col = find_member_name_column(headers, body)
+                if name_col and name_col != member_col:
+                    name_based = detect_suffix_from_name_groups(
+                        body[member_col].tolist(),
+                        body[name_col].tolist(),
+                    )
+                    if name_based and name_based["suffix_length"] > 0:
+                        ma_suggestion = {
+                            "mode": "fixed_suffix",
+                            "delimiter": (ma_suggestion or {}).get("delimiter", "-"),
+                            "suffix_length": name_based["suffix_length"],
+                            "confidence": name_based["confidence"],
+                            "rationale": (
+                                "Member-name grouping: " + name_based["rationale"]
+                            ),
+                        }
+        except Exception:  # noqa: BLE001
+            pass
+
     return {
         "ok": True,
         "error": None,
@@ -509,6 +1380,7 @@ def analyse_sample_file(
         "saved_path": str(path),
         "file_pattern": fname_guesses["file_pattern"],
         "date_pattern": fname_guesses["date_pattern"],
+        "date_format": fname_guesses.get("date_format", "YYYY-MM"),
         "has_header": has_header,
         "header_row": header_row_used,
         "row_count_total": int(len(raw)),
@@ -516,4 +1388,5 @@ def analyse_sample_file(
         "sample_rows": preview,
         "column_suggestions": col_sugg,
         "pool_code_suggestions": pool_codes,
+        "member_account_suggestion": ma_suggestion,
     }

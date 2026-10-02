@@ -23,6 +23,7 @@ from cecl_ui.services.solr_5300_backfill import (
     _coerce_number,
     expected_quarter_ends,
     fetch_solr_doc,
+    load_canonical_map as load_balance_canonical_map,
 )
 
 
@@ -138,6 +139,25 @@ def backfill_missing_delinquency_quarters(
         )
         return out
 
+    # Safety probe: confirm Solr is reachable BEFORE the purge so we
+    # don't wipe the user's existing DQ history when Solr is down. A
+    # single fetch against the target period is cheap; if it raises a
+    # connection error we abort cleanly leaving the table intact.
+    try:
+        _probe_qe = expected_quarter_ends(target_period, 3)
+        if _probe_qe:
+            fetch_solr_doc(
+                solr_url, core, int(charter), _probe_qe[0],
+                username=username, password=password,
+            )
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = (
+            f"Solr probe failed before purge — aborting to preserve "
+            f"existing DQ rows. Start the Solr server and retry. "
+            f"({type(exc).__name__}: {exc})"
+        )
+        return out
+
     # Cleanup: drop ALL rows previously written by this backfill for
     # this cu, regardless of date or loan_code. Scoped strictly to
     # ``source LIKE '5300DQ:%'`` so user-uploaded extracts (which use
@@ -171,6 +191,29 @@ def backfill_missing_delinquency_quarters(
         existing = set(existing_dates or [])
     seen_codes: set[str] = set()
 
+    # Phase 9.30: also populate total_balance per NCUA loan_code using
+    # the parallel BALANCE canonical map. Each DQ loan_code has a
+    # corresponding balance field in ncua_5300_loan_codes.csv keyed
+    # by the SAME canonical label. Storing the per-code balance lets
+    # the DQ overlay (generate_report._load_dq_history_from_db)
+    # aggregate balances LIVE per current pool_map, matching how it
+    # already aggregates dq_amount. Without this the balance side
+    # stayed frozen at the value the 5300-distributed backfill wrote
+    # at the time the user's pool_map was last snapshotted, producing
+    # nonsensical DQ% (e.g. 357% for Real Estate) when the user
+    # subsequently re-maps additional NCUA codes into a pool.
+    try:
+        bmap = load_balance_canonical_map()
+    except Exception:  # noqa: BLE001
+        bmap = []
+    bal_fields_by_code: dict[str, list[str]] = {}
+    for bentry in bmap:
+        bcode = (bentry.get("loan_code") or "").strip()
+        bfc = (bentry.get("field_code") or "").strip()
+        if not bcode or not bfc:
+            continue
+        bal_fields_by_code.setdefault(bcode, []).append(bfc)
+
     for qe in sorted(quarter_ends):
         if not overwrite and qe in existing:
             out["months_skipped"].append({
@@ -203,11 +246,23 @@ def backfill_missing_delinquency_quarters(
             by_code[code] = by_code.get(code, 0.0) + val
             seen_codes.add(code)
 
+        # Phase 9.30: parallel balance aggregation per loan_code from
+        # the SAME Solr doc using ncua_5300_loan_codes.csv mapping.
+        bal_by_code: dict[str, float] = {}
+        for code in by_code:
+            bfields = bal_fields_by_code.get(code, [])
+            if not bfields:
+                continue
+            total = 0.0
+            for bfc in bfields:
+                total += _coerce_number(doc.get(bfc)) if bfc in doc else 0.0
+            bal_by_code[code] = round(total, 2)
+
         rollup_rows = [
             {
                 "loan_code": code,
                 "dq_amount": round(amt, 2),
-                "total_balance": None,
+                "total_balance": bal_by_code.get(code),
                 "dq_pct": None,
             }
             for code, amt in by_code.items()

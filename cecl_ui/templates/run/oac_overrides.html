@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Other Allowance Considerations &mdash; {{ cfg.credit_union }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Other Allowance Considerations &mdash; {{ cfg.credit_union }}</h2>
+  <p class="muted">
+    Override the model's calculated loss rate for data-derived Other
+    Allowance Considerations. Leave a field blank to use the calculated
+    rate. Overrides are written to
+    <code>client_configs/{{ short_name }}.yaml</code> and take effect on the
+    next report run.
+    {% if asof %}
+      <br>Calculated values shown below are from the last report run
+      (as of <strong>{{ asof }}</strong>).
+    {% else %}
+      <br><em>No calculated values yet &mdash; run a report first to see the
+      model's rate, then come back to override it.</em>
+    {% endif %}
+  </p>
+  <p>
+    <a class="btn btn-secondary" href="{{ url_for('run.client_dashboard', short_name=short_name) }}">
+      &larr; Back to dashboard
+    </a>
+  </p>
+</div>
+
+{% if not has_data_derived %}
+<div class="card">
+  <p><em>This credit union has no data-derived Other Allowance
+  Considerations (Negative Share Provision or Unfunded Commitments)
+  configured. Add them on the setup wizard's Management Adjustments
+  step.</em></p>
+</div>
+{% else %}
+<form method="post">
+
+  {% if ns_rows %}
+  <div class="card">
+    <h3>Negative Share Provision</h3>
+    <p class="muted">
+      Calculated rate = trailing {{ ns_rows[0].life_of_loan_months }}-month net
+      charge-offs &divide; current negative-share balance.
+    </p>
+    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr style="background:#eef; text-align:left;">
+          <th style="padding:6px 8px;">Provision</th>
+          <th style="padding:6px 8px; text-align:right;">Balance</th>
+          <th style="padding:6px 8px; text-align:right;">Calculated Rate</th>
+          <th style="padding:6px 8px;">Override Rate (%)</th>
+          <th style="padding:6px 8px; text-align:right;">Applied Rate</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in ns_rows %}
+        <tr style="border-bottom:1px solid #eee;">
+          <td style="padding:6px 8px;">{{ row.title }}</td>
+          <td style="padding:6px 8px; text-align:right;">
+            {% if row.calc.balance is not none %}${{ '%.2f'|format(row.calc.balance) }}{% else %}&mdash;{% endif %}
+          </td>
+          <td style="padding:6px 8px; text-align:right;">
+            {% if row.calc.calculated_percentage is not none %}{{ '%.4f'|format(row.calc.calculated_percentage) }}%{% else %}&mdash;{% endif %}
+          </td>
+          <td style="padding:6px 8px;">
+            <input type="number" step="any" min="0" name="ns_override__{{ row.idx }}"
+                   value="{{ '%.4f'|format(row.override) if row.override is not none else '' }}"
+                   placeholder="auto" style="width:110px; text-align:right;"> %
+          </td>
+          <td style="padding:6px 8px; text-align:right;">
+            {% if row.override is not none %}
+              <strong>{{ '%.4f'|format(row.override) }}%</strong>
+            {% elif row.calc.calculated_percentage is not none %}
+              {{ '%.4f'|format(row.calc.calculated_percentage) }}%
+            {% else %}&mdash;{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% for grp in unf_rows %}
+  <div class="card">
+    <h3>{{ grp.base_title }}</h3>
+    <p class="muted">
+      Undrawn credit (Credit Limit &minus; Current Balance) for loan type
+      code(s) <code>{{ grp.codes | join(', ') }}</code>, grouped by pool.
+      Calculated rate = each pool's ACL loss rate.
+    </p>
+    {% if not grp.pools %}
+      <p><em>No pools resolved for these codes yet.</em></p>
+    {% else %}
+    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+      <thead>
+        <tr style="background:#eef; text-align:left;">
+          <th style="padding:6px 8px;">Pool</th>
+          <th style="padding:6px 8px; text-align:right;">Undrawn Balance</th>
+          <th style="padding:6px 8px; text-align:right;">Calculated Rate</th>
+          <th style="padding:6px 8px;">Override Rate (%)</th>
+          <th style="padding:6px 8px; text-align:right;">Applied Rate</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in grp.pools %}
+        <tr style="border-bottom:1px solid #eee;">
+          <td style="padding:6px 8px;">{{ p.pool }}</td>
+          <td style="padding:6px 8px; text-align:right;">
+            {% if p.calc.balance is not none %}${{ '%.2f'|format(p.calc.balance) }}{% else %}&mdash;{% endif %}
+          </td>
+          <td style="padding:6px 8px; text-align:right;">
+            {% if p.calc.calculated_percentage is not none %}{{ '%.4f'|format(p.calc.calculated_percentage) }}%{% else %}&mdash;{% endif %}
+          </td>
+          <td style="padding:6px 8px;">
+            <input type="number" step="any" min="0" name="uc_override__{{ grp.idx }}__{{ p.j }}"
+                   value="{{ '%.4f'|format(p.override) if p.override is not none else '' }}"
+                   placeholder="auto" style="width:110px; text-align:right;"> %
+          </td>
+          <td style="padding:6px 8px; text-align:right;">
+            {% if p.override is not none %}
+              <strong>{{ '%.4f'|format(p.override) }}%</strong>
+            {% elif p.calc.calculated_percentage is not none %}
+              {{ '%.4f'|format(p.calc.calculated_percentage) }}%
+            {% else %}&mdash;{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <div class="card">
+    <button class="btn btn-primary" type="submit">Save Overrides</button>
+    <span class="muted" style="margin-left:10px;">
+      Blank = use the calculated rate. Re-run the report to apply.
+    </span>
+  </div>
+</form>
+{% endif %}
+
+{% if static_rows %}
+<div class="card">
+  <h3>Manual Other Allowance Considerations</h3>
+  <p class="muted">
+    These fixed entries are edited on the setup wizard's Management
+    Adjustments step (not overridable here).
+  </p>
+  <table style="width:100%; border-collapse:collapse; font-size:13px;">
+    <thead>
+      <tr style="background:#eef; text-align:left;">
+        <th style="padding:6px 8px;">Title</th>
+        <th style="padding:6px 8px; text-align:right;">Balance</th>
+        <th style="padding:6px 8px; text-align:right;">Rate</th>
+        <th style="padding:6px 8px; text-align:right;">Allowance</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in static_rows %}
+      <tr style="border-bottom:1px solid #eee;">
+        <td style="padding:6px 8px;">{{ row.title }}</td>
+        <td style="padding:6px 8px; text-align:right;">${{ '%.2f'|format(row.balance or 0) }}</td>
+        <td style="padding:6px 8px; text-align:right;">{{ '%.4f'|format(row.percentage or 0) }}%</td>
+        <td style="padding:6px 8px; text-align:right;">${{ '%.2f'|format(row.amount or 0) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

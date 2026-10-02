@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Upload Impaired Loans &mdash; {{ credit_union }}{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Upload Impaired Loans Report</h2>
+  <p class="muted">
+    {{ credit_union }} &mdash; upload the credit union's completed
+    <code>CECL-SCALE Impaired Loans.xlsx</code> workbook (sheet
+    &ldquo;&nbsp;Impaired Loans ASC 310-10&rdquo;). The file is saved to
+    this CU's SCALE wizard draft so it becomes the authoritative impaired
+    list re-used on every future report run &mdash; no need to re-upload it
+    each quarter or re-run the wizard. Pool names and impairment types are
+    standardized across all SCALE credit unions, so no per-CU mapping is
+    required.
+  </p>
+  <p>
+    <a class="btn btn-secondary"
+       href="{{ url_for('scale_runs.cu_dashboard', short_name=short_name) }}">
+      &larr; Back to dashboard
+    </a>
+    <a class="btn btn-secondary"
+       href="{{ url_for('scale_runs.edit_settings', short_name=short_name) }}">
+      Edit Mgmt-Adj / ACL Months
+    </a>
+  </p>
+
+  <form method="post" enctype="multipart/form-data" style="margin-top:14px;">
+    <h3 style="margin-top:6px;">Impaired Loans workbook</h3>
+    <label for="impaired_file"><strong>Choose file</strong> (.xlsx / .xlsm)</label>
+    <input id="impaired_file" type="file" name="impaired_file"
+           accept=".xlsx,.xlsm" required>
+    <div style="margin-top:18px; display:flex; gap:12px; align-items:center;">
+      <button class="btn btn-success" type="submit" name="action" value="upload">
+        Upload &amp; Parse
+      </button>
+      {% if imp.get('saved_path') %}
+        <button class="btn btn-secondary" type="submit" name="action" value="clear"
+                onclick="return confirm('Clear the impaired loans file saved for this CU?');">
+          Clear saved file
+        </button>
+      {% endif %}
+    </div>
+  </form>
+</div>
+
+{% if imp.get('saved_path') %}
+  <div class="card">
+    <h3 style="margin-top:0;">Impaired Loans Verification</h3>
+    <div style="padding:10px 14px; border:1px solid #c9d6e8; background:#f4f8ff; border-radius:6px;">
+      <div><strong>File:</strong> {{ imp.get('uploaded_filename') or '(unknown)' }}</div>
+      <div class="muted" style="font-size:0.9em;">Saved to:
+        <code>{{ imp.get('saved_path') }}</code></div>
+      {% if parsed.get('ok') %}
+        <div style="margin-top:6px;">
+          <strong>Sheet:</strong> <code>{{ parsed.get('sheet_used') }}</code>
+          &nbsp;&middot;&nbsp;
+          <strong>CU:</strong> {{ parsed.get('cu_name') or '(blank)' }}
+          &nbsp;&middot;&nbsp;
+          <strong>Period:</strong> {{ parsed.get('period') or '(blank)' }}
+        </div>
+      {% else %}
+        <div style="color:#a40000; margin-top:6px;">
+          <strong>Parse failed:</strong> {{ parsed.get('error') or 'Unknown error.' }}
+        </div>
+      {% endif %}
+    </div>
+
+    {% if parsed.get('ok') %}
+      <div style="display:flex; gap:24px; margin:14px 0; flex-wrap:wrap;">
+        <div>
+          <span class="muted">Impaired loans:</span>
+          <strong>{{ parsed.get('row_count', 0) }}</strong>
+        </div>
+        <div>
+          <span class="muted">Total Current Balance:</span>
+          <strong>${{ "{:,.2f}".format(parsed.get('total_balance', 0)) }}</strong>
+        </div>
+      </div>
+    {% endif %}
+
+    {% if preview %}
+      <h4 style="margin:6px 0;">Preview (first {{ preview|length }} of
+        {{ parsed.get('row_count', 0) }})</h4>
+      <div style="overflow-x:auto;">
+        <table class="data-table" style="font-size:0.88em;">
+          <thead>
+            <tr>
+              <th>Impairment Type</th>
+              <th>Member-Suffix</th>
+              <th>Loan Pool</th>
+              <th style="text-align:right;">Current Balance</th>
+              <th style="text-align:right;">Days DQ</th>
+              <th style="text-align:right;">Collateral</th>
+              <th style="text-align:right;">Allowance</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in preview %}
+              <tr>
+                <td>{{ r.impairment_type }}</td>
+                <td>{{ r.member_suffix }}</td>
+                <td>{{ r.loan_pool }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(r.current_balance or 0) }}</td>
+                <td style="text-align:right;">{{ (r.days_delinquent or 0)|int }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(r.collateral_value or 0) }}</td>
+                <td style="text-align:right;">${{ "{:,.2f}".format(r.allowance_provided or 0) }}</td>
+                <td>{{ r.notes }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </div>
+{% else %}
+  <div class="card">
+    <p class="muted" style="margin:0;">
+      No impaired-loans file is saved for this CU yet. Upload one above,
+      or report runs will proceed with zero impaired loans.
+    </p>
+  </div>
+{% endif %}
+{% endblock %}

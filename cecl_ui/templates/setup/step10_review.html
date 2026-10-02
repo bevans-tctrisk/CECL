@@ -15,6 +15,14 @@
       <ul style="margin:6px 0 0 18px;">
         {% for w in warnings %}<li>{{ w }}</li>{% endfor %}
       </ul>
+      {% if summary.unnamed_pool_codes %}
+        <p style="margin:8px 0 0 0;">
+          <a class="btn btn-secondary"
+             href="{{ url_for('setup.step4_pools') }}#unmapped-row">
+            Jump to unmapped code &rarr;
+          </a>
+        </p>
+      {% endif %}
     </div>
   {% endif %}
 
@@ -146,6 +154,17 @@
             {{ summary.selected_reports|join(' · ') }}
           {% else %}
             <span class="muted">— none selected —</span>
+          {% endif %}
+          <a class="muted" style="float:right;" href="/setup/step/reports">Edit</a>
+        </td>
+      </tr>
+      <tr>
+        <th style="text-align:left;">Report output folder</th>
+        <td>
+          {% if summary.report_output_folder %}
+            <code>{{ summary.report_output_folder }}</code>
+          {% else %}
+            <span class="muted">— shared Reports folder —</span>
           {% endif %}
           <a class="muted" style="float:right;" href="/setup/step/reports">Edit</a>
         </td>

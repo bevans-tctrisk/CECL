@@ -28,6 +28,10 @@ import argparse
 SERVICE_NAME = 'CECL_Migration_DB'
 CREDENTIAL_KEY = 'DATABASE_URL'
 
+# Anthropic API key — used by the hybrid report router's AI-escalation stage.
+ANTHROPIC_SERVICE_NAME = 'CECL_Anthropic'
+ANTHROPIC_CREDENTIAL_KEY = 'ANTHROPIC_API_KEY'
+
 
 def _keyring_available():
     try:
@@ -72,6 +76,35 @@ def get_database_url():
         "  1) Store it in Windows Credential Manager:  python cecl_credentials.py --store\n"
         "  2) Set it in a .env file:  DATABASE_URL=postgresql://..."
     )
+
+
+def get_anthropic_api_key():
+    """Retrieve the Anthropic API key, or ``None`` when not configured.
+
+    Mirrors :func:`get_database_url` — Windows Credential Manager first, then
+    the ``ANTHROPIC_API_KEY`` environment variable (honoring
+    ``CECL_WORKSPACE_ROOT/.env`` and the historical layout).  Unlike the DB
+    URL this returns ``None`` instead of raising, so the hybrid router can
+    degrade gracefully to local-only validation when no key is present.
+    """
+    # 1) Windows Credential Manager via keyring.
+    if _keyring_available():
+        import keyring
+        stored = keyring.get_password(
+            ANTHROPIC_SERVICE_NAME, ANTHROPIC_CREDENTIAL_KEY
+        )
+        if stored:
+            return stored
+
+    # 2) Environment / .env fallback.
+    from dotenv import load_dotenv
+    workspace_root = os.environ.get('CECL_WORKSPACE_ROOT', '').strip()
+    if workspace_root:
+        candidate = os.path.join(workspace_root, '.env')
+        if os.path.isfile(candidate):
+            load_dotenv(candidate)
+    load_dotenv()
+    return os.getenv('ANTHROPIC_API_KEY') or None
 
 
 def store_credential(url=None):

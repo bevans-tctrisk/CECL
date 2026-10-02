@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Historical Loan Balances — {{ cu }}{% endblock %}
+{% block body %}
+<section class="page hist-trends">
+
+  <header class="rpt-header">
+    <div class="rpt-cu">{{ cu }}</div>
+    <div class="rpt-subhead">{{ title }}</div>
+    <div class="rpt-subhead">{{ heading }}</div>
+  </header>
+
+  <div class="trend-charts">
+    {% for svg in charts %}<div class="trend-cell">{{ svg | safe }}</div>{% endfor %}
+  </div>
+
+</section>
+{% endblock %}

@@ -5,7 +5,7 @@
 
 <h2 style="margin-top:0;">Historical Delinquency (DQ&nbsp;%)</h2>
 <p class="muted" style="margin-top:0;">
-  Build a historical delinquent-balance series for each loan pool. Three
+  Build a historical delinquent-balance series for each loan pool. Four
   sources are available &mdash; you can use any combination. The report
   engine prefers DB rows over the WARM-derived defaults.
 </p>
@@ -124,12 +124,70 @@
 </details>
 
 {# ===================================================================
-   Source B: 5300 backfill via Solr
+   Source B: Backfill from WARM workbook (Charge off History tab)
    =================================================================== #}
-<details {% if not extract_files %}open{% endif %}
+{% set warm = state.get('warm') or {} %}
+<details {% if warm.get('saved_path') %}open{% endif %}
          style="margin-top:14px; padding:10px 12px; border:1px solid #cdd;
                 border-radius:6px;">
-  <summary><strong>B. Backfill from 5300 reports (Solr)</strong></summary>
+  <summary><strong>B. Backfill from WARM workbook</strong></summary>
+  <p class="muted">
+    Reads the per-pool monthly DQ % from the
+    <code>Charge off History</code> tab of the attached WARM workbook
+    (4th section, header <code>DQ %</code>). Each cell becomes one row in
+    <code>loan_code_delinquency_history</code> with
+    <code>source = "WARM:&lt;filename&gt;"</code>. Re-running replaces
+    only the prior WARM rows &mdash; rows from extracts, 5300, or manual
+    entry are left alone.
+  </p>
+
+  {% if warm.get('saved_path') %}
+    <p>
+      WARM file:
+      <code>{{ warm.get('filename') or warm.get('saved_path') }}</code>
+    </p>
+    <form method="post" style="margin:8px 0;">
+      <input type="hidden" name="action" value="load_warm_dq_history">
+      <button class="btn btn-primary" type="submit">
+        Load DQ % from WARM
+      </button>
+    </form>
+  {% else %}
+    <div class="flash info" style="margin:8px 0;">
+      No WARM workbook is attached to this CU. Re-upload from the Start
+      screen if you have one, or use sources A, C, or D.
+    </div>
+  {% endif %}
+
+  {% set wr = dh.get('last_warm_run') %}
+  {% if wr %}
+  <div style="margin-top:10px; padding:8px 10px; border:1px dashed #bbb;
+              border-radius:4px; background:#fff;">
+    <strong>Last run:</strong>
+    {% if wr.get('ok') %}
+      wrote {{ wr.get('rows_written', 0) }} row(s) from
+      <code>{{ wr.get('sheet') }}</code> &mdash;
+      {{ wr.get('date_columns', 0) }} month(s)
+      &times; {{ wr.get('pool_count', 0) }} pool(s)
+      ({{ wr.get('first_period') }} &rarr; {{ wr.get('last_period') }}).
+      {% if wr.get('source_tag') %}
+        Source tag: <code>{{ wr.source_tag }}</code>.
+      {% endif %}
+    {% else %}
+      <span style="color:#a33;">failed{% if wr.get('error') %} &mdash;
+        {{ wr.get('error') }}{% endif %}</span>
+    {% endif %}
+  </div>
+  {% endif %}
+</details>
+
+{# ===================================================================
+   Source C: 5300 backfill via Solr
+   =================================================================== #}
+<details {% if not extract_files and not (state.get('warm') or {}).get('saved_path') %}open{% endif %}
+         style="margin-top:14px; padding:10px 12px; border:1px solid #cdd;
+                border-radius:6px;">
+  <summary><strong>C. Backfill from 5300 reports (Solr)</strong></summary>
   <p class="muted">
     Pulls the credit union's delinquent balances from the NCUA 5300 call
     report at each quarter-end inside the lookback window. DQ is a
@@ -199,11 +257,11 @@
 </details>
 
 {# ===================================================================
-   Source C: Manual entry
+   Source D: Manual entry
    =================================================================== #}
 <details style="margin-top:14px; padding:10px 12px; border:1px solid #cdd;
                 border-radius:6px;">
-  <summary><strong>C. Enter manually</strong></summary>
+  <summary><strong>D. Enter manually</strong></summary>
   <p class="muted">
     Type a DQ% per loan_code per quarter-end. Values &gt; 1.5 are treated
     as percentages (e.g. <code>3.25</code> &rarr;
@@ -269,18 +327,26 @@
 {# ===================================================================
    Current DB state
    =================================================================== #}
+{# When a Loan Code Mapping is configured, present the rolled-up pool
+   view; otherwise fall back to the raw per-loan-code matrix. The raw
+   ``matrix`` is still used below to drive the unmapped-codes picker. #}
+{% set _dq_display = matrix_pool if (matrix_pool and matrix_pool.row_count) else matrix %}
 <h3 style="margin-top:24px;">Stored history
-  ({{ matrix.row_count }} row{{ '' if matrix.row_count == 1 else 's' }})
+  ({{ _dq_display.row_count }} row{{ '' if _dq_display.row_count == 1 else 's' }})
 </h3>
-{% if matrix.row_count == 0 %}
+{% if _dq_display.row_count == 0 %}
 <p class="muted"><em>No rows yet. Use one of the three sources above.</em></p>
 {% else %}
 <p class="muted" style="margin:4px 0 8px;">
-  <strong>{{ matrix.months | length }}</strong> month(s),
-  <strong>{{ matrix.codes | length }}</strong> loan code(s),
-  <strong>{{ matrix.row_count }}</strong> row(s) stored.
+  <strong>{{ _dq_display.months | length }}</strong> month(s),
+  <strong>{{ _dq_display.codes | length }}</strong>
+  {% if _dq_display._aggregated_by_pool %}pool(s){% else %}loan code(s){% endif %},
+  <strong>{{ _dq_display.row_count }}</strong> row(s) stored.
   Cells show <strong>DQ&nbsp;%</strong>; when only a dollar amount is
   available, the cell shows <code>$amount</code>.
+  {% if _dq_display._aggregated_by_pool %}
+    <span style="margin-left:6px;">Rolled up by mapped pool.</span>
+  {% endif %}
 </p>
 <div style="overflow-x:auto; max-height:520px; overflow-y:auto;
             border:1px solid #ccc; border-radius:4px;">
@@ -291,23 +357,23 @@
     <tr style="position:sticky; top:0; z-index:2; background:#f3f3f3;">
       <th style="position:sticky; left:0; z-index:3; background:#f3f3f3;
                  min-width:110px; text-align:left;">Month</th>
-      {% for c in matrix.codes %}
+      {% for c in _dq_display.codes %}
         <th style="min-width:90px; text-align:right;">
           {{ c }}<br>
           <span class="muted" style="font-weight:400; font-size:0.85em;">
-            {{ (matrix.totals_by_code[c] or {}).get('months', 0) }} mo
+            {{ (_dq_display.totals_by_code[c] or {}).get('months', 0) }} mo
           </span>
         </th>
       {% endfor %}
     </tr>
   </thead>
   <tbody>
-    {% for m in matrix.months %}
-      {% set row = matrix.cells.get(m) or {} %}
+    {% for m in _dq_display.months %}
+      {% set row = _dq_display.cells.get(m) or {} %}
       <tr>
         <td style="position:sticky; left:0; background:#fff;
                    font-weight:600;">{{ m }}</td>
-        {% for c in matrix.codes %}
+        {% for c in _dq_display.codes %}
           {% set cell = row.get(c) %}
           <td style="text-align:right;
                      {% if cell %}background:#f4fff4;{% endif %}">
@@ -329,6 +395,83 @@
   </tbody>
 </table>
 </div>
+{% endif %}
+
+{# ===================================================================
+   Inline NCUA / loan-code -> pool mapping.
+   Loan codes that came from the 5300 backfill (NCUA canonical names like
+   "Used Vehicles", "All Other Unsecured") need to land in a pool just
+   like the user's local CO/Recov codes do. Anything not yet present in
+   state.pool_map shows up here so the user can map it without bouncing
+   back to Step 3 (Loan Code Mapping).
+   =================================================================== #}
+{% if matrix.codes %}
+  {% set lcm_global = state.get('pool_map') or {} %}
+  {% set _dq_resolved = [] %}
+  {% set _dq_unmapped = [] %}
+  {% for c in matrix.codes %}
+    {% set _v = (lcm_global.get(c) or '') | string %}
+    {% if _v and _v.strip() %}
+      {% set _ = _dq_resolved.append(c) %}
+    {% else %}
+      {% set _ = _dq_unmapped.append(c) %}
+    {% endif %}
+  {% endfor %}
+  <div class="muted" style="margin-top:12px; padding:8px; background:#f7f9fc; border:1px solid #e3e7ee; border-radius:4px;">
+    <strong>Loan codes resolved via Step 3 mapping:</strong>
+    {{ _dq_resolved|length }} of {{ matrix.codes|length }}.
+    {% if _dq_unmapped %}
+      <span style="color:#a60;">
+        {{ _dq_unmapped|length }} unmapped code(s) will be excluded from the report:
+      </span>
+      <code>{{ _dq_unmapped|join(', ') }}</code>.
+      <a href="{{ url_for('setup.step4_pools') }}"
+         style="margin-left:6px;">Edit Loan Code Mapping (Step 3) &rarr;</a>
+    {% endif %}
+  </div>
+  {% if _dq_unmapped %}
+    {% set _dq_pool_choices = [] %}
+    {% for p in (state.pool_settings or []) %}
+      {% if p.name and not p.excluded and p.name not in _dq_pool_choices %}
+        {% set _ = _dq_pool_choices.append(p.name) %}
+      {% endif %}
+    {% endfor %}
+    <form method="post" style="margin-top:8px;">
+      <input type="hidden" name="action" value="map_unmapped_dq_codes">
+      {% set _sug = dq_suggestions or {} %}
+      {% if _sug %}
+      <p class="muted" style="margin:4px 0;">
+        Dropdowns are pre-selected from the NCUA auto-classifier where
+        a configured pool matches the canonical name. Confirm or change
+        each pick before saving.
+      </p>
+      {% endif %}
+      <table class="data-table" style="margin-top:4px; max-width:600px;">
+        <thead><tr><th>Loan code</th><th>Map to pool</th></tr></thead>
+        <tbody>
+          {% for c in _dq_unmapped %}
+            {% set _picked = _sug.get(c) or '' %}
+            <tr>
+              <td><code>{{ c }}</code><input type="hidden" name="unmapped_code" value="{{ c }}"></td>
+              <td>
+                <select name="unmapped_pool_{{ loop.index0 }}" style="min-width:200px;">
+                  <option value="">&mdash; choose &mdash;</option>
+                  {% for p in _dq_pool_choices %}
+                    <option value="{{ p }}"{% if _picked == p %} selected{% endif %}>{{ p }}</option>
+                  {% endfor %}
+                  <option value="Ignore">Ignore (exclude)</option>
+                </select>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <button class="btn btn-secondary" type="submit" style="margin-top:6px;">
+        Save mappings
+      </button>
+      <span class="muted" style="margin-left:8px;">Saves to the global Step 3 Loan Code Mapping.</span>
+    </form>
+  {% endif %}
 {% endif %}
 
 {# ---------- Navigation ---------- #}

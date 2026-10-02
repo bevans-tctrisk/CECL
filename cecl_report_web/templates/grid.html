@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}{{ page.sheet_name }} — {{ page.credit_union }}{% endblock %}
+{% block body %}
+<section class="page grid-page">
+  <table class="grid">
+    {% for row in page.rows %}
+    <tr>
+      {% for cell in row %}
+      <td
+        {% if cell.colspan > 1 %}colspan="{{ cell.colspan }}"{% endif %}
+        {% if cell.rowspan > 1 %}rowspan="{{ cell.rowspan }}"{% endif %}
+        class="a-{{ cell.align }}{% if cell.bold %} b{% endif %}{% if cell.italic %} i{% endif %}{% if cell.wrap %} wrap{% endif %}"
+        style="{% if cell.fill %}background:#{{ cell.fill }};{% endif %}{% if cell.color %}color:#{{ cell.color }};{% endif %}{% if cell.size %}font-size:{{ cell.size }}pt;{% endif %}"
+      >{{ cell.text }}</td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </table>
+  {% if charts %}
+  <div class="charts-grid">
+    {% for svg in charts %}<div class="chart-cell">{{ svg | safe }}</div>{% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

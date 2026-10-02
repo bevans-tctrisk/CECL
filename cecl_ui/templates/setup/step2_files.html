@@ -32,7 +32,8 @@
         </form>
         <div class="muted" style="margin-top:6px;">
           Suggested file pattern: <code>{{ suggestion.file_pattern }}</code><br>
-          Suggested date pattern: <code>{{ suggestion.date_pattern }}</code>
+          Suggested date pattern: <code>{{ suggestion.date_pattern }}</code><br>
+          Suggested date format: <code>{{ suggestion.date_format }}</code>
         </div>
       {% else %}
         <em>Couldn't detect a date in the filename &mdash; please fill in the
@@ -56,6 +57,31 @@
                  value="{{ form_values.date_pattern }}" required>
           <span class="help">Default <code>(\d{4})-(\d{2})</code> matches <code>...2025-12....xlsx</code>. Group 1 = year, group 2 = month.</span>
         </label>
+      </div>
+      <div>
+        <label>Date format *
+          <select name="date_format" required>
+            {% for fmt in date_format_choices %}
+              <option value="{{ fmt }}"
+                {% if form_values.date_format == fmt %}selected{% endif %}>
+                {{ date_format_labels.get(fmt, fmt) }}
+              </option>
+            {% endfor %}
+          </select>
+          <span class="help">Tells the importer how to interpret the regex capture groups above. Pick the option that matches the order of <em>year / month / day / quarter</em> in your filenames.</span>
+        </label>
+        {% if date_format_preview %}
+          <div style="margin-top:6px;">
+            {% if date_format_preview.ok and date_format_preview.preview %}
+              <span style="color:#2a7; font-weight:bold;">&#10003;</span>
+              <code>{{ sample_loan_name }}</code>
+              &rarr; <code>{{ date_format_preview.preview }}</code>
+            {% elif date_format_preview.error %}
+              <span style="color:#c33; font-weight:bold;">&#x2717;</span>
+              <span style="color:#c33;">{{ date_format_preview.error }}</span>
+            {% endif %}
+          </div>
+        {% endif %}
       </div>
       <div>
         <label>Pool-code split character
@@ -141,6 +167,7 @@
                       onsubmit="return confirm('Permanently delete {{ f.name }} from the data directory?');">
                   <input type="hidden" name="file_pattern" value="{{ form_values.file_pattern }}">
                   <input type="hidden" name="date_pattern" value="{{ form_values.date_pattern }}">
+                  <input type="hidden" name="date_format" value="{{ form_values.date_format }}">
                   <input type="hidden" name="pool_code_split" value="{{ form_values.pool_code_split }}">
                   <input type="hidden" name="balance_remove_chars" value="{{ form_values.balance_remove_chars | join(',') }}">
                   {% if form_values.accounting_negatives %}

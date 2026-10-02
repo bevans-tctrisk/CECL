@@ -22,6 +22,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from cecl_ui.services.coercion import coerce_days
+
 from cecl_ui.services import (
     delinquency_hist_processor,
     extract_hist_processor,
@@ -32,23 +34,13 @@ DEFAULT_DQ_THRESHOLD = 60  # days; matches WARM convention (>=60 days)
 
 
 def _coerce_days(val: Any) -> int | None:
-    """Parse a 'days delinquent' cell to an int. Empty/non-numeric -> None."""
-    if val is None:
-        return None
-    s = str(val).strip()
-    if not s:
-        return None
-    # Strip non-digit/minus characters (handles "30 days", "30+", etc.)
-    cleaned = re.sub(r"[^0-9\-]", "", s)
-    if not cleaned or cleaned == "-":
-        return None
-    try:
-        return int(cleaned)
-    except ValueError:
-        try:
-            return int(float(s))
-        except ValueError:
-            return None
+    """Parse a 'days delinquent' cell to an int. Empty/non-numeric -> None.
+
+    Delegates to the shared coercion so this can never again strip the decimal
+    point out of a float cell -- that turned 60.0 into 600 and booked every
+    loan 6+ days past due as 60+ days delinquent.
+    """
+    return coerce_days(val)
 
 
 _DATE_RX_LIST = [

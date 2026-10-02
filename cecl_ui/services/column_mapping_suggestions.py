@@ -47,6 +47,7 @@ KNOWN_FIELDS: tuple[str, ...] = (
     "loan_suffix",
     "current_balance",
     "original_fico_score",
+    "current_fico_score",
     "loan_pool_code",
     "days_delinquent",
     "interest_rate",
@@ -54,6 +55,12 @@ KNOWN_FIELDS: tuple[str, ...] = (
     "original_loan_amount",
     "total_available_credit",
 )
+
+# Fields that must never be auto-suggested from learned history, even when a
+# matching header exists. ``current_fico_score`` defaults to none because
+# most core/AIRES extracts ship only the origination score (the current
+# score is supplied by the credit pull). Users can still map it manually.
+_NEVER_AUTOSUGGEST: frozenset[str] = frozenset({"current_fico_score"})
 
 _WS_RE = re.compile(r"\s+")
 
@@ -134,6 +141,11 @@ def suggest_for_headers(
     ``skip_fields`` are omitted (use this to avoid overwriting a field the
     sample parser already mapped). Only fields with a learned match are
     included in the result.
+
+    ``current_fico_score`` is never auto-suggested: most core/AIRES extracts
+    carry only the origination score and the current score comes from the
+    credit pull, so it defaults to none (unmapped) unless the user maps it
+    manually.
     """
     headers_list = [h for h in (headers or []) if h is not None]
     if not headers_list:
@@ -142,10 +154,27 @@ def suggest_for_headers(
     norm_to_actual: dict[str, str] = {}
     for h in headers_list:
         norm_to_actual.setdefault(_normalize(str(h)), str(h))
-    skip = set(skip_fields or ())
+    skip = set(skip_fields or ()) | _NEVER_AUTOSUGGEST
 
     store = load()
     counts = store.get("field_to_header_counts", {})
+
+    # Header "ownership": the field that maps each normalized header MOST
+    # often owns it. A header is only suggested for its owner, so cross-field
+    # noise from historical mis-saves (e.g. "account number" appearing a few
+    # times under days_delinquent while dominating member_number) cannot leak
+    # into an unrelated field. Ties keep the header eligible for both.
+    owner: dict[str, str] = {}
+    owner_count: dict[str, int] = {}
+    for fld, bkt in counts.items():
+        if not isinstance(bkt, dict):
+            continue
+        for nrm, cnt in bkt.items():
+            c = int(cnt or 0)
+            if c > owner_count.get(nrm, 0):
+                owner_count[nrm] = c
+                owner[nrm] = fld
+
     out: dict[str, str] = {}
     for field, bucket in counts.items():
         if field in skip or field not in KNOWN_FIELDS:
@@ -153,14 +182,19 @@ def suggest_for_headers(
         if not isinstance(bucket, dict):
             continue
         # Sort candidates by count desc, take the first one that exists in
-        # the current sample headers.
-        for norm, _cnt in sorted(
+        # the current sample headers AND is not more strongly owned by a
+        # different field.
+        for norm, cnt in sorted(
             bucket.items(), key=lambda kv: (-int(kv[1] or 0), kv[0])
         ):
             actual = norm_to_actual.get(norm)
-            if actual:
-                out[field] = actual
-                break
+            if not actual:
+                continue
+            own = owner.get(norm)
+            if own and own != field and owner_count.get(norm, 0) > int(cnt or 0):
+                continue  # another field maps this header more often
+            out[field] = actual
+            break
     return out
 
 
@@ -176,3 +210,112 @@ def top_headers_for_field(field: str, n: int = 5) -> list[tuple[str, int]]:
         key=lambda kv: (-kv[1], kv[0]),
     )
     return ranked[: max(0, int(n))]
+
+
+# Factory-default placeholder sentinels used by the wizard's blank state.
+# These are NOT real headers and must never enter the learned store.
+_PLACEHOLDER_HEADERS: frozenset[str] = frozenset({
+    "MEMBER_ID", "BALANCE", "FICO_SCORE", "LOAN_TYPE",
+    "DQ_DAYS", "INT_RATE", "OPEN_DATE", "ORIG_AMT",
+})
+
+
+def _iter_config_mappings(cfg: dict) -> "list[dict]":
+    """Return every column_mappings dict in a client config.
+
+    Includes the top-level ``column_mappings`` plus each
+    ``loan_data_extracts[*].column_mappings`` (credit-card / second-extract
+    CUs carry their own per-file mappings).
+    """
+    out: list[dict] = []
+    top = cfg.get("column_mappings")
+    if isinstance(top, dict):
+        out.append(top)
+    for ext in (cfg.get("loan_data_extracts") or []):
+        if isinstance(ext, dict) and isinstance(ext.get("column_mappings"), dict):
+            out.append(ext["column_mappings"])
+    return out
+
+
+def backfill_from_configs(configs: Iterable[tuple[str, dict]]) -> dict:
+    """Seed the learned store from already-validated client configs.
+
+    ``configs`` = iterable of ``(config_id, config_dict)``. For each config
+    not already processed, record every ``field -> header`` pair where the
+    header is a non-empty STRING that is neither a factory placeholder nor an
+    integer positional index (headerless configs map fields to int columns,
+    which are meaningless as cross-CU header hints). Idempotent: a
+    ``config_id`` is recorded at most once, tracked in the store under
+    ``backfilled_config_ids``.
+
+    Returns a summary ``{"configs_processed", "configs_skipped",
+    "pairs_recorded"}``.
+    """
+    processed = 0
+    skipped = 0
+    pairs = 0
+    with _LOCK:
+        store = load()
+        counts = store["field_to_header_counts"]
+        displays = store["header_display_forms"]
+        done = set(store.get("backfilled_config_ids") or [])
+        changed = False
+        for config_id, cfg in configs:
+            if not config_id or config_id in done:
+                skipped += 1
+                continue
+            if not isinstance(cfg, dict):
+                skipped += 1
+                continue
+            recorded_any = False
+            for cmap in _iter_config_mappings(cfg):
+                for field, header in cmap.items():
+                    if field not in KNOWN_FIELDS:
+                        continue
+                    # Skip int positional indices (headerless CUs) and
+                    # non-string values outright.
+                    if not isinstance(header, str):
+                        continue
+                    raw = header.strip()
+                    if not raw or raw in _PLACEHOLDER_HEADERS:
+                        continue
+                    norm = _normalize(raw)
+                    bucket = counts.setdefault(field, {})
+                    bucket[norm] = int(bucket.get(norm, 0)) + 1
+                    displays.setdefault(norm, raw)
+                    pairs += 1
+                    recorded_any = True
+                    changed = True
+            done.add(config_id)
+            changed = True
+            if recorded_any:
+                processed += 1
+            else:
+                skipped += 1
+        if changed:
+            store["backfilled_config_ids"] = sorted(done)
+            _save(store)
+    return {
+        "configs_processed": processed,
+        "configs_skipped": skipped,
+        "pairs_recorded": pairs,
+    }
+
+
+def backfill_from_config_dir(config_dir) -> dict:
+    """Convenience wrapper: load every ``*.yaml`` under *config_dir* and
+    feed it to :func:`backfill_from_configs`. Configs that fail to parse are
+    skipped silently. Returns the same summary dict.
+    """
+    import yaml  # local import: keep the store module free of a hard dep
+
+    configs: list[tuple[str, dict]] = []
+    for path in sorted(Path(config_dir).glob("*.yaml")):
+        if path.stem.startswith(("_", "sample", "client", "template")):
+            continue  # skip templates / scaffolding configs
+        try:
+            cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        configs.append((path.stem, cfg))
+    return backfill_from_configs(configs)

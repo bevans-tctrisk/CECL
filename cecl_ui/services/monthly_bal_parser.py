@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils.cell import coordinate_from_string
 
 
 # ---------------------------------------------------------------------------
@@ -94,21 +95,45 @@ def _parse_string_date(s: str) -> tuple[int, int, int] | None:
 
 
 def normalize_to_month_end(value: Any) -> date | None:
-    """Snap any date-ish value to the last day of its calendar month."""
+    """Snap any date-ish value to the last day of its calendar month.
+
+    Returns ``None`` for unparseable input or for dates that fall before
+    the year 1900 -- typos like ``"06/30/203"`` (meant to be 2023) get
+    rejected here so they never poison downstream "earliest period"
+    pickers.
+    """
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
+        if value.year < 1900:
+            return None
         return _last_day(value.year, value.month)
     if isinstance(value, date):
+        if value.year < 1900:
+            return None
         return _last_day(value.year, value.month)
     if isinstance(value, (int, float)):
         # Excel serial date (1900-based, ignoring the 1900 leap-year bug).
+        # Restrict to a plausible CECL window (year 2000 through ~2100) so
+        # balance values like 615.10, 1000, or 2,349,876.41 do not get
+        # misread as serial dates and poison header-row detection.
+        # Serial 36526 = 2000-01-01, serial 73415 = 2100-12-31.
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not (36526 <= f <= 73415):
+            return None
         try:
             from openpyxl.utils.datetime import from_excel
-            d = from_excel(float(value))
+            d = from_excel(f)
             if isinstance(d, datetime):
+                if d.year < 1900:
+                    return None
                 return _last_day(d.year, d.month)
             if isinstance(d, date):
+                if d.year < 1900:
+                    return None
                 return _last_day(d.year, d.month)
         except Exception:  # noqa: BLE001
             return None
@@ -116,6 +141,8 @@ def normalize_to_month_end(value: Any) -> date | None:
         parts = _parse_string_date(value)
         if parts:
             y, mo, _d = parts
+            if y < 1900:
+                return None
             return _last_day(y, mo)
     return None
 
@@ -234,29 +261,49 @@ def _scan_sheet(ws) -> dict[str, Any]:
     if not best:
         return {"ok": False, "error": "No date-like header row found in first 30 rows."}
 
-    # Pool/type label column: scan col A first 60 rows for any string row
-    # below the header.
+    # Pool/type label column: scan EVERY column to the left of the first
+    # date column for the one that yields the most string labels. Many
+    # Vizo-style workbooks have col A = loan-type-code (integer) and
+    # col B = description (the human-readable pool label). Hard-coding
+    # col A would yield zero parsed_pool_labels in that case.
+    first_date_col = best["first_date_col_idx"]
+    candidate_cols = list(range(1, max(2, first_date_col)))  # at least col A
     label_col_idx = 1
     labels: list[str] = []
     seen: set[str] = set()
     acl_row: int | None = None
     acl_label: str = ""
-    for row_idx in range(best["header_row"] + 1, best["header_row"] + 60):
-        cell = ws.cell(row=row_idx, column=label_col_idx)
-        if cell.value is None:
-            continue
-        # ACL row detection (independent of pool-label collection).
-        if acl_row is None and _is_acl_label(cell.value):
-            acl_row = row_idx
-            acl_label = str(cell.value).strip()
-        if not _is_label_row(cell.value):
-            continue
-        s = cell.value.strip()
-        key = s.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        labels.append(s)
+    best_label_count = -1
+    for try_col in candidate_cols:
+        try_labels: list[str] = []
+        try_seen: set[str] = set()
+        try_acl_row: int | None = None
+        try_acl_label: str = ""
+        for row_idx in range(best["header_row"] + 1, best["header_row"] + 60):
+            cell = ws.cell(row=row_idx, column=try_col)
+            if cell.value is None:
+                continue
+            # ACL row detection (independent of pool-label collection).
+            if try_acl_row is None and _is_acl_label(cell.value):
+                try_acl_row = row_idx
+                try_acl_label = str(cell.value).strip()
+            if not _is_label_row(cell.value):
+                continue
+            s = cell.value.strip()
+            key = s.lower()
+            if key in try_seen:
+                continue
+            try_seen.add(key)
+            try_labels.append(s)
+        # Pick the column with the most labels. Tie-break favours the
+        # earlier (leftmost) column to match historical behaviour.
+        if len(try_labels) > best_label_count:
+            best_label_count = len(try_labels)
+            label_col_idx = try_col
+            labels = try_labels
+            seen = try_seen
+            acl_row = try_acl_row
+            acl_label = try_acl_label
 
     # Extract per-date ACL history if a row was identified.
     acl_history: dict[str, float] = {}
@@ -371,6 +418,69 @@ def extract_row_history(
         wb.close()
 
 
+def extract_pool_labels(
+    saved_path: str | Path,
+    sheet: str,
+    header_row: int,
+    pool_name_col: str,
+) -> dict[str, Any]:
+    """Re-read pool/type labels from a specific column on a specific sheet.
+
+    Used after the user manually adjusts the layout fields (sheet,
+    header_row, pool_name_col) — auto-detection in :func:`_scan_sheet`
+    only ever looks at column A, so when labels live elsewhere we need
+    to re-scan against the user-supplied column.
+
+    Returns ``{"ok": bool, "error": str|None, "labels": [...]}``.
+    Labels are de-duplicated case-insensitively, preserving first-seen
+    order, and rows that look like dates / numbers / total / subtotal
+    rollups are skipped.
+    """
+    p = Path(saved_path)
+    if not p.exists():
+        return {"ok": False, "error": f"File not found: {saved_path}", "labels": []}
+    if not sheet or not header_row or not pool_name_col:
+        return {"ok": False,
+                "error": "Missing sheet / header_row / pool_name_col",
+                "labels": []}
+    col_idx = _col_letter_to_idx(pool_name_col)
+    if not col_idx:
+        return {"ok": False,
+                "error": f"Invalid column letter: {pool_name_col!r}",
+                "labels": []}
+    try:
+        wb = load_workbook(p, read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"Could not open workbook: {exc}",
+                "labels": []}
+    try:
+        if sheet not in wb.sheetnames:
+            return {"ok": False, "error": f"Sheet '{sheet}' not found",
+                    "labels": []}
+        ws = wb[sheet]
+        labels: list[str] = []
+        seen: set[str] = set()
+        # Scan a generous window below the header; stop only on hard EOF.
+        max_scan = max(header_row + 200, ws.max_row or (header_row + 200))
+        for row_idx in range(header_row + 1, max_scan + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if cell.value is None:
+                continue
+            if not _is_label_row(cell.value):
+                continue
+            s = str(cell.value).strip()
+            if not s:
+                continue
+            key = s.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            labels.append(s)
+        return {"ok": True, "error": None, "labels": labels}
+    finally:
+        wb.close()
+
+
 # ---------------------------------------------------------------------------
 # Pool-map auto-seeding
 # ---------------------------------------------------------------------------
@@ -420,7 +530,11 @@ def _coerce_number(v: Any) -> float | None:
     if not s:
         return None
     neg = False
-    if s.startswith("(") and s.endswith(")"):
+    # Accountants commonly wrap negatives in parentheses; some workbooks
+    # use angle brackets (e.g. "<561,006.75>") instead. Treat both as
+    # negative-marker wrappers.
+    if (s.startswith("(") and s.endswith(")")) or \
+            (s.startswith("<") and s.endswith(">")):
         neg = True
         s = s[1:-1]
     s = s.replace("$", "").replace(",", "").replace(" ", "")
@@ -452,6 +566,7 @@ def pool_balances_for_latest_period(
     pool_name_col: str,
     label_to_pool: dict[str, str] | None = None,
     period: str | None = None,
+    exclude_labels: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Read the monthly balance file and return per-pool balances for the
     latest detected period (or for ``period`` if given as ISO ``YYYY-MM-DD``).
@@ -470,6 +585,13 @@ def pool_balances_for_latest_period(
     canonical pool name). Labels that map to an empty/None pool are
     treated as "ignored" and dropped from ``by_pool`` totals (but still
     appear in ``raw_rows``).
+
+    ``exclude_labels`` is a case-insensitive set of raw labels that
+    should NEVER contribute to ``by_pool`` totals - typically the
+    parent/summary rows in a hierarchical Vizo-style 'Balance Sheets
+    <CU>' workbook where each parent row is the sum of its sub-category
+    rows beneath it. Excluded rows still appear in ``raw_rows`` (with
+    ``mapped_pool`` cleared) so the UI can show them as ``Skipped``.
     """
     p = Path(saved_path)
     if not p.exists():
@@ -505,6 +627,13 @@ def pool_balances_for_latest_period(
                     "period": "", "by_pool": {}, "raw_rows": []}
 
         # Pick the target period: explicit, else latest.
+        # When ``period`` is provided we prefer an exact match; if no
+        # column hits that month-end we fall back to the latest column
+        # whose date is on or BEFORE the anchor (so a March anchor on a
+        # Jan-Dec workbook picks the March column, not April or
+        # December). Only when every column is AFTER the anchor do we
+        # fall through to "latest" so a freshly-uploaded file with no
+        # historical columns still produces something.
         target: tuple[int, date] | None = None
         if period:
             try:
@@ -513,6 +642,10 @@ def pool_balances_for_latest_period(
                     if d == want:
                         target = (c, d)
                         break
+                if target is None:
+                    on_or_before = [(c, d) for c, d in date_cols if d <= want]
+                    if on_or_before:
+                        target = max(on_or_before, key=lambda t: t[1])
             except ValueError:
                 target = None
         if target is None:
@@ -523,10 +656,21 @@ def pool_balances_for_latest_period(
             (k or "").strip().lower(): (v or "").strip()
             for k, v in (label_to_pool or {}).items()
         }
+        excl = {
+            (s or "").strip().lower()
+            for s in (exclude_labels or [])
+            if (s or "").strip()
+        }
 
         by_pool: dict[str, float] = {}
-        raw_rows: list[dict[str, Any]] = []
-        seen_labels: set[str] = set()
+        # Aggregate multiple detail rows sharing the same pool label
+        # (e.g. Symitar/Episys balance-sheet exports that emit one row
+        # per loan-type code but reuse the same pool name across codes).
+        # Parent/summary rows in Vizo-style hierarchical workbooks are
+        # kept OUT of by_pool via ``exclude_labels`` (see auto_setup
+        # ``_apply_pool_seed_to_state``), so summing across identical
+        # labels is always safe.
+        row_agg: dict[str, dict[str, Any]] = {}
 
         # Walk data rows below the header; stop after a stretch of blanks.
         max_row = ws.max_row or (header_row + 200)
@@ -541,21 +685,30 @@ def pool_balances_for_latest_period(
             blanks = 0
             label = str(label_cell).strip()
             key = label.lower()
-            if key in seen_labels:
-                continue
-            seen_labels.add(key)
 
             bal = _coerce_number(
                 ws.cell(row=r, column=target_col).value
             )
-            mapped = ltp.get(key, "")
-            raw_rows.append({
-                "label": label,
-                "balance": bal,
-                "mapped_pool": mapped,
-            })
+            is_excluded = key in excl
+            mapped = "" if is_excluded else ltp.get(key, "")
+
+            existing = row_agg.get(key)
+            if existing is None:
+                row_agg[key] = {
+                    "label": label,
+                    "balance": bal,
+                    "mapped_pool": mapped,
+                    "excluded": is_excluded,
+                }
+            elif bal is not None:
+                prev_bal = existing.get("balance")
+                existing["balance"] = (
+                    bal if prev_bal is None else prev_bal + bal
+                )
+
             if mapped and bal is not None:
                 by_pool[mapped] = by_pool.get(mapped, 0.0) + bal
+        raw_rows = list(row_agg.values())
     finally:
         wb.close()
 
@@ -585,12 +738,64 @@ def pool_balances_for_latest_period(
 # pool_name_col / parsed_pool_labels) plus a couple of per-month extras
 # (``balance_col`` and ``detected_period``).
 
-_LOAN_SECTION_PATTERNS = ("loans", "loan portfolio", "loan balances")
+_LOAN_SECTION_PATTERNS = (
+    "loans",
+    "loan portfolio",
+    "loan balances",
+    "loans to members",
+    "loans to member",
+    "member loans",
+    "member loan accounts",
+    "loans receivable",
+    "loan receivable",
+    "loan accounts",
+    "total loans to members",
+    "loans and leases",
+    "loans & leases",
+)
+# Substring fallback when no exact match was found. We only trip on
+# strings that START WITH one of these phrases so detail rows like
+# "Auto Loans" / "Used Auto Loans" don't accidentally anchor the
+# section.
+_LOAN_SECTION_START_PREFIXES = (
+    "loans to ",
+    "loans receivable",
+    "loan accounts",
+    "member loans",
+    "loans and leases",
+    "loans & leases",
+)
+# Exact-match section-end phrases (lower-cased, stripped).
 _LOAN_SECTION_END = (
     "total loans", "net loans", "total loan", "accounts receivable",
     "total accounts receivable", "cash", "investments", "fixed assets",
     "other assets", "total assets", "liabilities", "equity",
 )
+# Substring patterns; if any of these appears anywhere in a row's text
+# we treat the row as the end of the LOANS section. "total net loans"
+# is the canonical hard-stop marker per CU convention; we also catch
+# variations like "TOTAL GROSS LOANS" / "NET LOANS".
+_LOAN_SECTION_END_SUBSTRINGS = (
+    "total net loans", "total gross loans", "total loans", "net loans",
+    "total receivables", "total cash", "total investments",
+    "total fixed assets", "total other assets", "total assets",
+    "total liabilities", "total equity",
+)
+
+
+def _is_loan_section_end(value: Any) -> bool:
+    """Return True when ``value`` looks like a totals/section-end label.
+    Substring match (case-insensitive) so "TOTAL NET LOANS" trips even
+    though the exact-match list only has "total loans".
+    """
+    if not isinstance(value, str):
+        return False
+    s = value.strip().lower()
+    if not s:
+        return False
+    if s in _LOAN_SECTION_END:
+        return True
+    return any(p in s for p in _LOAN_SECTION_END_SUBSTRINGS)
 # Cells/labels we should never treat as a pool/account row.
 _PER_MONTH_SKIP_PHRASES = (
     "loans", "loan portfolio", "balance", "as of", "produced",
@@ -683,16 +888,26 @@ def _looks_like_money(v: Any) -> bool:
 def _find_loan_section(rows: list[list[Any]]) -> int | None:
     """Return 0-based row index where a 'LOANS' section header sits, or
     ``None``. Match cell strings exactly equal to a known phrase (after
-    lower/strip) to avoid grabbing 'Auto Loans' detail rows.
+    lower/strip) to avoid grabbing 'Auto Loans' detail rows. Falls back
+    to a starts-with match against ``_LOAN_SECTION_START_PREFIXES`` when
+    no exact match is found, which catches phrasings like ``LOANS TO
+    MEMBERS`` (common on credit-union GL-style balance sheets).
     """
+    fallback: int | None = None
     for r, row in enumerate(rows):
         for v in row:
             if not isinstance(v, str):
                 continue
             s = v.strip().lower()
+            if not s:
+                continue
             if s in _LOAN_SECTION_PATTERNS:
                 return r
-    return None
+            if fallback is None and any(
+                s.startswith(p) for p in _LOAN_SECTION_START_PREFIXES
+            ):
+                fallback = r
+    return fallback
 
 
 def _detect_period_from_rows(rows: list[list[Any]]) -> date | None:
@@ -711,27 +926,117 @@ def _detect_period_from_rows(rows: list[list[Any]]) -> date | None:
 
 
 def _detect_period_from_name(name: str) -> date | None:
-    """Pull a YYYYMMDD or YYYY-MM-DD style date from a filename."""
-    m = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})", name)
-    if m:
+    """Pull a date from a filename in any common layout.
+
+    Supports (in priority order):
+    - YYYYMMDD / YYYY-MM-DD / YYYY_MM_DD
+    - MMDDYYYY / MM-DD-YYYY
+    - MMDDYY    (e.g. ``123125`` -> 2025-12-31)
+    - YYYYMM / YYYY-MM
+    - MMYYYY
+    Two-digit years are window-mapped to 2000-2069 / 1970-1999.
+    Each pattern is tried against EVERY match in the stem so a leading
+    member-number like ``878339`` doesn't shadow a trailing date.
+    """
+    stem = Path(name).stem
+
+    def _yy_to_yyyy(yy: int) -> int:
+        return 2000 + yy if yy < 70 else 1900 + yy
+
+    # YYYYMMDD
+    for m in re.finditer(
+            r"(?<!\d)(20\d{2})[-_]?(\d{2})[-_]?(\d{2})(?!\d)", stem):
         try:
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            return _last_day(y, mo)
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return _last_day(y, mo)
         except ValueError:
-            return None
-    m = re.search(r"(20\d{2})[-_]?(\d{2})", name)
-    if m:
+            continue
+    # MMDDYYYY
+    for m in re.finditer(
+            r"(?<!\d)(\d{2})[-_]?(\d{2})[-_]?(20\d{2})(?!\d)", stem):
+        try:
+            mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return _last_day(y, mo)
+        except ValueError:
+            continue
+    # MMDDYY (no separators) — e.g. "123125" -> 12/31/2025
+    for m in re.finditer(r"(?<!\d)(\d{2})(\d{2})(\d{2})(?!\d)", stem):
+        try:
+            mo, d, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return _last_day(_yy_to_yyyy(yy), mo)
+        except ValueError:
+            continue
+    # YYYYMM / YYYY-MM
+    for m in re.finditer(r"(?<!\d)(20\d{2})[-_]?(\d{2})(?!\d)", stem):
         try:
             y, mo = int(m.group(1)), int(m.group(2))
             if 1 <= mo <= 12:
                 return _last_day(y, mo)
         except ValueError:
-            return None
+            continue
+    # MMYYYY
+    for m in re.finditer(r"(?<!\d)(\d{2})[-_]?(20\d{2})(?!\d)", stem):
+        try:
+            mo, y = int(m.group(1)), int(m.group(2))
+            if 1 <= mo <= 12:
+                return _last_day(y, mo)
+        except ValueError:
+            continue
     return None
 
 
-def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
+def _extract_period_from_cell(
+    rows: list[list[Any]], cell_ref: str,
+) -> date | None:
+    """Read an explicit Excel-style cell reference (e.g. ``B3``) from the
+    pre-loaded grid and snap it to a month-end. Strips a leading
+    ``"As of:"`` if present.
+    """
+    ref = (cell_ref or "").strip()
+    if not ref:
+        return None
+    try:
+        col_letter, row_num = coordinate_from_string(ref)
+        col_idx = column_index_from_string(col_letter) - 1
+        r = int(row_num) - 1
+    except Exception:
+        return None
+    if r < 0 or r >= len(rows):
+        return None
+    row = rows[r]
+    if col_idx < 0 or col_idx >= len(row):
+        return None
+    val = row[col_idx]
+    if val is None:
+        return None
+    # Normalise via the standard helper; strip any leading "As of:" label.
+    if isinstance(val, str):
+        cleaned = re.sub(r"^\s*as of[:\s]*", "", val,
+                         flags=re.IGNORECASE).strip()
+        return normalize_to_month_end(cleaned) if cleaned else None
+    return normalize_to_month_end(val)
+
+
+def analyse_per_month_file(
+    path: str | Path,
+    stop_row: int | None = None,
+    as_of_cell: str | None = None,
+    acl_row: int | None = None,
+    acl_col: str | None = None,
+) -> dict[str, Any]:
     """Detect layout + pool labels in a single-month balance-sheet file.
+
+    ``stop_row`` (1-based) is an optional hard cap: any row at or below
+    this row index is ignored. When omitted the parser auto-stops at
+    the first "TOTAL NET LOANS" / "TOTAL LOANS" / "NET LOANS" marker.
+
+    ``as_of_cell`` is an optional Excel-style cell reference (e.g.
+    ``"B3"``). When supplied, the period is read from that cell first
+    and only falls back to the auto-detection (in-file ``As of:`` row,
+    then filename) if the cell is empty / unparseable.
 
     Returns::
 
@@ -745,6 +1050,8 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
           "parsed_pool_labels": [str], # labels found in the LOANS section
           "rows": [{"label": str, "balance": float|None}],
           "detected_period": str,      # ISO YYYY-MM-DD or ""
+          "stop_row": int | None,      # 1-based row that ended scanning
+          "auto_stop_row": int | None, # 1-based auto-detected end row
         }
     """
     p = Path(path)
@@ -768,8 +1075,13 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
                 "balance_col": "", "parsed_pool_labels": [], "rows": [],
                 "detected_period": ""}
 
-    # Period: prefer in-file marker, fall back to filename, else "".
-    period = _detect_period_from_rows(rows) or _detect_period_from_name(p.name)
+    # Period: explicit cell wins, then in-file "As of:" marker, then
+    # the filename, else "".
+    period = (
+        _extract_period_from_cell(rows, as_of_cell or "")
+        or _detect_period_from_rows(rows)
+        or _detect_period_from_name(p.name)
+    )
     period_iso = period.isoformat() if period else ""
 
     # Find the LOANS section header.
@@ -805,18 +1117,19 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
     detail_col_counts: dict[int, int] = {}
     balance_col_counts: dict[int, int] = {}
     end_idx = len(rows)
+    auto_end_idx = len(rows)
     for r in range(loans_idx + 1, min(loans_idx + 80, len(rows))):
         row = rows[r]
-        # Stop at section end (TOTAL LOANS / NET LOANS / etc.) — but only
-        # for counting; the actual end is found again below.
+        # Stop at section end (TOTAL NET LOANS / TOTAL LOANS / etc.) —
+        # substring match, so "TOTAL NET LOANS" trips even though
+        # the exact-match list has only "total loans".
         is_end = False
         for v in row:
-            if isinstance(v, str):
-                s = v.strip().lower()
-                if s in _LOAN_SECTION_END:
-                    is_end = True
-                    end_idx = min(end_idx, r)
-                    break
+            if _is_loan_section_end(v):
+                is_end = True
+                auto_end_idx = min(auto_end_idx, r)
+                end_idx = min(end_idx, r)
+                break
         if is_end:
             break
         # Identify text + money columns in this row.
@@ -840,13 +1153,36 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
                 "detected_period": period_iso}
 
     detail_col = max(detail_col_counts.items(), key=lambda kv: kv[1])[0]
-    balance_col = max(balance_col_counts.items(), key=lambda kv: kv[1])[0]
+    # Balance sheets always show balances to the RIGHT of the label
+    # column. When a column to the LEFT of the label has more numeric
+    # cells (e.g. a GL-account-number column where every row carries a
+    # 6-digit code) we'd otherwise pick it as the balance column and
+    # produce huge bogus totals. Restrict the balance-column candidates
+    # to those at or right of the label column when at least one such
+    # candidate exists; otherwise fall back to the global max.
+    right_candidates = {c: n for c, n in balance_col_counts.items()
+                        if c > detail_col}
+    if right_candidates:
+        balance_col = max(right_candidates.items(),
+                          key=lambda kv: kv[1])[0]
+    else:
+        balance_col = max(balance_col_counts.items(),
+                          key=lambda kv: kv[1])[0]
+
+    # Honour an explicit user-supplied stop_row (1-based). When the
+    # user sets stop_row=N we treat row N as the first EXCLUDED row
+    # (i.e. "stop scanning at row N"). Always wins over auto-detect
+    # if it sits above the auto stop.
+    effective_end_idx = end_idx
+    if isinstance(stop_row, int) and stop_row > 0:
+        manual_end = max(loans_idx + 1, stop_row - 1)
+        effective_end_idx = min(effective_end_idx, manual_end)
 
     # Now extract labels + balances from the loans section.
     parsed_labels: list[str] = []
     extracted: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for r in range(loans_idx + 1, end_idx):
+    for r in range(loans_idx + 1, effective_end_idx):
         row = rows[r]
         if detail_col >= len(row):
             continue
@@ -858,8 +1194,8 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
             continue
         if label.lower() in _PER_MONTH_SKIP_PHRASES:
             continue
-        if label.lower() in _LOAN_SECTION_END:
-            continue
+        if _is_loan_section_end(label):
+            break
         bal = _coerce_number(row[balance_col]) \
             if balance_col < len(row) else None
         if bal is None:
@@ -885,11 +1221,37 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
     # Detect ACL/ALLL line. The row may sit far below the LOANS section
     # (typically under 'Other Liabilities' or as a contra-asset). Scan
     # the whole grid; prefer hits in the same label column we picked.
-    acl_row_idx, acl_label, _acl_col = _find_acl_row_in_grid(
-        rows, preferred_col=detail_col)
+    # When the caller passed an explicit ``acl_row`` (1-based), honour
+    # it instead of auto-detecting -- the user has already chosen.
+    if isinstance(acl_row, int) and acl_row > 0 and acl_row - 1 < len(rows):
+        ridx = acl_row - 1
+        row = rows[ridx]
+        # Try the same label column as the loans section, then any
+        # string cell on the row.
+        lbl_val: Any = ""
+        if detail_col < len(row):
+            lbl_val = row[detail_col]
+        if not isinstance(lbl_val, str) or not lbl_val.strip():
+            for v in row:
+                if isinstance(v, str) and v.strip():
+                    lbl_val = v
+                    break
+        acl_row_idx = ridx
+        acl_label = (str(lbl_val).strip() if isinstance(lbl_val, str) else "")
+    else:
+        acl_row_idx, acl_label, _acl_col = _find_acl_row_in_grid(
+            rows, preferred_col=detail_col)
+    # Pick the column to read the ACL value from. User override wins;
+    # otherwise fall back to the auto-detected balance column for the
+    # loans section.
+    acl_col_idx = balance_col
+    if isinstance(acl_col, str) and acl_col.strip():
+        ovr = _col_letter_to_idx(acl_col) - 1
+        if ovr >= 0:
+            acl_col_idx = ovr
     acl_value: float | None = None
-    if acl_row_idx is not None and balance_col < len(rows[acl_row_idx]):
-        acl_value = _coerce_number(rows[acl_row_idx][balance_col])
+    if acl_row_idx is not None and acl_col_idx < len(rows[acl_row_idx]):
+        acl_value = _coerce_number(rows[acl_row_idx][acl_col_idx])
         if acl_value is not None:
             acl_value = abs(acl_value)
 
@@ -906,13 +1268,58 @@ def analyse_per_month_file(path: str | Path) -> dict[str, Any]:
         "acl_row": (acl_row_idx + 1) if acl_row_idx is not None else None,
         "acl_label": acl_label,
         "acl_value": acl_value,
+        "acl_col": get_column_letter(acl_col_idx + 1)
+            if acl_col_idx is not None and acl_col_idx >= 0 else "",
+        "auto_acl_col": get_column_letter(balance_col + 1),
+        "auto_stop_row": (auto_end_idx + 1) if auto_end_idx < len(rows) else None,
+        "stop_row": (effective_end_idx + 1)
+            if effective_end_idx < len(rows) else None,
     }
+
+
+def _pm_effective_balance_col_idx(rows, start, label_col_idx, balance_col_idx):
+    """Return the 1-based balance column for THIS file's ``rows`` grid.
+
+    Normally the configured ``balance_col_idx``. When a wrapped title/header
+    pushes an extra empty leading column in, the balances shift one column to
+    the right and the configured column is empty for that file; fall back to
+    the densest numeric column at/after the label column so the period still
+    loads. Only overrides when the configured column has NO numeric values,
+    so files that parse today are unaffected.
+    """
+    ncols = max((len(r) for r in rows[start:]), default=0)
+    if ncols <= 0:
+        return balance_col_idx
+
+    def _numeric_count(ci0):
+        if ci0 < 0 or ci0 >= ncols:
+            return 0
+        n = 0
+        for r in range(start, len(rows)):
+            row = rows[r]
+            li = label_col_idx - 1
+            lbl = row[li] if 0 <= li < len(row) else None
+            if not isinstance(lbl, str) or not lbl.strip():
+                continue
+            if ci0 < len(row) and _coerce_number(row[ci0]) is not None:
+                n += 1
+        return n
+
+    if _numeric_count(balance_col_idx - 1) > 0:
+        return balance_col_idx
+    best_ci0, best_n = balance_col_idx - 1, 0
+    for ci0 in range(label_col_idx, ncols):  # 0-based cols after the label
+        n = _numeric_count(ci0)
+        if n > best_n:
+            best_n, best_ci0 = n, ci0
+    return (best_ci0 + 1) if best_n > 0 else balance_col_idx
 
 
 def pool_balances_for_per_month_files(
     monthly_files: list[dict[str, Any]],
     layout: dict[str, Any],
     label_to_pool: dict[str, str] | None = None,
+    exclude_labels: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-pool balances across a list of single-month files.
 
@@ -931,12 +1338,22 @@ def pool_balances_for_per_month_files(
         header_row = int((layout or {}).get("header_row") or 1)
     except (TypeError, ValueError):
         header_row = 1
+    try:
+        stop_row_raw = (layout or {}).get("stop_row")
+        stop_row = int(stop_row_raw) if stop_row_raw else 0
+    except (TypeError, ValueError):
+        stop_row = 0
     label_col_idx = _col_letter_to_idx(label_col) or 1
     balance_col_idx = _col_letter_to_idx(balance_col) or 2
 
     ltp = {
         (k or "").strip().lower(): (v or "").strip()
         for k, v in (label_to_pool or {}).items()
+    }
+    excl = {
+        (s or "").strip().lower()
+        for s in (exclude_labels or [])
+        if (s or "").strip()
     }
 
     by_period: dict[str, dict[str, Any]] = {}
@@ -959,15 +1376,27 @@ def pool_balances_for_per_month_files(
         # sheet specifically. (Our _load_grid currently picks the densest
         # sheet; that's usually correct for these one-tab balance sheets.)
         by_pool: dict[str, float] = {}
-        raw_rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        # Aggregate detail rows sharing the same label (see comment in
+        # ``pool_balances_for_latest_period``); ``exclude_labels`` handles
+        # Vizo-hierarchical parent-summary rows so summing is always safe.
+        row_agg: dict[str, dict[str, Any]] = {}
         start = max(header_row, 1)
+        # Bulletproof against a wrapped title shifting balances one column
+        # right (leaving the configured column empty for this file only).
+        eff_balance_col_idx = _pm_effective_balance_col_idx(
+            rows, start, label_col_idx, balance_col_idx)
+        # When the user supplied a manual stop_row we cap the scan there;
+        # otherwise we scan the whole grid and rely on substring totals
+        # detection to bail out.
+        end_exclusive = len(rows)
+        if stop_row and stop_row > start:
+            end_exclusive = min(end_exclusive, stop_row - 1)
         hit_end = False
-        for r in range(start, len(rows)):
+        for r in range(start, end_exclusive):
             row = rows[r]
             # Stop at the first totals/end marker anywhere in the row.
             for v in row:
-                if isinstance(v, str) and v.strip().lower() in _LOAN_SECTION_END:
+                if _is_loan_section_end(v):
                     hit_end = True
                     break
             if hit_end:
@@ -982,20 +1411,29 @@ def pool_balances_for_per_month_files(
                 continue
             if label.lower() in _PER_MONTH_SKIP_PHRASES:
                 continue
-            if label.lower() in _LOAN_SECTION_END:
+            if _is_loan_section_end(label):
                 # Stop at the first totals/end marker.
                 break
             key = label.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            bal = (_coerce_number(row[balance_col_idx - 1])
-                   if balance_col_idx - 1 < len(row) else None)
-            mapped = ltp.get(key, "")
-            raw_rows.append({"label": label, "balance": bal,
-                             "mapped_pool": mapped})
+            bal = (_coerce_number(row[eff_balance_col_idx - 1])
+                   if eff_balance_col_idx - 1 < len(row) else None)
+            is_excluded = key in excl
+            mapped = "" if is_excluded else ltp.get(key, "")
+
+            existing = row_agg.get(key)
+            if existing is None:
+                row_agg[key] = {"label": label, "balance": bal,
+                                "mapped_pool": mapped,
+                                "excluded": is_excluded}
+            elif bal is not None:
+                prev_bal = existing.get("balance")
+                existing["balance"] = (
+                    bal if prev_bal is None else prev_bal + bal
+                )
+
             if mapped and bal is not None:
                 by_pool[mapped] = by_pool.get(mapped, 0.0) + bal
+        raw_rows = list(row_agg.values())
         by_period[period] = {"by_pool": by_pool, "raw_rows": raw_rows}
 
     return {"ok": True,
@@ -1235,6 +1673,7 @@ def pool_balances_for_per_year_files(
     year_files: list[dict[str, Any]],
     layout: dict[str, Any],
     label_to_pool: dict[str, str] | None = None,
+    exclude_labels: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-pool balances across a list of single-year files.
 
@@ -1262,6 +1701,11 @@ def pool_balances_for_per_year_files(
     ltp = {
         (k or "").strip().lower(): (v or "").strip()
         for k, v in (label_to_pool or {}).items()
+    }
+    excl = {
+        (s or "").strip().lower()
+        for s in (exclude_labels or [])
+        if (s or "").strip()
     }
 
     by_period: dict[str, dict[str, Any]] = {}
@@ -1317,7 +1761,9 @@ def pool_balances_for_per_year_files(
             period_iso = d.isoformat()
             slot = by_period.setdefault(
                 period_iso, {"by_pool": {}, "raw_rows": []})
-            seen: set[str] = set()
+            # Aggregate detail rows sharing the same label per period
+            # (see comment in ``pool_balances_for_latest_period``).
+            row_agg: dict[str, dict[str, Any]] = {}
             for r in range(header_row, len(rows)):
                 row = rows[r]
                 if label_col_idx - 1 >= len(row):
@@ -1334,18 +1780,27 @@ def pool_balances_for_per_year_files(
                 if lc in _PER_MONTH_SKIP_PHRASES:
                     continue
                 key = lc
-                if key in seen:
-                    continue
-                seen.add(key)
                 bal = (_coerce_number(row[c]) if c < len(row) else None)
-                mapped = ltp.get(key, "")
-                slot["raw_rows"].append({
-                    "label": label, "balance": bal,
-                    "mapped_pool": mapped, "period": period_iso,
-                })
+                is_excluded = key in excl
+                mapped = "" if is_excluded else ltp.get(key, "")
+
+                existing = row_agg.get(key)
+                if existing is None:
+                    row_agg[key] = {
+                        "label": label, "balance": bal,
+                        "mapped_pool": mapped, "period": period_iso,
+                        "excluded": is_excluded,
+                    }
+                elif bal is not None:
+                    prev_bal = existing.get("balance")
+                    existing["balance"] = (
+                        bal if prev_bal is None else prev_bal + bal
+                    )
+
                 if mapped and bal is not None:
                     slot["by_pool"][mapped] = (
                         slot["by_pool"].get(mapped, 0.0) + bal)
+            slot["raw_rows"].extend(row_agg.values())
 
     return {"ok": True,
             "error": "; ".join(errors) if errors else None,

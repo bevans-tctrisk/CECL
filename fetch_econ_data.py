@@ -2,7 +2,7 @@
 
 Sources:
   - Unemployment rate (state): U.S. Bureau of Labor Statistics, LAUS
-  - Population (state): U.S. Census Bureau, ACS 1-Year Estimates
+  - Population (state): U.S. Census Bureau, Population Estimates Program
   - Bankruptcies (state): Administrative Office of the U.S. Courts
   - Foreclosures: Not available from free federal APIs
 """
@@ -95,22 +95,41 @@ def _fetch_unemployment(state_fips):
 # ── Census Bureau Population ───────────────────────────────────────
 
 def _fetch_population(state_fips):
-    """Fetch state population from Census ACS 1-Year Estimates.
+    """Fetch state population from the U.S. Census Bureau.
+
+    Uses the Population Estimates Program (PEP) bulk ``NST-EST`` CSV,
+    which is served keyless from ``www2.census.gov`` (the api.census.gov
+    JSON API now requires a registered key). Tries the most recent
+    vintages newest-first.
 
     Returns (population_int, data_year) or (None, None).
     """
     now_year = datetime.now().year
-    # ACS 1-year data is released ~Sep of the following year,
-    # so check from (current_year - 1) backwards.
-    for year in range(now_year - 1, now_year - 4, -1):
+    # PEP vintage CSVs are released ~Dec of the vintage year; check the
+    # last few vintages newest-first. Folder + filename both carry the
+    # vintage year, and the folder spans the current decade.
+    for year in range(now_year, now_year - 5, -1):
+        decade_start = (year // 10) * 10
+        url = (f'https://www2.census.gov/programs-surveys/popest/datasets/'
+               f'{decade_start}-{year}/state/totals/'
+               f'NST-EST{year}-ALLDATA.csv')
         try:
-            url = (f'https://api.census.gov/data/{year}/acs/acs1'
-                   f'?get=B01003_001E,NAME&for=state:{state_fips}')
             resp = requests.get(url, timeout=_TIMEOUT)
-            if resp.status_code == 200:
-                data = resp.json()
-                if len(data) > 1:
-                    return int(data[1][0]), year
+            if resp.status_code != 200 or len(resp.content) < 500:
+                continue
+            df = pd.read_csv(BytesIO(resp.content))
+            est_cols = sorted(c for c in df.columns
+                              if c.startswith('POPESTIMATE'))
+            if 'STATE' not in df.columns or not est_cols:
+                continue
+            pop_col = est_cols[-1]  # newest estimate in this vintage
+            row = df[df['STATE'].astype(str).str.zfill(2)
+                     == str(state_fips).zfill(2)]
+            if row.empty:
+                continue
+            val = row.iloc[0][pop_col]
+            if pd.notna(val):
+                return int(val), int(pop_col.replace('POPESTIMATE', ''))
         except Exception:
             continue
 
@@ -212,8 +231,8 @@ def fetch_economic_data(state_name, county_name):
         if pop is not None:
             result['population'] = pop
             sources['population'] = (
-                f'U.S. Census Bureau, American Community Survey '
-                f'1-Year Estimates ({data_year})')
+                f'U.S. Census Bureau, Population Estimates Program '
+                f'(Vintage {data_year})')
             log.info(f'    Population: {pop:,} ({data_year})')
     except Exception as e:
         log.warning(f'    Census population fetch failed: {e}')

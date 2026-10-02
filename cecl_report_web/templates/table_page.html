@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} — {{ page.credit_union }}{% endblock %}
+{% macro render_row(row) %}<tr>{% for cell in row %}<td colspan="{{ cell.colspan }}" class="{{ cell.align }}{% if cell.bold %} b{% endif %}">{{ cell | tcell }}</td>{% endfor %}</tr>{% endmacro %}
+{% block body %}
+<section class="page table-page {{ page.css_class }}">
+
+  <header class="rpt-header">
+    <div class="rpt-cu">{{ page.credit_union }}</div>
+    <div class="rpt-subhead">{{ page.title }}</div>
+    {% for line in page.heading_lines %}
+    <div class="rpt-subhead">{{ line }}</div>
+    {% endfor %}
+  </header>
+
+  {% for sec in page.sections %}
+  {% if sec.title %}<h3 class="tbl-section-title">{{ sec.title }}</h3>{% endif %}
+  <table class="data-table">
+    {% if sec.columns %}
+    <thead>
+      <tr>{% for col in sec.columns %}<th>{{ col }}</th>{% endfor %}</tr>
+    </thead>
+    {% endif %}
+    {% if sec.row_groups %}
+    {% for grp in sec.row_groups %}
+    <tbody class="row-group">
+      {% for row in grp %}{{ render_row(row) }}{% endfor %}
+    </tbody>
+    {% endfor %}
+    {% else %}
+    <tbody>
+      {% for row in sec.rows %}{{ render_row(row) }}{% endfor %}
+    </tbody>
+    {% endif %}
+  </table>
+  {% endfor %}
+
+  {% if page.notes %}
+  {% if page.notes_title %}<h3 class="tbl-section-title">{{ page.notes_title }}</h3>{% endif %}
+  <ul class="tbl-notes">
+    {% for n in page.notes %}<li>{{ n }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+</section>
+{% endblock %}

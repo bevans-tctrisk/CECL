@@ -1,0 +1,34 @@
+{# 5300 ACL fallback checkbox.
+
+   Included once per ACL form on Step 5 (single / per_month / per_year /
+   manual modes). Reads from the Jinja ``acl`` dict the parent template
+   already established with ``{% set acl = mb.acl or {} %}``.
+
+   The hidden ``acl_5300_fallback_present`` field is what the POST
+   handler keys off — when present, an unticked checkbox means the
+   user disabled the fallback, vs. "field absent" which means we
+   shouldn't touch the existing ``use_5300_fallback`` value. #}
+<input type="hidden" name="acl_5300_fallback_present" value="1">
+<div style="margin-top:14px; padding:10px 12px;
+            background:#f6fbff; border:1px solid #cfe5ff;
+            border-radius:6px;">
+  <label style="display:flex; align-items:flex-start; gap:8px;
+                cursor:pointer; line-height:1.35;">
+    <input type="checkbox" name="acl_use_5300_fallback" value="1"
+           {% if acl.get('use_5300_fallback', True) %}checked{% endif %}
+           style="margin-top:3px;">
+    <span>
+      <strong>Pull ACL from NCUA 5300 when missing</strong>
+      <br>
+      <span class="muted" style="font-size:12px;">
+        When checked, the report engine will fill any quarter-end
+        ACL value that the credit union did not provide (or left
+        blank/$0 in the file source) by querying NCUA Form 5300
+        directly. Probes A718A3 (CECL ACL on Loans) → A718A5
+        (Total ACL) → A719 (legacy ALLL), first non-zero wins.
+        Requires the CU's NCUA charter number (Step 1). Existing
+        values in the balance file always take precedence.
+      </span>
+    </span>
+  </label>
+</div>

@@ -20,6 +20,96 @@
     month) to use.
   </p>
 
+  {# -----------------------------------------------------------------
+     Auto-detected pool grouping panel (only when the auto-scan found
+     a consolidated "Balance Sheets <CU>" workbook and seeded state
+     with the parent-pool + sub-category mapping).
+     ----------------------------------------------------------------- #}
+  {% if state._pool_seed and (state._pool_seed.pools or []) %}
+  {% set _grouping_choices = state._pool_grouping_choices or {} %}
+  <div style="background:#f5f9ff; border:1px solid #b6d2f0; border-radius:6px;
+              padding:14px 16px; margin:18px 0;">
+    <h3 style="margin-top:0;">
+      Auto-detected Pool Grouping
+      <span class="muted" style="font-weight:normal;">
+        from {{ state._pool_seed.source_file or 'balance-sheet workbook' }}
+      </span>
+    </h3>
+    <p class="muted" style="margin:6px 0 12px;">
+      The wizard extracted the parent pools below from your balance-sheet
+      workbook. For each one, choose whether to keep the sub-categories
+      grouped together as a <strong>single pool</strong> or split them
+      into <strong>individual pools</strong>. Splitting also re-routes
+      the Step 8 Monthly Balance pool map so each sub-category points to
+      its own pool. Manual edits you make below (rename / risk-rated /
+      ACL months) are preserved when names match.
+    </p>
+    <form method="post">
+      <table style="width:100%; border-collapse:collapse; font-size:13px;">
+        <thead>
+          <tr style="background:#e2ecf7; text-align:left;">
+            <th style="padding:6px 8px;">Parent Pool</th>
+            <th style="padding:6px 8px;">Sub-categories</th>
+            <th style="padding:6px 8px; width:280px;">Choice</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for pool in state._pool_seed.pools %}
+            {% set _idx = loop.index0 %}
+            {% set _choice = _grouping_choices.get(pool.name, 'keep') %}
+            {% set _subs = pool.subcategories or [] %}
+            <tr style="border-bottom:1px solid #d6e4f4; vertical-align:top;">
+              <td style="padding:8px;">
+                <strong>{{ pool.name }}</strong>
+                <input type="hidden" name="grp_pool_name" value="{{ pool.name }}">
+              </td>
+              <td style="padding:8px;">
+                {% if _subs %}
+                  <ul style="margin:0; padding-left:18px;">
+                    {% for sc in _subs %}
+                      <li>
+                        <span class="muted" style="font-family:monospace;">{{ sc.code }}</span>
+                        &nbsp;{{ sc.label }}
+                      </li>
+                    {% endfor %}
+                  </ul>
+                {% else %}
+                  <span class="muted">(no sub-categories detected)</span>
+                {% endif %}
+              </td>
+              <td style="padding:8px;">
+                <label style="display:block; margin-bottom:6px;">
+                  <input type="radio" name="grp_choice_{{ _idx }}" value="keep"
+                         {% if _choice == 'keep' %}checked{% endif %}>
+                  Keep as a single pool
+                </label>
+                <label style="display:block;">
+                  <input type="radio" name="grp_choice_{{ _idx }}" value="split"
+                         {% if _choice == 'split' %}checked{% endif %}
+                         {% if not _subs %}disabled{% endif %}>
+                  Split into individual pools
+                  {% if _subs %}
+                    <span class="muted">({{ _subs | length }} new pool{% if _subs|length != 1 %}s{% endif %})</span>
+                  {% endif %}
+                </label>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div style="margin-top:12px; display:flex; gap:10px; align-items:center;">
+        <button class="btn btn-primary" type="submit"
+                name="action" value="apply_pool_grouping">
+          Apply grouping &amp; rebuild pool list
+        </button>
+        <span class="muted" style="font-size:12px;">
+          This rewrites the Pools table below and updates Step 8's pool map.
+        </span>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
   {% set ps_by_name = {} %}
   {% for s in (state.pool_settings or []) %}
     {% set _ = ps_by_name.update({s.name: s}) %}
@@ -31,7 +121,8 @@
           and not (_pn.startswith('allowance for credit loss')
                    or _pn.startswith('credit grade deteriorated')
                    or _pn.startswith('grand total')
-                   or _pn.startswith('total')
+                   or _pn == 'total'
+                   or _pn == 'total loans'
                    or _pn.startswith('hide')
                    or _pn == 'exclude'
                    or _pn == 'allowance') %}

@@ -13,7 +13,10 @@
         <tr>
           <td>{{ c.short_name }}</td>
           <td>{{ c.credit_union }}</td>
-          <td><a class="btn btn-primary" href="{{ url_for('run.client_dashboard', short_name=c.short_name) }}">Open</a></td>
+          <td style="white-space:nowrap;">
+            <a class="btn btn-success" href="{{ url_for('run.new_quarter', short_name=c.short_name) }}">Run New Quarter</a>
+            <a class="btn btn-primary" href="{{ url_for('run.client_dashboard', short_name=c.short_name) }}">Open</a>
+          </td>
         </tr>
         {% endfor %}
       </tbody>

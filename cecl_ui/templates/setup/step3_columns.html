@@ -2,6 +2,14 @@
 {% block title %}Column Mappings{% endblock %}
 {% block content %}
 {% include "setup/_stepper.html" %}
+{% from "setup/_files_used_panel.html" import files_used_panel %}
+
+{% if files_used and files_used.data_directory %}
+{{ files_used_panel(files_used,
+   "These are the loan-data extract files found in the credit union&rsquo;s data
+    folder that the report will import, matched by each extract&rsquo;s filename
+    pattern. Review them to validate the source data used.") }}
+{% endif %}
 
 <div class="card">
   <h2>Column Mappings</h2>
@@ -33,6 +41,24 @@
       {% set ma_mode = ma.get('mode', 'fixed_suffix') %}
       {% set ma_suffix = ma.get('suffix_length', 3) %}
       {% set ma_delim = ma.get('delimiter', '-') %}
+      {# member_account_suggestion: parser-inferred layout from sample
+         values. Used to drive the "✓ auto-detected" hint when the
+         entry's saved values match the inference. #}
+      {% set ma_sug = fv.member_account_suggestion or {} %}
+      {% set ma_auto_match = ma_sug and (
+           ma_sug.get('mode') == ma_mode
+           and (ma_mode != 'delimiter' or (ma_sug.get('delimiter') or '-') == (ma_delim or '-'))
+           and (ma_mode != 'fixed_suffix' or (ma_sug.get('suffix_length') or 0) | int == (ma_suffix or 0) | int)
+         ) %}
+      {# Top-level (state-wide) member_account dict. When the per-file
+         dict diverges, render a "Custom override" pill so the analyst
+         knows this extract isn't inheriting the global setting. #}
+      {% set ma_top = fv.top_level_member_account or {} %}
+      {% set ma_overridden = ma_top and (
+           ma_top.get('mode') != ma_mode
+           or (ma_mode == 'delimiter' and (ma_top.get('delimiter') or '-') != (ma_delim or '-'))
+           or (ma_mode == 'fixed_suffix' and (ma_top.get('suffix_length') or 0) | int != (ma_suffix or 0) | int)
+         ) %}
 
       {% macro hlabel(h) -%}
         {%- if not header_detected and first_row.get(h) -%}
@@ -95,6 +121,34 @@
       <h3>Member &amp; Account number</h3>
       <p class="muted">Pick the shape that matches this file's member /
         account / suffix layout.</p>
+
+      {% if ma_auto_match %}
+        <p style="color:#2a7; margin:4px 0 8px;">
+          <span style="font-weight:bold;">&#10003;</span>
+          Auto-detected from sample data
+          ({{ ma_sug.get('confidence', 'medium') }} confidence).
+          {% if ma_sug.get('rationale') %}
+            <span class="help">{{ ma_sug.get('rationale') }}</span>
+          {% endif %}
+        </p>
+      {% elif ma_sug and ma_sug.get('mode') %}
+        <p style="color:#26a; margin:4px 0 8px;">
+          <span style="font-weight:bold;">&#9432;</span>
+          Sample suggests <strong>{{ ma_sug.get('mode') }}</strong>
+          {% if ma_sug.get('mode') == 'delimiter' %}with delimiter <code>{{ ma_sug.get('delimiter') }}</code>{% endif %}
+          {% if ma_sug.get('mode') == 'fixed_suffix' %}with suffix length <code>{{ ma_sug.get('suffix_length') }}</code>{% endif %}.
+          {% if ma_sug.get('rationale') %}
+            <span class="help">{{ ma_sug.get('rationale') }}</span>
+          {% endif %}
+        </p>
+      {% endif %}
+      {% if ma_overridden %}
+        <p style="color:#a60; margin:4px 0 8px;">
+          <span style="font-weight:bold;">&#9888;</span>
+          Custom override on this extract — differs from top-level
+          (<code>{{ ma_top.get('mode') }}</code>{% if ma_top.get('mode') == 'delimiter' %} delimiter <code>{{ ma_top.get('delimiter') }}</code>{% elif ma_top.get('mode') == 'fixed_suffix' %} suffix length <code>{{ ma_top.get('suffix_length') }}</code>{% endif %}).
+        </p>
+      {% endif %}
 
       <div class="form-row">
         <div>
@@ -184,11 +238,51 @@
         </div>
       </div>
 
+      <h3>Pool-code separator</h3>
+      <div class="form-row">
+        <div>
+          {% set _top_split = state.pool_code_split or '/' %}
+          {% set _entry_split = fv.pool_code_split %}
+          <label>How to extract the pool code from this file's raw value
+            <select name="{{ prefix }}pool_code_split" style="width:340px;">
+              <option value="__inherit__"
+                {% if _entry_split is none %}selected{% endif %}>
+                Inherit top-level (currently: split on
+                  &ldquo;{{ _top_split }}&rdquo;)
+              </option>
+              <option value="__none__"
+                {% if _entry_split is not none and _entry_split == '' %}selected{% endif %}>
+                Don&rsquo;t split &mdash; use the raw value as-is
+              </option>
+              <option value="/"
+                {% if _entry_split == '/' %}selected{% endif %}>
+                Split on &ldquo;/&rdquo;
+              </option>
+              <option value="-"
+                {% if _entry_split == '-' %}selected{% endif %}>
+                Split on &ldquo;-&rdquo;
+              </option>
+            </select>
+            <span class="help">Most CUs use the default. Pick
+              <strong>Don&rsquo;t split</strong> when this extract&rsquo;s
+              loan codes legitimately contain the separator character
+              (e.g. CUMA mortgage products like
+              <code>15/15&nbsp;ARM</code>, <code>5/1&nbsp;ARM</code>,
+              <code>10/1&nbsp;ARM</code>). Without this override, the
+              importer would truncate <code>15/15&nbsp;ARM</code> to just
+              <code>15</code> and route it to the default pool
+              (typically <code>Ignore</code>), silently excluding those
+              loans from the report.
+            </span>
+          </label>
+        </div>
+      </div>
+
       <h3>Required</h3>
       <div class="form-row">
         {{ field('current_balance',     'Current balance',         required=True) }}
         {{ field('loan_pool_code',      'Loan pool code') }}
-        {{ field('days_delinquent',     'Days delinquent',         required=True) }}
+        {{ field('days_delinquent',     'Days delinquent') }}
       </div>
       <div class="form-row">
         <div>
@@ -208,10 +302,28 @@
       <h3>Optional <span class="muted">(improves report detail)</span></h3>
       <div class="form-row">
         {{ field('original_fico_score',    'Original FICO score') }}
+        {{ field('current_fico_score',     'Current FICO score') }}
         {{ field('interest_rate',          'Interest rate') }}
         {{ field('open_date',              'Open / origination date') }}
         {{ field('original_loan_amount',   'Original loan amount') }}
         {{ field('total_available_credit', 'Total available credit') }}
+      </div>
+
+      <div class="form-row">
+        {{ field('business_risk_rating',
+                 'Business Risk Rating') }}
+        <div>
+          <p class="help" style="margin:6px 0 0;">
+            Required only when this CU has one or more pools marked
+            <strong>&ldquo;Yes &mdash; broken out by Business RR&rdquo;</strong>
+            on the <a href="{{ url_for('setup.step4_pools') }}">Loan
+            Pools</a> step. Each loan in a business-risk-rated pool is
+            bucketed using this column's value, matched against the
+            criteria defined on the <a href="{{ url_for('setup.step5_grades') }}">Credit
+            Grades and Business Risk Ratings</a> step. Loans in
+            credit-grade pools ignore this column.
+          </p>
+        </div>
       </div>
 
       {% if fv.sample_rows %}
@@ -255,7 +367,7 @@
 
     <div class="btn-row">
       <a class="btn btn-secondary" href="{{ url_for('setup.step2_sample') }}">&larr; Back</a>
-      <button class="btn btn-primary" type="submit">Save all &amp; Next: Loan Code Mapping &rarr;</button>
+      <button class="btn btn-primary" type="submit" name="action" value="next">Save all &amp; Next: Balance Adjustment &rarr;</button>
     </div>
   </form>
 

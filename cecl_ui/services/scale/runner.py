@@ -21,14 +21,18 @@ from pathlib import Path
 from typing import Any
 import re
 import shutil
+import xml.etree.ElementTree as _ET
 import zipfile
 
 import openpyxl
+from openpyxl.worksheet.properties import PageSetupProperties
 
 from . import (
-    env_factor_writer, excel_recalc, impaired_loader, mapping_loader,
-    mgmt_adj_writer, qfactor_loader, runs_service, solr_fetcher,
-    template_loader, vizo_explanation_formatter,
+    acl_history_db, env_factor_writer, excel_recalc, impaired_loader,
+    lol_writer, mapping_loader, mgmt_adj_writer, qfactor_loader,
+    runs_service, solr_fetcher, template_loader,
+    tct_change_analysis, unfunded_writer, vizo_explanation_formatter,
+    vizo_layout,
 )
 
 
@@ -210,10 +214,85 @@ _TCT_ONLY_SHEETS = {
 }
 _VIZO_ONLY_SHEETS = {
     "Cover-Vizo", "Executive Summary-Vizo", "Scale Calculation-Vizo",
-    "Env Factor by Pool-Vizo", " Impaired Loans-Vizo", "Introduction-Vizo",
-    "Explanation of ACL Calc-Vizo", "Envir Factor Ranges-Vizo",
-    "New Report Calc-Vizo",
+    "Env Factor by Pool-Vizo", " Impaired Loans-Vizo", "Historical Summary",
+    "Change Analysis", "Appendix-Vizo", "Appendix 2-Vizo",
+    "Envir Factor Ranges-Vizo", "New Report Calc-Vizo",
 }
+
+# Merged into 'Env Factor by Pool-Vizo'; retained for cross-sheet formula
+# refs but never shown in either variant.
+_ALWAYS_HIDDEN_SHEETS = {
+    "Envir Factor Ranges-Vizo",
+}
+
+_ONE_PAGE_RANGE_SHEETS = {
+    "Environmental Factor Ranges",
+    "Envir Factor Ranges-Vizo",
+}
+
+
+def _force_one_page_ranges(wb) -> None:
+    """Ensure Env Factor ranges tabs print on a single page.
+
+    Some generated files can spill this tab across a second page from
+    printer defaults. Force fit-to-page at save time.
+    """
+    for name in wb.sheetnames:
+        if name not in _ONE_PAGE_RANGE_SHEETS:
+            continue
+        ws = wb[name]
+        if ws.sheet_properties.pageSetUpPr is None:
+            ws.sheet_properties.pageSetUpPr = PageSetupProperties()
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 1
+        ws.page_setup.scale = None
+
+
+def _normalize_open_view(wb, keep_variant: str) -> None:
+    """Force a single workbook window and select the intended Cover tab.
+
+    Some seed workbooks carry multiple saved workbook views, which causes
+    Excel to open the file in two windows on different tabs. Keep exactly
+    one view and select the variant's cover tab.
+    """
+    visible = [s for s in wb.sheetnames if wb[s].sheet_state == "visible"]
+    if not visible:
+        return
+
+    preferred = "Cover" if keep_variant == "tct" else "Cover-Vizo"
+    if preferred not in visible:
+        preferred = visible[0]
+    preferred_idx = wb.sheetnames.index(preferred)
+
+    wb.active = preferred_idx
+    for name in wb.sheetnames:
+        ws = wb[name]
+        # Some carried templates contain a second sheetView
+        # (workbookViewId=1). If we keep only one workbook view, those
+        # orphan sheetViews make Excel show a repair prompt. Collapse
+        # each sheet to a single view bound to workbookViewId=0.
+        try:
+            views = getattr(ws, "views", None)
+            sv_list = getattr(views, "sheetView", None)
+            if isinstance(sv_list, list) and sv_list:
+                primary_sv = sv_list[0]
+                views.sheetView = [primary_sv]
+                primary_sv.workbookViewId = 0
+                primary_sv.tabSelected = False
+            else:
+                ws.sheet_view.workbookViewId = 0
+                ws.sheet_view.tabSelected = False
+        except Exception:  # noqa: BLE001
+            ws.sheet_view.workbookViewId = 0
+            ws.sheet_view.tabSelected = False
+
+    wb[preferred].sheet_view.tabSelected = True
+
+    if wb.views:
+        primary = wb.views[0]
+        primary.activeTab = preferred_idx
+        wb.views = [primary]
 
 
 def _hide_other_variant(
@@ -232,6 +311,8 @@ def _hide_other_variant(
         ws = wb[name]
         if name.startswith("DNU "):
             hide = True
+        elif name in _ALWAYS_HIDDEN_SHEETS:
+            hide = True
         elif keep_variant == "tct" and name in _VIZO_ONLY_SHEETS:
             hide = True
         elif keep_variant == "vizo" and name in _TCT_ONLY_SHEETS:
@@ -244,11 +325,72 @@ def _hide_other_variant(
         else:
             ws.sheet_state = "visible"
             kept.append(name)
-    visible = [s for s in wb.sheetnames if wb[s].sheet_state == "visible"]
-    if visible:
-        wb.active = wb.sheetnames.index(visible[0])
+    _force_one_page_ranges(wb)
+    _normalize_open_view(wb, keep_variant)
     wb.save(workbook_path)
     return hidden, kept
+
+
+def _hide_total_chargeoff_vizo_rows(workbook_path: str | Path) -> list[int]:
+    """Hide the "Total Charge Offs" summary row(s) on the
+    ``New Report Calc-Vizo`` tab (a misleading subtotal).
+
+    The tab mirrors the ``Calc tab`` via per-cell formulas
+    (``='Calc tab'!A54``), so the row label isn't a literal here — it's
+    read one hop back from ``Calc tab``. The row position shifts with
+    template/pool layout, so match by label rather than a fixed row.
+    """
+    hidden: list[int] = []
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception:  # noqa: BLE001
+        return hidden
+    sheet = next((s for s in wb.sheetnames
+                  if s.strip().lower() == "new report calc-vizo"), None)
+    if not sheet:
+        return hidden
+    ws = wb[sheet]
+    calc = next((s for s in wb.sheetnames
+                 if s.strip().lower() == "calc tab"), None)
+    calc_ws = wb[calc] if calc else None
+    ref_re = re.compile(r"'?Calc tab'?!\$?A\$?(\d+)", re.IGNORECASE)
+
+    def _is_total_co(label: Any) -> bool:
+        return (isinstance(label, str)
+                and label.strip().lower().startswith("total charge off"))
+
+    for r in range(1, ws.max_row + 1):
+        raw = ws.cell(row=r, column=1).value
+        label = None
+        if isinstance(raw, str) and raw.startswith("="):
+            m = ref_re.search(raw)
+            if m and calc_ws is not None:
+                label = calc_ws.cell(row=int(m.group(1)), column=1).value
+        else:
+            label = raw
+        if _is_total_co(label):
+            ws.row_dimensions[r].hidden = True
+            hidden.append(r)
+    if hidden:
+        try:
+            wb.save(workbook_path)
+        except Exception:  # noqa: BLE001
+            return []
+    return hidden
+
+
+def _resolve_template_for(out_path: Path) -> str | None:
+    """Resolve the canonical template for the period baked into a report
+    filename (``<period>_CECL_SCALE_...``). Used to source the merged Env
+    Factor + redesigned Cover during layout normalization."""
+    m = re.match(r"^(\d{4}-\d{2})_CECL_SCALE_", Path(out_path).stem)
+    if not m:
+        return None
+    try:
+        res = template_loader.resolve_template(m.group(1))
+        return res.get("path") if res.get("ok") else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def apply_report_variant(
@@ -277,6 +419,9 @@ def apply_report_variant(
     if v not in ("tct", "vizo", "both"):
         v = "both"
     master = Path(workbook_path)
+    # Hide the misleading "Total Charge Offs" row on New Report Calc-Vizo
+    # before copies are made so it propagates to the Vizo output.
+    _hide_total_chargeoff_vizo_rows(master)
     targets: list[str] = []
     if v in ("tct", "both"):
         targets.append("tct")
@@ -294,6 +439,19 @@ def apply_report_variant(
         out_path = master.with_name(master.stem + suffix + master.suffix)
         shutil.copy2(master, out_path)
         hidden, kept = _hide_other_variant(out_path, which)
+        if which == "tct":
+            # Add quarter-over-quarter narrative tab immediately after
+            # Calc tab (SCALE analogue of Migration change analysis).
+            tct_change_analysis.append_tct_change_analysis(out_path)
+        else:
+            # Vizo: reshape to the approved redesign layout first (idempotent;
+            # carry-history reports are seeded from the prior quarter and
+            # would otherwise keep the old tab order/names), then fill the
+            # 'Change Analysis' placeholder with the change analysis.
+            vizo_layout.normalize_vizo_layout(
+                out_path, _resolve_template_for(out_path),
+            )
+            tct_change_analysis.append_vizo_change_analysis(out_path)
         theme_bytes = tct_theme if which == "tct" else vizo_theme
         theme_label = "Office default" if which == "tct" else "Vizo"
         if theme_bytes is not None:
@@ -331,11 +489,37 @@ def _report_variant_from_state(state: dict) -> str:
     return (scale.get("report_variant") or "both").strip().lower()
 
 
+def _resolve_cu_name(doc, solr_url, solr_core, charter, scale) -> str:
+    """Credit union name for the report. A non-empty ``cu_name_override`` in
+    the scale block wins (it distributes via Historical Data!B2); otherwise
+    use the MOST RECENT 5300 filing, falling back to the modeled-period
+    ``doc``'s cuname. Best-effort — never raises."""
+    override = ((scale or {}).get("cu_name_override") or "").strip()
+    if override:
+        return override
+    try:
+        name = solr_fetcher.most_recent_cuname(
+            solr_url, solr_core, charter,
+            username=scale.get("solr_user") or None,
+            password=scale.get("solr_pass") or None,
+        )
+    except Exception:  # noqa: BLE001
+        name = ""
+    if not name:
+        name = solr_fetcher.coerce_cu_name(
+            (doc or {}).get("cuname")
+            or (doc or {}).get("CU_NAME")
+            or (doc or {}).get("cu_name")
+        )
+    return name
+
+
 def fill_template(
     template_path: str | Path,
     out_path: str | Path,
     mapping_rows: list[dict],
     fields: dict[str, Any],
+    cu_name: str | None = None,
 ) -> dict:
     wb = openpyxl.load_workbook(template_path)
     applied = 0
@@ -357,6 +541,21 @@ def fill_template(
             applied += 1
         except Exception as exc:  # noqa: BLE001
             issues.append(f"Failed to write {code} to {sheet}!{cell}: {exc}")
+    # Always refresh the credit union name so the Cover (Cover!A13 and
+    # Cover-Vizo!A15 both chain to 'Historical Data'!B2) shows the current
+    # name. Prefer the caller-supplied name (resolved from the MOST RECENT
+    # 5300 filing); fall back to this modeled period's doc. Only the
+    # 2018_03 / 2025_06 mappings carry the ``cuname``->B2 row, so without
+    # this every other period left B2 stale from a prior quarter / seed.
+    resolved_name = solr_fetcher.coerce_cu_name(cu_name)
+    if not resolved_name:
+        resolved_name = solr_fetcher.coerce_cu_name(
+            fields.get("cuname")
+            or fields.get("CU_NAME")
+            or fields.get("cu_name")
+        )
+    if resolved_name and "Historical Data" in wb.sheetnames:
+        wb["Historical Data"]["B2"].value = resolved_name
     wb.save(out_path)
     return {
         "applied": applied,
@@ -708,17 +907,19 @@ def apply_env_factors_to_historical_data(
     state_name: str,
     county_name: str = "",
     sheet: str = "Historical Data",
+    econ_overrides: dict | None = None,
 ) -> dict:
     """Write fresh environmental-factor values into the new quarter
     column on ``Historical Data`` rows 139-142.
 
-    Calls :func:`fetch_econ_data.fetch_economic_data` (same source as
-    the Migration Model) and writes results to ``{target_col}139``
-    (unemployment), ``{target_col}141`` (bankruptcies), and
-    ``{target_col}142`` (population). Foreclosures (``{target_col}140``)
-    has no federal API and always falls back to the prior column.
-    When a fetch fails for any other key, that row also falls back to
-    the prior column. Target cells are always overwritten (the
+    Precedence per row: the CU's saved ``economic_data``
+    (``econ_overrides``, keyed ``unemployment_rate``/``foreclosures``/
+    ``bankruptcies``/``population`` — what the dashboard card shows and
+    the analyst may have hand-corrected, e.g. a county unemployment
+    rate in place of the statewide figure) wins. Only rows with no
+    saved value are filled from :func:`fetch_econ_data.fetch_economic_data`
+    (same source as the Migration Model); anything still missing falls
+    back to the prior column. Target cells are always overwritten (the
     carry-clone may leave stale source-label strings there).
     """
     result: dict[str, Any] = {
@@ -728,6 +929,7 @@ def apply_env_factors_to_historical_data(
         "state_name": state_name,
         "county_name": county_name,
         "fetched": {},
+        "override_rows": [],
         "fallback_rows": [],
         "cells_written": [],
         "error": "",
@@ -738,8 +940,23 @@ def apply_env_factors_to_historical_data(
     if not prior_col or not _COL_LETTERS_RE.match(prior_col):
         result["error"] = f"invalid prior_col {prior_col!r}"
         return result
+    overrides = econ_overrides or {}
+
+    def _num(v: Any) -> float | None:
+        try:
+            f = float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+        return f if f is not None and f != 0 else None
+
+    saved: dict[str, float] = {}
+    for _row, key in _ENV_FACTOR_ROW_MAP:
+        ov_num = _num(overrides.get(key))
+        if ov_num is not None:
+            saved[key] = ov_num
+    need_fetch = [key for _row, key in _ENV_FACTOR_ROW_MAP if key not in saved]
     fetched: dict[str, Any] = {}
-    if state_name:
+    if state_name and need_fetch:
         try:
             import importlib
             fed = importlib.import_module("fetch_econ_data")
@@ -747,7 +964,7 @@ def apply_env_factors_to_historical_data(
         except Exception as exc:  # noqa: BLE001
             result["error"] = f"fetch failed: {exc}"
             fetched = {}
-    else:
+    elif not state_name and need_fetch:
         result["error"] = "state_name empty; using prior column for all rows"
     try:
         wb = openpyxl.load_workbook(workbook_path)
@@ -760,25 +977,141 @@ def apply_env_factors_to_historical_data(
     ws = wb[sheet]
     cells_written: list[str] = []
     for row, key in _ENV_FACTOR_ROW_MAP:
-        value = fetched.get(key)
-        # Coerce empty / missing / non-numeric to None so we fall back.
-        if isinstance(value, str):
-            try:
-                value = float(value)
-            except (TypeError, ValueError):
-                value = None
-        if value is None or value == 0:
-            prior_val = ws[f"{prior_col}{row}"].value
-            value = prior_val
-            result["fallback_rows"].append(row)
+        if key in saved:
+            value: Any = saved[key]
+            result["override_rows"].append(row)
         else:
-            result["fetched"][key] = value
+            value = _num(fetched.get(key))
+            if value is not None:
+                result["fetched"][key] = value
+            else:
+                value = ws[f"{prior_col}{row}"].value
+                result["fallback_rows"].append(row)
         coord = f"{target_col}{row}"
         ws[coord] = value
         cells_written.append(coord)
     wb.save(workbook_path)
     result["cells_written"] = cells_written
     result["ok"] = True
+    return result
+
+
+def apply_scale_geography(
+    workbook_path: str | Path,
+    state_name: str,
+    county_name: str = "",
+) -> dict:
+    """Write the CU's state/county into the SCALE workbook.
+
+    SCALE templates ship with placeholder geography: ``Historical
+    Data!B4/B5`` hold the literal text ``State``/``County`` (the
+    non-Vizo Env Factor by Pool tab shows them via
+    ``='Historical Data'!B4/B5``) and the ``Env Factor by Pool-Vizo``
+    tab hardcodes a sample ``Minnesota`` / ``Saint Louis``. Nothing in
+    the fill overrides them, so every report showed the wrong location.
+    This writes the real state/county into all four cells. County name
+    has a trailing ``County``/``Parish``/``Borough`` stripped for
+    display to match the template's convention.
+    """
+    result: dict[str, Any] = {"ok": False, "cells_written": [], "error": ""}
+    state_name = (state_name or "").strip()
+    county_disp = re.sub(
+        r"\s+(County|Parish|Borough|Census Area)$", "",
+        (county_name or "").strip(), flags=re.IGNORECASE,
+    )
+    if not state_name and not county_disp:
+        result["error"] = "state and county both empty"
+        return result
+    try:
+        wb = openpyxl.load_workbook(workbook_path)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"open failed: {exc}"
+        return result
+    written: list[str] = []
+    targets = [
+        ("Historical Data", "B4", "B5"),
+        ("Env Factor by Pool-Vizo", "B7", "B9"),
+    ]
+    for sheet, state_cell, county_cell in targets:
+        if sheet not in wb.sheetnames:
+            continue
+        ws = wb[sheet]
+        if state_name:
+            ws[state_cell] = state_name
+            written.append(f"{sheet}!{state_cell}")
+        if county_disp:
+            ws[county_cell] = county_disp
+            written.append(f"{sheet}!{county_cell}")
+    if written:
+        wb.save(workbook_path)
+    result["ok"] = True
+    result["cells_written"] = written
+    return result
+
+
+def advance_fallback_template_column(
+    out_path: str | Path,
+    rows: list[dict],
+    period: str,
+    state: dict,
+) -> dict:
+    """Advance a fallback template's current-quarter column to the
+    mapping's target column.
+
+    When no per-quarter SCALE template exists for ``period`` the runner
+    falls back to the newest older template, whose downstream formulas
+    are pinned to that older quarter's Historical Data column (e.g. a
+    2026-03 template computes off column ``AZ``). The period's mapping
+    CSV, however, writes the fetched 5300 data into a NEWER column
+    (2026-06 -> ``BA``). Without this step the report silently computes
+    off the old column and shows the prior quarter's numbers.
+
+    Mirrors ``run_quarter_carry_history``'s column-advance: retarget the
+    formula refs, seed the new column's header/snapshot/date cells,
+    drag-fill the non-mapped formula rows, and refresh the
+    environmental factors. No-op (``ok`` stays False) when the target
+    column can't be derived or the template's current column can't be
+    detected; a no-op success (``ok`` True) when they already match.
+    """
+    result: dict[str, Any] = {
+        "ok": False, "applied": False, "target_col": "", "prior_col": "",
+        "shift": {}, "seed": {}, "propagate": {}, "env": {}, "error": "",
+    }
+    target_col = _target_column_from_mapping_rows(rows)
+    if not target_col:
+        result["error"] = "no Historical Data target column in mapping"
+        return result
+    prior_col = _detect_prior_column(out_path, _PRIOR_COLUMN_ANCHORS)
+    result["target_col"] = target_col
+    result["prior_col"] = prior_col
+    if not prior_col:
+        result["error"] = "could not detect the template's current column"
+        return result
+    if prior_col == target_col:
+        # Template's current column already matches the mapping target
+        # (exact-period template, or a fallback that happens to align).
+        result["ok"] = True
+        return result
+
+    result["shift"] = shift_historical_data_column_refs(
+        out_path, prior_col, target_col,
+    )
+    result["seed"] = seed_new_historical_data_column(
+        out_path, target_col, period,
+    )
+    result["propagate"] = propagate_column_formulas(
+        out_path, prior_col, target_col,
+        sheet="Historical Data", start_row=2,
+    )
+    econ_state = state.get("economic_data") or {}
+    result["env"] = apply_env_factors_to_historical_data(
+        out_path, target_col, prior_col,
+        str(econ_state.get("state") or "").strip(),
+        str(econ_state.get("county") or "").strip(),
+        econ_overrides=econ_state,
+    )
+    result["ok"] = True
+    result["applied"] = True
     return result
 
 
@@ -852,22 +1185,91 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
                 "ran_at": "", "output_path": ""}
 
     out_path = _output_path(workspace_root, short, period)
-    fill = fill_template(tmpl["path"], out_path, rows, doc)
+    # Defensive: remove a stale master left behind by a prior failed
+    # run. The fill_template/save path always rebuilds from the canonical
+    # template, so this file should never pre-exist before a single-run.
+    try:
+        if Path(out_path).exists():
+            Path(out_path).unlink()
+    except OSError:
+        pass
+    fill = fill_template(
+        tmpl["path"], out_path, rows, doc,
+        cu_name=_resolve_cu_name(doc, solr_url, solr_core, charter, scale),
+    )
 
-    qf_entries = _qfactor_entries_from_state(state)
-    qf_result = apply_qfactors(out_path, qf_entries)
+    # When no exact-period template exists the runner falls back to the
+    # newest older template, whose calc formulas are pinned to that
+    # older quarter's Historical Data column. Advance them to this
+    # period's mapping column so the fetched 5300 data actually feeds
+    # the calcs (otherwise the report silently shows the prior quarter).
+    col_advance: dict[str, Any] = {}
+    if tmpl.get("source") == "canonical_fallback":
+        col_advance = advance_fallback_template_column(
+            out_path, rows, period, state,
+        )
 
-    mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
-    mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
-    mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
+    # Override the template's placeholder/sample geography with this
+    # CU's state/county and refresh its environmental factors for the
+    # current column. The fallback-advance path already refreshed the
+    # factors, so only the names need setting there.
+    _econ = state.get("economic_data") or {}
+    _geo_state = str(_econ.get("state") or "").strip()
+    _geo_county = str(_econ.get("county") or "").strip()
+    apply_scale_geography(out_path, _geo_state, _geo_county)
+    if not col_advance.get("applied"):
+        _env_col = _target_column_from_mapping_rows(rows)
+        _prior_env_col = _detect_prior_column(
+            out_path, _PRIOR_COLUMN_ANCHORS) or _env_col
+        if _env_col:
+            apply_env_factors_to_historical_data(
+                out_path, _env_col, _prior_env_col, _geo_state, _geo_county,
+                econ_overrides=_econ,
+            )
 
-    imp_rows = _impaired_rows_from_state(state)
-    imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
+    try:
+        qf_entries = _qfactor_entries_from_state(state)
+        qf_result = apply_qfactors(out_path, qf_entries)
 
-    env_result = env_factor_writer.apply_env_factor_ranges(out_path)
+        mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
+        mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
+        mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
 
-    variant = _report_variant_from_state(state)
-    variant_result = apply_report_variant(out_path, variant)
+        lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
+        lol_result = lol_writer.apply_lol_effective(
+            out_path, tmpl["path"], lol_overrides
+        )
+
+        imp_rows = _impaired_rows_from_state(state)
+        imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
+
+        env_result = env_factor_writer.apply_env_factor_ranges(out_path)
+
+        unfunded_result = unfunded_writer.apply_unfunded(out_path, state)
+
+        variant = _report_variant_from_state(state)
+        variant_result = apply_report_variant(out_path, variant)
+    except (PermissionError, OSError) as _saveexc:
+        _msg = (
+            f"Permission denied writing to {Path(out_path).name}. "
+            f"The workbook is likely open in Excel or locked by a sync "
+            f"client (Egnyte / OneDrive). Close it everywhere and re-run. "
+            f"(details: {_saveexc})"
+            if isinstance(_saveexc, PermissionError)
+            else f"OS error writing to {Path(out_path).name}: {_saveexc}"
+        )
+        return {
+            "ok": False,
+            "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "output_path": str(out_path),
+            "output_files": [],
+            "period": period,
+            "charter": charter,
+            "errors": [_msg],
+            "template_path": tmpl["path"],
+            "template_source": tmpl["source"],
+            "template_message": tmpl.get("message", ""),
+        }
     primary_output = (
         variant_result["outputs"][0]["path"]
         if variant_result["outputs"] else str(out_path)
@@ -884,6 +1286,9 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         workspace_root, short, period, variant_result["outputs"]
     )
     recalc_results = _recalc_outputs(variant_result["outputs"])
+    db_captures = _capture_current_period_to_db(
+        short, period, variant_result["outputs"]
+    )
 
     return {
         "ok": True,
@@ -894,6 +1299,7 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         "charter": charter,
         "prior_acl": prior_acl,
         "recalc": recalc_results,
+        "db_captures": db_captures,
         "template_path": tmpl["path"],
         "template_source": tmpl["source"],
         "template_message": tmpl.get("message", ""),
@@ -904,6 +1310,10 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         "issues": fill["issues"],
         "missing_fields": fill["missing_fields"],
         "missing_sheets": fill["missing_sheets"],
+        "col_advance_applied": bool(col_advance.get("applied")),
+        "col_advance_prior": col_advance.get("prior_col", ""),
+        "col_advance_target": col_advance.get("target_col", ""),
+        "col_advance_error": col_advance.get("error", ""),
         "qfactor_applied": qf_result["applied"],
         "qfactor_total": qf_result["total"],
         "qfactor_missing_sheets": qf_result["missing_sheets"],
@@ -913,6 +1323,10 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         "mgmt_adj_default_written": mgmt_result["default_written"],
         "mgmt_adj_portfolio_written": mgmt_result["portfolio_written"],
         "mgmt_adj_error": mgmt_result["error"],
+        "lol_ok": lol_result["ok"],
+        "lol_pools_written": lol_result["pools_written"],
+        "lol_skipped": lol_result["skipped"],
+        "lol_error": lol_result["error"],
         "impaired_applied": imp_result["applied"],
         "impaired_cleared": imp_result["cleared"],
         "impaired_error": imp_result["error"],
@@ -922,6 +1336,10 @@ def run_single_quarter(state: dict, workspace_root: str) -> dict:
         "env_factor_error": env_result["error"],
         "report_variant": variant_result["variant"],
         "report_variant_hidden": variant_result["hidden"],
+        "unfunded_applied": unfunded_result["applied"],
+        "unfunded_amount": unfunded_result["amount"],
+        "unfunded_undrawn": unfunded_result["undrawn"],
+        "unfunded_error": unfunded_result["error"],
         "errors": [],
     }
 
@@ -995,10 +1413,20 @@ def run_multi_quarter(
         }
 
     out_path = _output_path(workspace_root, short, start_period)
+    # Defensive: remove a stale master left behind by a prior failed
+    # run. Multi-quarter accumulates by reusing out_path as the template
+    # for subsequent iterations, so a corrupt pre-existing file would
+    # propagate into iteration 2+ as a BadZipFile load failure.
+    try:
+        if Path(out_path).exists():
+            Path(out_path).unlink()
+    except OSError:
+        pass
     iterations: list[dict] = []
     skipped: list[dict] = []
     successes = 0
     current_template: str = tmpl["path"]
+    start_rows: list[dict] | None = None
 
     for idx, p in enumerate(periods, start=1):
         # Per-quarter mapping override only applies to the starting
@@ -1035,8 +1463,46 @@ def run_multi_quarter(
             skipped.append({"period": p, "reason": f"Map load failed: {exc}"})
             continue
 
-        fill = fill_template(current_template, out_path, rows, doc)
+        try:
+            fill = fill_template(
+                current_template, out_path, rows, doc,
+                cu_name=_resolve_cu_name(
+                    doc, solr_url, solr_core, charter, scale),
+            )
+        except (_ET.ParseError, zipfile.BadZipFile) as exc:
+            # The XLSX we tried to read had malformed inner XML or zip
+            # structure. On iter 1 this is the canonical/override
+            # template; on later iters it's the accumulating out_path
+            # (corrupted by a prior writer or external editor). Skip
+            # this quarter, preserve current_template so the next
+            # iteration retries from the last known-good source.
+            _bad = Path(current_template).name
+            skipped.append({
+                "period": p,
+                "reason": (
+                    f"Workbook read failed ({type(exc).__name__}: {exc}). "
+                    f"Offending file: {_bad}. "
+                    "Re-run the wizard or replace the template; "
+                    "remaining quarters will continue with the last "
+                    "known-good workbook."
+                ),
+            })
+            continue
+        except OSError as exc:
+            skipped.append({
+                "period": p,
+                "reason": f"Workbook I/O failed: {exc}",
+            })
+            continue
+        except Exception as exc:  # noqa: BLE001
+            skipped.append({
+                "period": p,
+                "reason": f"Fill failed ({type(exc).__name__}: {exc})",
+            })
+            continue
         successes += 1
+        if p == start_period:
+            start_rows = rows
         iterations.append({
             "period": p,
             "index": idx,
@@ -1057,23 +1523,71 @@ def run_multi_quarter(
     imp_result = {"applied": 0, "cleared": 0, "error": ""}
     mgmt_result = {"ok": False, "pools_written": 0, "default_written": False,
                    "portfolio_written": False, "error": ""}
+    lol_result = {"ok": False, "pools_written": 0, "skipped": [], "error": ""}
     variant_result: dict = {
         "variant": "both", "hidden": [], "kept": [], "outputs": [],
     }
     env_result = {"ok": False, "applied_delq": 0, "applied_econ": 0,
                   "skipped": [], "error": ""}
+    unfunded_result: dict = {"applied": False, "amount": 0.0,
+                             "undrawn": 0.0, "error": ""}
+    post_write_error: str = ""
+    col_advance: dict = {}
     if successes > 0:
-        qf_entries = _qfactor_entries_from_state(state)
-        qf_result = apply_qfactors(out_path, qf_entries)
-        mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
-        mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
-        mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
-        imp_rows = _impaired_rows_from_state(state)
-        imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
-        env_result = env_factor_writer.apply_env_factor_ranges(out_path)
-        variant_result = apply_report_variant(
-            out_path, _report_variant_from_state(state)
-        )
+        try:
+            # Fallback template: advance its pinned current-quarter
+            # column to the start period's mapping column before the
+            # calc-dependent overlays run (mirrors carry-history mode).
+            if tmpl.get("source") == "canonical_fallback" and start_rows is not None:
+                col_advance = advance_fallback_template_column(
+                    out_path, start_rows, start_period, state,
+                )
+            # Override the template's placeholder/sample geography and
+            # refresh env factors for the current column (the fallback
+            # advance already refreshed the factors when it ran).
+            _econ = state.get("economic_data") or {}
+            _geo_state = str(_econ.get("state") or "").strip()
+            _geo_county = str(_econ.get("county") or "").strip()
+            apply_scale_geography(out_path, _geo_state, _geo_county)
+            if not col_advance.get("applied") and start_rows is not None:
+                _env_col = _target_column_from_mapping_rows(start_rows)
+                _prior_env_col = _detect_prior_column(
+                    out_path, _PRIOR_COLUMN_ANCHORS) or _env_col
+                if _env_col:
+                    apply_env_factors_to_historical_data(
+                        out_path, _env_col, _prior_env_col,
+                        _geo_state, _geo_county,
+                        econ_overrides=_econ,
+                    )
+            qf_entries = _qfactor_entries_from_state(state)
+            qf_result = apply_qfactors(out_path, qf_entries)
+            mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
+            mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, tmpl["path"])
+            mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
+            lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
+            lol_result = lol_writer.apply_lol_effective(
+                out_path, tmpl["path"], lol_overrides
+            )
+            imp_rows = _impaired_rows_from_state(state)
+            imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
+            env_result = env_factor_writer.apply_env_factor_ranges(out_path)
+            unfunded_result = unfunded_writer.apply_unfunded(out_path, state)
+            variant_result = apply_report_variant(
+                out_path, _report_variant_from_state(state)
+            )
+        except PermissionError as _pe:
+            post_write_error = (
+                f"Permission denied writing to {out_path.name}. The workbook "
+                f"is likely open in Excel or locked by a sync client "
+                f"(Egnyte / OneDrive). Close it everywhere and re-run. "
+                f"(details: {_pe})"
+            )
+            successes = 0
+        except OSError as _oe:
+            post_write_error = (
+                f"OS error writing to {out_path.name}: {_oe}"
+            )
+            successes = 0
 
     primary_output = (
         variant_result["outputs"][0]["path"]
@@ -1096,6 +1610,12 @@ def run_multi_quarter(
         _recalc_outputs(variant_result.get("outputs") or [])
         if successes > 0 else []
     )
+    db_captures = (
+        _capture_current_period_to_db(
+            short, start_period, variant_result.get("outputs") or []
+        )
+        if successes > 0 else []
+    )
     return {
         "ok": successes > 0,
         "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1111,6 +1631,10 @@ def run_multi_quarter(
         "template_path": tmpl["path"],
         "template_source": tmpl["source"],
         "template_message": tmpl.get("message", ""),
+        "col_advance_applied": bool(col_advance.get("applied")),
+        "col_advance_prior": col_advance.get("prior_col", ""),
+        "col_advance_target": col_advance.get("target_col", ""),
+        "col_advance_error": col_advance.get("error", ""),
         "qfactor_applied": qf_result["applied"],
         "qfactor_total": qf_result["total"],
         "qfactor_missing_sheets": qf_result["missing_sheets"],
@@ -1120,6 +1644,10 @@ def run_multi_quarter(
         "mgmt_adj_default_written": mgmt_result["default_written"],
         "mgmt_adj_portfolio_written": mgmt_result["portfolio_written"],
         "mgmt_adj_error": mgmt_result["error"],
+        "lol_ok": lol_result["ok"],
+        "lol_pools_written": lol_result["pools_written"],
+        "lol_skipped": lol_result["skipped"],
+        "lol_error": lol_result["error"],
         "impaired_applied": imp_result["applied"],
         "impaired_cleared": imp_result["cleared"],
         "impaired_error": imp_result["error"],
@@ -1129,21 +1657,46 @@ def run_multi_quarter(
         "env_factor_error": env_result["error"],
         "report_variant": variant_result["variant"],
         "report_variant_hidden": variant_result["hidden"],
+        "unfunded_applied": unfunded_result["applied"],
+        "unfunded_amount": unfunded_result["amount"],
+        "unfunded_undrawn": unfunded_result["undrawn"],
+        "unfunded_error": unfunded_result["error"],
         "prior_acl": prior_acl,
-        "errors": [] if successes > 0 else ["No quarters were successfully written."],
+        "recalc": recalc_results,
+        "db_captures": db_captures,
+        "errors": (
+            [post_write_error] if post_write_error
+            else ([] if successes > 0
+                  else ["No quarters were successfully written."])
+        ),
     }
 
 
 def _inject_prior_acl(workspace_root: str, short: str, period: str,
                       output_files: list[dict]) -> dict:
-    """Hard-code Prior ACL values from the previous quarter's report
-    into Historical Data!AY2..AY5 of every output file.
+    """Hard-code Prior ACL values into Historical Data!AY2..AY5 of
+    every output file.
 
-    Looks up `Generated_Reports/<short>/<prev_quarter>/` for the
-    newest SCALE workbook (prefers Vizo variant) and copies its
-    Total Expected Losses / ACL Balance / Adjustment / ACL Ratio
-    cells. Silently no-ops when the prior report is missing -- e.g.
-    first ever run for this CU.
+    Resolution priority:
+
+    1. **DB lookup**: ``scale_acl_history`` is the canonical store.
+       When a row exists for ``(short, prior_quarter_end)`` we use it
+       directly -- no Excel dependency, no formula evaluation, no
+       pywin32. This is the path that survives across machines and
+       across "user never opened the prior workbook in Excel" scenarios.
+    2. **Prior-workbook read** (legacy): if no DB row exists for the
+       prior period, fall back to reading cached formula values from
+       ``Generated_Reports/<short>/<prev_quarter>/`` via openpyxl.
+       Triggers pywin32 COM recalc when cached values are missing.
+       On success the values are also UPSERTed back into the DB so
+       future runs hit the DB cache.
+    3. **Defensive zero**: when neither source yielded usable numbers
+       we write literal 0 to AY2..AY5 so the "prior column duplicates
+       current column" formula leak is visible to the analyst (zeros
+       instead of duplicated current numbers).
+
+    Silently no-ops when this is the first ever run for this CU (no
+    prior report on disk AND no DB row).
     """
     result: dict[str, Any] = {
         "prior_period": "", "prior_path": "",
@@ -1155,6 +1708,44 @@ def _inject_prior_acl(workspace_root: str, short: str, period: str,
         result["error"] = f"Could not compute prior quarter: {exc}"
         return result
     result["prior_period"] = prev
+
+    # --- Path 1: DB lookup for the exact prior quarter. ---
+    db_hit = None
+    try:
+        db_hit = acl_history_db.lookup(short, prev)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"DB lookup failed: {exc}"
+    if db_hit is None:
+        # Soft fallback: latest row older than the target period.
+        # Covers "analyst skipped a quarter" and "previous run failed
+        # before DB capture" scenarios.
+        try:
+            db_hit = acl_history_db.lookup_latest_before(short, period)
+        except Exception:  # noqa: BLE001
+            pass
+        if db_hit is not None:
+            # Update the period we'll surface in flash messages.
+            pe = db_hit.get("period_end")
+            if hasattr(pe, "strftime"):
+                result["prior_period"] = pe.strftime("%Y-%m")
+
+    if db_hit is not None:
+        values = db_hit.get("values") or {}
+        result["source"] = f"db:{db_hit.get('source') or 'scale_acl_history'}"
+        for entry in output_files or []:
+            path = entry.get("path") or ""
+            if not path:
+                continue
+            write = runs_service.write_prior_acl_values(path, values)
+            result["applied"].append({
+                "path": path,
+                "ok": write["ok"],
+                "written": write["written"],
+                "error": write["error"],
+            })
+        return result
+
+    # --- Path 2: Read from the prior workbook. ---
     prior_path = runs_service.find_prior_report(workspace_root, short, prev)
     if prior_path is None:
         # Fallback: newest report strictly older than target period.
@@ -1178,9 +1769,33 @@ def _inject_prior_acl(workspace_root: str, short: str, period: str,
         if recalc.get("ok"):
             read = runs_service.read_prior_acl_values(prior_path)
     if not read["ok"]:
+        # --- Path 3: Defensive zero. ---
+        # Write literal 0 to AY2..AY5 to break the formula leak. The
+        # fresh template AND prior-quarter carry-history workbooks
+        # ship those cells as formulas like
+        # `='Scale Calculation'!U29..U33` -- if we silently no-op here,
+        # the carry-history workflow leaves the OLD column's formulas
+        # pointing into the SHIFTED Scale Calculation rows, which now
+        # resolve to the CURRENT-period values. The visible symptom
+        # is "prior column shows the same numbers as current column".
         result["error"] = read["error"]
-        return result
-    values = read["values"]
+        result["fallback_used"] = True
+        values = {"AY2": 0.0, "AY3": 0.0, "AY4": 0.0, "AY5": 0.0}
+        result["source"] = "fallback-zero"
+    else:
+        values = read["values"]
+        result["source"] = "prior-workbook"
+        # Opportunistically persist what we just learned so future
+        # runs hit the DB cache instead of re-reading the workbook.
+        try:
+            persisted = acl_history_db.upsert(
+                short, prev, values,
+                source=f"backfill-from:{Path(prior_path).name}",
+            )
+            result["db_persist"] = persisted
+        except Exception as exc:  # noqa: BLE001
+            result["db_persist"] = {"ok": False, "error": str(exc)}
+
     for entry in output_files or []:
         path = entry.get("path") or ""
         if not path:
@@ -1193,6 +1808,41 @@ def _inject_prior_acl(workspace_root: str, short: str, period: str,
             "error": write["error"],
         })
     return result
+
+
+def _capture_current_period_to_db(
+    short: str,
+    period: str,
+    output_files: list[dict],
+) -> list[dict]:
+    """Attempt to read U29..U33 cached values from each just-written
+    output file and persist them to ``scale_acl_history`` for the
+    CURRENT period. Feeds the next quarter's DB-first lookup.
+
+    Best-effort: silently skips files whose cached values are still
+    unevaluated (typical when pywin32 is unavailable and Excel hasn't
+    opened the file yet). The wizard surfaces a separate flash warning
+    when the post-run recalc is skipped.
+    """
+    out: list[dict] = []
+    if not short or not period:
+        return out
+    for entry in output_files or []:
+        path = entry.get("path") or ""
+        if not path:
+            continue
+        try:
+            res = acl_history_db.capture_from_workbook(
+                short, period, path,
+                source="captured-after-run",
+            )
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "wrote": 0, "skipped": False,
+                   "error": str(exc)}
+        res["path"] = path
+        out.append(res)
+    return out
+
 
 
 def _recalc_outputs(output_files: list[dict]) -> list[dict]:
@@ -1318,7 +1968,10 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
     runs_service.unhide_all_sheets(out_path)
 
     # Now overlay the target quarter's data on top of the carried workbook.
-    fill = fill_template(out_path, out_path, rows, doc)
+    fill = fill_template(
+        out_path, out_path, rows, doc,
+        cu_name=_resolve_cu_name(doc, solr_url, solr_core, charter, scale),
+    )
 
     # The carried workbook's downstream formulas (Scale Calculation,
     # Env Factor by Pool, Executive Summary-Vizo, Cover, etc.) still
@@ -1372,22 +2025,82 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
     env_factors_result = apply_env_factors_to_historical_data(
         out_path, target_col, prior_col,
         env_state_name, env_county_name,
+        econ_overrides=econ_state,
     )
+    apply_scale_geography(out_path, env_state_name, env_county_name)
 
     qf_entries = _qfactor_entries_from_state(state)
-    qf_result = apply_qfactors(out_path, qf_entries)
+    try:
+        qf_result = apply_qfactors(out_path, qf_entries)
 
-    mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
-    mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, str(out_path))
-    mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
+        mgmt_state = (state.get("scale") or {}).get("mgmt_adj") or {}
+        mgmt_state_norm = _normalize_mgmt_adj_state(mgmt_state, str(out_path))
+        mgmt_result = mgmt_adj_writer.apply_mgmt_adj(out_path, mgmt_state_norm)
 
-    imp_rows = _impaired_rows_from_state(state)
-    imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
+        lol_overrides = (state.get("scale") or {}).get("life_of_loan_overrides") or {}
+        # Resolve the canonical template so non-overridden pools are reset
+        # to their template default rather than inheriting a stale month
+        # carried forward from the prior quarter's copied workbook.
+        _lol_tmpl = template_loader.resolve_template(
+            period, scale.get("template_override_path") or None
+        )
+        _lol_tmpl_path = _lol_tmpl.get("path", "") if _lol_tmpl.get("ok") else ""
+        # Carry-forward capture: promote any Life-of-Loan month baked into
+        # the prior report (set outside the wizard) into the draft's
+        # overrides so it displays in the settings / Life-of-Loan step and
+        # persists for future quarters. Existing draft overrides win, so a
+        # value the user explicitly set (or cleared) is never overwritten.
+        lol_captured: dict[str, int] = {}
+        if _lol_tmpl_path:
+            try:
+                _carried = lol_writer.read_carried_overrides(
+                    str(prior_path), _lol_tmpl_path
+                )
+                lol_overrides = dict(lol_overrides)
+                for _pool, _months in _carried.items():
+                    if _pool not in lol_overrides:
+                        lol_overrides[_pool] = _months
+                        lol_captured[_pool] = _months
+                if lol_captured:
+                    state.setdefault("scale", {})["life_of_loan_overrides"] = (
+                        lol_overrides
+                    )
+            except Exception:  # noqa: BLE001
+                lol_captured = {}
+        lol_result = lol_writer.apply_lol_effective(
+            out_path, _lol_tmpl_path, lol_overrides
+        )
 
-    env_result = env_factor_writer.apply_env_factor_ranges(out_path)
+        imp_rows = _impaired_rows_from_state(state)
+        imp_result = impaired_loader.apply_impaired_rows(out_path, imp_rows)
 
-    variant = _report_variant_from_state(state)
-    variant_result = apply_report_variant(out_path, variant)
+        env_result = env_factor_writer.apply_env_factor_ranges(out_path)
+
+        unfunded_result = unfunded_writer.apply_unfunded(out_path, state)
+
+        variant = _report_variant_from_state(state)
+        variant_result = apply_report_variant(out_path, variant)
+    except (PermissionError, OSError) as _saveexc:
+        _msg = (
+            f"Permission denied writing to {Path(out_path).name}. "
+            f"The workbook is likely open in Excel or locked by a sync "
+            f"client (Egnyte / OneDrive). Close it everywhere and re-run. "
+            f"(details: {_saveexc})"
+            if isinstance(_saveexc, PermissionError)
+            else f"OS error writing to {Path(out_path).name}: {_saveexc}"
+        )
+        return {
+            "ok": False,
+            "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "output_path": str(out_path),
+            "output_files": [],
+            "period": period,
+            "charter": charter,
+            "carry_mode": True,
+            "carry_from_period": prev_period,
+            "carry_from_path": str(prior_path),
+            "errors": [_msg],
+        }
     primary_output = (
         variant_result["outputs"][0]["path"]
         if variant_result["outputs"] else str(out_path)
@@ -1405,6 +2118,9 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         workspace_root, short, period, variant_result["outputs"]
     )
     recalc_results = _recalc_outputs(variant_result["outputs"])
+    db_captures = _capture_current_period_to_db(
+        short, period, variant_result["outputs"]
+    )
 
     return {
         "ok": True,
@@ -1417,6 +2133,7 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "carry_from_period": prev_period,
         "carry_from_path": str(prior_path),
         "recalc": recalc_results,
+        "db_captures": db_captures,
         "map_path": mp["path"],
         "map_source": mp["source"],
         "applied": fill["applied"],
@@ -1452,6 +2169,11 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "mgmt_adj_default_written": mgmt_result["default_written"],
         "mgmt_adj_portfolio_written": mgmt_result["portfolio_written"],
         "mgmt_adj_error": mgmt_result["error"],
+        "lol_ok": lol_result["ok"],
+        "lol_pools_written": lol_result["pools_written"],
+        "lol_skipped": lol_result["skipped"],
+        "lol_error": lol_result["error"],
+        "lol_captured": lol_captured,
         "impaired_applied": imp_result["applied"],
         "impaired_cleared": imp_result["cleared"],
         "impaired_error": imp_result["error"],
@@ -1461,6 +2183,10 @@ def run_quarter_carry_history(state: dict, workspace_root: str) -> dict:
         "env_factor_error": env_result["error"],
         "report_variant": variant_result["variant"],
         "report_variant_hidden": variant_result["hidden"],
+        "unfunded_applied": unfunded_result["applied"],
+        "unfunded_amount": unfunded_result["amount"],
+        "unfunded_undrawn": unfunded_result["undrawn"],
+        "unfunded_error": unfunded_result["error"],
         "prior_acl": prior_acl,
         "errors": [],
     }

@@ -57,11 +57,86 @@
             it manually when needed.</div>
         </span>
       </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
+        <input type="checkbox" name="mgmt_adj_napkin"
+               {% if state.reports.get('mgmt_adj_napkin', True) %}checked{% endif %}>
+        <span>
+          <strong>Management Adjustment Worksheet</strong>
+          <div class="help">Standalone what-if workbook mirroring the
+            <em>Mgmt Adj Napkin</em> tab. Each pool gets a Total row whose
+            <em>Management Adj</em> cell is editable; adjusted columns
+            recalculate automatically and a <em>Variance</em> column shows
+            the impact relative to the baseline.</div>
+        </span>
+      </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
+        <input type="checkbox" name="acl_funding"
+               {% if state.reports.get('acl_funding', True) %}checked{% endif %}>
+        <span>
+          <strong>ACL Funding Worksheet</strong>
+          <div class="help">Standalone workbook that helps the credit union
+            fund the Allowance between quarterly reports. Lists the report
+            month plus the next two months with the Total Allowance Needed,
+            current ACL balance, adjustment, and adjusted balance.</div>
+        </span>
+      </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
+        <input type="checkbox" name="tct_pdf"
+               {% if state.reports.get('tct_pdf', False) %}checked{% endif %}>
+        <span>
+          <strong>TCT Migration PDF</strong>
+          <div class="help">Render the TCT Migration report as a polished,
+            brand-styled PDF built directly from the report data rather than the
+            workbook. Can run on its own (PDF only, no spreadsheet) or alongside
+            the TCT report.</div>
+        </span>
+      </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
+        <input type="checkbox" name="vizo_pdf"
+               {% if state.reports.get('vizo_pdf', False) %}checked{% endif %}>
+        <span>
+          <strong>Vizo Migration PDF</strong>
+          <div class="help">Render the Vizo Migration report as a polished PDF,
+            built directly from the report data rather than the workbook. Can
+            run on its own (PDF only, no spreadsheet) or alongside the Vizo
+            report.</div>
+        </span>
+      </label>
+
+      <label class="radio-inline" style="display:flex; align-items:flex-start; gap:8px; margin-top:8px;">
+        <input type="checkbox" name="vizo_supp_pdf"
+               {% if state.reports.get('vizo_supp_pdf', False) %}checked{% endif %}>
+        <span>
+          <strong>Vizo Supplemental PDF</strong>
+          <div class="help">Render the Vizo Supplemental report (historical loan
+            balances, loss factor and charge-off detail, balance adjustment)
+            as a polished PDF built directly from the report data. Can run on
+            its own (PDF only, no spreadsheet) or alongside the Vizo
+            Supplemental report.</div>
+        </span>
+      </label>
+    </fieldset>
+
+    <fieldset class="radio-fieldset" style="margin-top:16px;">
+      <legend>Output folder</legend>
+      <label for="output_folder"><strong>Where to save this CU's reports</strong></label>
+      <input type="text" id="output_folder" name="output_folder"
+             class="form-input" style="width:100%; margin-top:6px;"
+             placeholder="e.g. Z:\CU Reports\Mountain CU"
+             value="{{ state.reports.get('output_folder', '') }}">
+      <div class="help">Enter the full (absolute) path to the folder where this
+        credit union's reports should be published. The folder is created
+        automatically if it doesn't exist. Leave blank to use the shared
+        <em>Reports</em> folder.</div>
     </fieldset>
 
     <div class="btn-row">
       <a class="btn btn-secondary" href="{{ url_for('setup.step8_mgmt_adj') }}">&larr; Back</a>
-      <button class="btn btn-primary" type="submit">Next: Review &rarr;</button>
+      <button class="btn btn-primary" type="submit" name="action" value="next">Next: Review &rarr;</button>
     </div>
   </form>
 </div>

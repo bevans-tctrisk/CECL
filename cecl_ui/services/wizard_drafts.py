@@ -28,6 +28,12 @@ DRAFT_META_KEY = "_draft_meta"
 MODELS = ("migration", "scale")
 DEFAULT_MODEL = "migration"
 
+# Backup-on-save settings: every save copies the prior file (if any)
+# to <stem>.json.bak_<YYYYMMDD_HHMMSS>, keeping at most this many per
+# (slug, model). Set to 0 to disable.
+BACKUP_KEEP = 10
+_BAK_PREFIX = ".bak_"
+
 
 def drafts_dir(workspace_root: str | Path) -> Path:
     d = Path(workspace_root) / DRAFTS_DIR_NAME
@@ -77,6 +83,53 @@ def _default(o: Any) -> Any:
     return str(o)
 
 
+def _backup_existing(out: Path, keep: int | None = None) -> Path | None:
+    """Copy the existing draft file to a timestamped .bak_ sibling.
+
+    Keeps at most ``keep`` backups per draft (oldest pruned). When
+    ``keep`` is None the module-level ``BACKUP_KEEP`` is used so the
+    cap can be tuned at runtime. No-op if the file does not exist or
+    the cap is <= 0. Returns the backup path on success, ``None``
+    otherwise. Failures are swallowed — the primary save must never
+    be blocked by backup bookkeeping.
+    """
+    if keep is None:
+        keep = BACKUP_KEEP
+    if keep <= 0 or not out.exists():
+        return None
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = out.with_name(f"{out.name}{_BAK_PREFIX}{ts}")
+        # If two saves land in the same second, append a counter.
+        if bak.exists():
+            i = 1
+            while True:
+                cand = out.with_name(f"{out.name}{_BAK_PREFIX}{ts}_{i}")
+                if not cand.exists():
+                    bak = cand
+                    break
+                i += 1
+        bak.write_bytes(out.read_bytes())
+    except OSError:
+        return None
+
+    # Prune oldest backups beyond `keep`.
+    try:
+        siblings = sorted(
+            out.parent.glob(f"{out.name}{_BAK_PREFIX}*"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old in siblings[keep:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return bak
+
+
 def save_draft(
     workspace_root: str | Path,
     state: dict[str, Any],
@@ -108,6 +161,7 @@ def save_draft(
     state[DRAFT_META_KEY] = meta
 
     out = _file_for(workspace_root, slug, m)
+    _backup_existing(out)
     out.write_text(
         json.dumps(state, default=_default, indent=2),
         encoding="utf-8",
@@ -211,6 +265,7 @@ def mark_completed(
         meta["active_step"] = data.get("_active_step") or "identity"
     data[DRAFT_META_KEY] = meta
     out = _file_for(workspace_root, _slug(key), meta["model"])
+    _backup_existing(out)
     out.write_text(
         json.dumps(data, default=_default, indent=2),
         encoding="utf-8",

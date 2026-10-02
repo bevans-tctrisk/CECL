@@ -169,13 +169,28 @@
       fell into the default <em>Other/Uncategorized</em> pool.
     {% endif %}
   </p>
+  <p class="muted" style="margin-top:6px;font-size:0.9em;">
+    The <em>current_balance column</em> and <em>loan_pool_code column</em>
+    below reflect the mapping currently in effect for each file.
+    If a column doesn't match what you picked on the Column Mappings step,
+    re-open that step, save your changes, and reload this page.
+  </p>
   <table class="table" style="margin-top:8px;">
-    <thead><tr><th>File</th><th style="text-align:right;">Rows</th><th style="text-align:right;">Total balance</th><th>Status</th></tr></thead>
+    <thead><tr>
+      <th>File</th>
+      <th style="text-align:right;">Rows</th>
+      <th>current_balance column</th>
+      <th>loan_pool_code column</th>
+      <th style="text-align:right;">Total balance</th>
+      <th>Status</th>
+    </tr></thead>
     <tbody>
     {% for f in comparison.loan_summary.files %}
       <tr>
         <td><code>{{ f.name }}</code></td>
         <td style="text-align:right;">{{ f.rows }}</td>
+        <td>{% if f.current_balance_col %}<code>{{ f.current_balance_col }}</code>{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
+        <td>{% if f.loan_pool_code_col %}<code>{{ f.loan_pool_code_col }}</code>{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
         <td style="text-align:right;">${{ '{:,.2f}'.format(f.total) }}</td>
         <td>{% if f.error %}<span style="color:#c0392b;">{{ f.error }}</span>{% else %}OK{% endif %}</td>
       </tr>

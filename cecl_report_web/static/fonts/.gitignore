@@ -1,0 +1,7 @@
+# Do not commit proprietary fonts (Calibri / Arial are Microsoft-licensed).
+# See README.md — swap for Carlito / Liberation Sans (redistributable) on a shared server.
+*.ttf
+*.otf
+# Montserrat (Vizo brand heading face) is SIL OFL — redistributable, keep in repo.
+!Montserrat-Variable.ttf
+!Montserrat-Italic-Variable.ttf

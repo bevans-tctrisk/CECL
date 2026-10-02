@@ -117,6 +117,10 @@
 
   {% if clients %}
   <h3 style="margin-top:36px;">Configured Credit Unions</h3>
+  <p class="muted" style="margin-top:-6px;">
+    These credit unions have a saved YAML config. Open to run reports,
+    or "Adopt as completed setup" to enable wizard-based editing.
+  </p>
   <table>
     <thead><tr><th>Short Name</th><th>Credit Union</th><th></th></tr></thead>
     <tbody>
@@ -124,7 +128,15 @@
       <tr>
         <td>{{ c.short_name }}</td>
         <td>{{ c.credit_union }}</td>
-        <td><a href="{{ url_for('run.client_dashboard', short_name=c.short_name) }}">Open &rsaquo;</a></td>
+        <td style="white-space:nowrap;">
+          <a href="{{ url_for('run.client_dashboard', short_name=c.short_name) }}">Open &rsaquo;</a>
+          {% if not c.has_migration_draft %}
+          <form method="post" action="{{ url_for('home.adopt_config', short_name=c.short_name) }}"
+                style="display:inline; margin-left:12px;">
+            <button type="submit">Adopt as completed setup</button>
+          </form>
+          {% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>

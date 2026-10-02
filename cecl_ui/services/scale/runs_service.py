@@ -55,22 +55,22 @@ def _period_sort_key(period: str) -> tuple[int, int]:
 
 
 def list_scale_cus(workspace_root: str | Path) -> list[dict[str, Any]]:
-    """Return one entry per CU that has at least one SCALE workbook on disk.
+    """Return one entry per CU that has a SCALE workbook on disk OR a
+    completed SCALE wizard draft (so freshly-configured CUs surface on
+    the SCALE Runs index before their first quarter has been run).
 
     Each entry::
 
         {
           "short_name": "connections_cu",
           "credit_union": "Connections Credit Union",  # from draft if available
-          "latest_period": "2025-12",
+          "latest_period": "2025-12",  # empty string if no workbook yet
           "latest_path": "Z:/.../CECL_SCALE_connections_cu_Vizo.xlsx",
           "periods": ["2025-12", "2025-09", ...],
           "draft_present": True,
         }
     """
     root = _reports_root(workspace_root)
-    if not root.exists():
-        return []
 
     # Index drafts by slug. We accept either a SCALE draft (preferred,
     # has the Solr/period config) or fall back to a Migration draft
@@ -88,31 +88,55 @@ def list_scale_cus(workspace_root: str | Path) -> list[dict[str, Any]]:
             drafts_by_slug[slug] = d
 
     out: list[dict[str, Any]] = []
-    for cu_dir in sorted(root.iterdir()):
-        if not cu_dir.is_dir():
-            continue
-        short = cu_dir.name
-        periods: list[str] = []
-        for period_dir in cu_dir.iterdir():
-            if not period_dir.is_dir():
+    seen_shorts: set[str] = set()
+    if root.exists():
+        for cu_dir in sorted(root.iterdir()):
+            if not cu_dir.is_dir():
                 continue
-            if not any(period_dir.glob(_REPORT_GLOB)):
+            short = cu_dir.name
+            periods: list[str] = []
+            for period_dir in cu_dir.iterdir():
+                if not period_dir.is_dir():
+                    continue
+                if not any(period_dir.glob(_REPORT_GLOB)):
+                    continue
+                periods.append(period_dir.name)
+            if not periods:
                 continue
-            periods.append(period_dir.name)
-        if not periods:
+            periods.sort(key=_period_sort_key, reverse=True)
+            latest = periods[0]
+            latest_path = _pick_report_in_period(cu_dir / latest)
+            draft = drafts_by_slug.get(short)
+            out.append({
+                "short_name": short,
+                "credit_union": (draft or {}).get("credit_union") or short,
+                "latest_period": latest,
+                "latest_path": str(latest_path) if latest_path else "",
+                "periods": periods,
+                "draft_present": (
+                    draft is not None and draft.get("model") == "scale"
+                ),
+            })
+            seen_shorts.add(short)
+
+    # Also surface CUs that have a completed SCALE wizard draft but no
+    # workbook on disk yet (fresh setup, first-quarter run pending).
+    # Without this, the SCALE Runs index would hide any CU the user
+    # just finished configuring in the SCALE wizard.
+    for slug, draft in drafts_by_slug.items():
+        if slug in seen_shorts:
             continue
-        periods.sort(key=_period_sort_key, reverse=True)
-        latest = periods[0]
-        latest_path = _pick_report_in_period(cu_dir / latest)
-        draft = drafts_by_slug.get(short)
+        if draft.get("model") != "scale":
+            continue
         out.append({
-            "short_name": short,
-            "credit_union": (draft or {}).get("credit_union") or short,
-            "latest_period": latest,
-            "latest_path": str(latest_path) if latest_path else "",
-            "periods": periods,
-            "draft_present": draft is not None and draft.get("model") == "scale",
+            "short_name": slug,
+            "credit_union": draft.get("credit_union") or slug,
+            "latest_period": "",
+            "latest_path": "",
+            "periods": [],
+            "draft_present": True,
         })
+
     out.sort(key=lambda r: r["credit_union"].lower())
     return out
 
@@ -258,12 +282,22 @@ def write_prior_acl_values(
     new_workbook_path: str | Path,
     values: dict[str, Any],
 ) -> dict[str, Any]:
-    """Hard-code Prior ACL values into Historical Data!AY2..AY5.
+    """Hard-code Prior ACL values into the Historical Data prior column.
 
     The fresh template ships those cells as formulas pointing into
     Scale Calculation!T29..T33 (the manual "copy previous column"
-    workflow). We bypass that by writing literal numbers — the
-    Executive Summary-Vizo OFFSET formulas read from AY directly.
+    workflow). We bypass that by writing literal numbers that the
+    Executive Summary-Vizo "Prior ACL" OFFSET formulas read.
+
+    The target column is detected dynamically: each carried quarter adds
+    a new current column to Historical Data, so the column the
+    ``=OFFSET('Historical Data'!<anchor>N,0,-1)`` prior formulas resolve
+    to drifts right over time (AY -> AZ -> BA ...). We read that anchor
+    from Executive Summary-Vizo and write to ``anchor - 1`` so the values
+    land in the exact cells the report reads — overwriting any leftover
+    ``='Scale Calculation'!U..`` formula that would otherwise leak the
+    CURRENT column's numbers into the "prior" block. Falls back to the
+    incoming coords (legacy AY2..AY5) when the anchor can't be detected.
     """
     result: dict[str, Any] = {"ok": False, "written": 0, "error": ""}
     if not values:
@@ -278,7 +312,13 @@ def write_prior_acl_values(
             result["error"] = "Historical Data tab not found in target workbook."
             return result
         ws = wb["Historical Data"]
+        target_col = _detect_prior_acl_target_column(wb)
+        result["target_col"] = target_col
         for coord, val in values.items():
+            if target_col:
+                row = re.sub(r"^[A-Za-z]+", "", str(coord)) or ""
+                if row:
+                    coord = f"{target_col}{row}"
             ws[coord].value = val
             result["written"] += 1
         wb.save(p)
@@ -286,6 +326,36 @@ def write_prior_acl_values(
     except Exception as exc:  # noqa: BLE001
         result["error"] = f"Failed writing Prior ACL: {exc}"
     return result
+
+
+def _detect_prior_acl_target_column(wb) -> str:
+    """Return the Historical Data column the Vizo 'Prior ACL' block reads.
+
+    The prior rows on Executive Summary-Vizo are
+    ``=OFFSET('Historical Data'!<anchor>N,0,-1)``; the value they display
+    lives one column LEFT of ``<anchor>``. Returns that column letter
+    (e.g. ``AZ`` when the anchor is ``BA``), or ``""`` if not found.
+    """
+    from openpyxl.utils import column_index_from_string, get_column_letter
+    _rx = re.compile(
+        r"OFFSET\('?Historical Data'?!\$?([A-Z]{1,3})\$?\d+\s*,\s*0\s*,\s*-\s*1\s*\)",
+        re.IGNORECASE,
+    )
+    for sheet in ("Executive Summary-Vizo", "Executive Summary-TCT",
+                  "Executive Summary"):
+        if sheet not in wb.sheetnames:
+            continue
+        ws = wb[sheet]
+        for row in range(10, 26):
+            v = ws.cell(row=row, column=3).value
+            if isinstance(v, str) and v.startswith("="):
+                m = _rx.search(v)
+                if m:
+                    anchor = column_index_from_string(m.group(1).upper())
+                    if anchor > 1:
+                        return get_column_letter(anchor - 1)
+    return ""
+
 
 
 def unhide_all_sheets(workbook_path: str | Path) -> dict[str, Any]:
