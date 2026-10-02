@@ -218,7 +218,17 @@ def _parse_co_file_loans(filepath, parse_cfg):
         return empty
 
     local = dict(parse_cfg)
-    local["account_col"] = account_col
+    # Header resolution may point ``account`` at the member-number column; a
+    # ``split`` member_account block still needs its configured suffix column
+    # (e.g. United Community: 'Acct Numb' + 'Loan ID' -> 219287 + 001) to
+    # rebuild the extract's account string, so keep that one.
+    _ma_mode = ((parse_cfg.get("member_account") or {}).get("mode") or "").lower()
+    _cfg_acc = parse_cfg.get("account_col")
+    if _ma_mode == "split" and _ok(_cfg_acc) and _ok(parse_cfg.get("member_col")) \
+            and int(_cfg_acc) != int(parse_cfg.get("member_col")):
+        local["account_col"] = _cfg_acc
+    else:
+        local["account_col"] = account_col
     out = pd.DataFrame({
         "account": _derive_full_account(cfg_df, local).values,
         "code": (cfg_df.iloc[:, int(code_col)].values if _ok(code_col)
@@ -307,6 +317,22 @@ def _shared_locator(co_cfg, rc_cfg):
         if co_cfg.get(k) != rc_cfg.get(k):
             return False
     return co_cfg.get("amount_col") != rc_cfg.get("amount_col")
+
+
+def _dual_half_layout(co_cfg, rc_cfg):
+    """CO and recovery halves share one row layout (same account/code columns,
+    distinct amount columns) but each half carries its OWN date column -- e.g.
+    United Community's ``Chargeoffs Recoveries`` workbooks. ``_shared_locator``
+    rejects these on ``date_col``, and the legacy filename gate then drops the
+    file for carrying 'recov', so its charge-offs never reach the split even
+    though the monthly aggregator already counts them."""
+    if not (co_cfg and rc_cfg):
+        return False
+    for k in ("account_col", "code_col", "has_header", "skip_rows"):
+        if co_cfg.get(k) != rc_cfg.get(k):
+            return False
+    return (co_cfg.get("amount_col") != rc_cfg.get("amount_col")
+            and co_cfg.get("date_col") != rc_cfg.get("date_col"))
 
 
 _MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -420,7 +446,7 @@ def load_chargeoff_loans(config):
             else:
                 want = (("charge" in low and "off" in low)
                         and "proposed" not in low and "3yr" not in low
-                        and "recov" not in low)
+                        and ("recov" not in low or _dual_half_layout(pc, rc)))
                 if multi_format and not want and not rc:
                     want = True
             if not want:
@@ -725,7 +751,9 @@ def build_member_index(history, config):
         if mode in ("delimiter", "split") and delim in s:
             return normalize_account(s.split(delim, 1)[0])
         d = normalize_account(s)
-        if mode == "fixed_suffix" and n > 0 and len(d) > n:
+        # Stored keys are member + zero-padded suffix regardless of mode (the
+        # delimiter is dropped on import), so strip the suffix when absent.
+        if n > 0 and len(d) > n:
             return d[:-n]
         return ""
 
