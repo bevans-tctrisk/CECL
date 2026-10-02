@@ -277,6 +277,22 @@ def compose_acl_funding(client_name, snapshot_date, df, config, grades, hist):
                                   header=0.3, footer=0.3)
     ws.print_area = f'A1:G{last_row}'
 
+    # Vizo-only CUs: restyle to the Vizo Theme 2026 (navy header, Arial).
+    _rep_brand = (config.get('reports') or {}) if isinstance(config, dict) else {}
+    if _rep_brand.get('vizo') and not _rep_brand.get('tct'):
+        try:
+            import report_vizo as _rv
+            navy = PatternFill('solid', fgColor=_rv.VZ_NAVY)
+            for row in ws.iter_rows():
+                for c in row:
+                    if c.fill is not None and c.fill.patternType == 'solid' \
+                            and str(c.fill.fgColor.rgb or '').endswith('0D4D5E'):
+                        c.fill = navy
+                    if c.font is not None and c.font.name == 'Calibri':
+                        c.font = c.font.copy(name=_rv.VZ_FONT_BODY)
+        except Exception as _brand_exc:  # noqa: BLE001
+            print(f"  ACL funding Vizo restyle skipped: {_brand_exc}")
+
     # File name follows the Management Adjustment Worksheet convention.
     safe_cu = (config.get('credit_union') or cu).replace('/', '-').replace('\\', '-')
     snap_prefix = snapshot_date[:7]   # "YYYY-MM"

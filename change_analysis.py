@@ -31,7 +31,7 @@ _SECTION_WORDS = {
     "allowance & provision for loan loss reserve analysis",
 }
 
-# ── styling (Vizo brand: Calibri, teal 0D4D5E header, legend palette) ─────
+# ── styling (Calibri, teal 0D4D5E header; Vizo-flavor sheets restyled below) ─────
 _THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 F_TITLE = Font(name="Calibri", size=14, bold=True)
@@ -179,32 +179,138 @@ def _select_prior_candidate(candidates, snap, pin=None):
     return candidates[-1]
 
 
+def prior_search_dirs(config, rpt_dir):
+    """Folders to scan for a prior report, in priority order: the Reports
+    archive, then the CU's ``report_output_dir`` (and its parent, so a
+    sibling quarter folder such as ``2026/2026-06`` next to ``2026/2026-09``
+    is seen), then its staging ``data_directory`` (and its parent, for the
+    same sibling-quarter reason), then the WARM folder named by
+    ``credit_pull.fallback_report_folder``. Prior workbooks are often only
+    retained in the client delivery tree, not under Reports/."""
+    cfg = config or {}
+    dirs = [rpt_dir]
+    out = str(cfg.get('report_output_dir') or '').strip()
+    if out:
+        dirs += [out, os.path.dirname(out.rstrip('\\/'))]
+    dd = str(cfg.get('data_directory') or '').strip()
+    if dd:
+        dirs += [dd, os.path.dirname(dd.rstrip('\\/'))]
+    fb = str((cfg.get('credit_pull') or {}).get('fallback_report_folder') or '').strip()
+    if fb:
+        dirs.append(fb)
+    seen, result = set(), []
+    try:
+        from import_data import _resolve_renamed_dir
+    except Exception:  # noqa: BLE001
+        _resolve_renamed_dir = lambda p: p  # noqa: E731
+    for d in dirs:
+        if not d:
+            continue
+        try:
+            d = _resolve_renamed_dir(d)
+            key = os.path.normcase(os.path.abspath(d))
+            ok = os.path.isdir(d)
+        except (OSError, ValueError):
+            continue
+        if key in seen or not ok:
+            continue
+        seen.add(key)
+        result.append(d)
+    return result
+
+
+def _month_end(ym):
+    """'YYYY-MM' -> 'YYYY-MM-DD' (last day of the month)."""
+    import calendar
+    y, m = int(ym[:4]), int(ym[5:7])
+    return f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}"
+
+
+def _cu_tokens(safe_cu):
+    """Lower-cased significant words of the CU name for loose filename
+    matching of legacy / WARM workbooks ('Franklin_Trust_FCU' -> {'franklin', 'trust'})."""
+    stop = {'fcu', 'cu', 'federal', 'credit', 'union', 'inc'}
+    toks = [t.lower() for t in re.split(r'[\s_\-]+', str(safe_cu)) if t]
+    return {t for t in toks if t not in stop} or set(toks)
+
+
 def _find_prior_report(rpt_dir, safe_cu, suffix, snap, pin=None):
     """Return (path, snap_date) of the prior report to compare against.
 
-    By default returns the most recent report for this CU/format dated
-    strictly before ``snap``. When ``pin`` is set it selects a specific
-    prior report:
+    ``rpt_dir`` may be a single folder or a list of folders (see
+    ``prior_search_dirs``); each is walked recursively.
+
+    Candidates, in order of preference for the same period:
+      1. this tool's own report ``YYYY-MM-DD_CECL_Migration_<CU>_<suffix>.xlsx``;
+      2. the analyst's WARM workbook ``YYYY-MM CECL-Migration-WARM - <CU>.xlsx``
+         (its 'ACL Env by Pool Mgmt Adj' tab has the same layout), so the
+         first WARM-free quarter still gets a period-over-period comparison;
+      3. legacy exports ``YYYY-MM-DD CECL Credit Migration Report - <CU>.xlsx``.
+    Files whose name starts with ``DNU`` or ``~$`` are ignored.
+
+    By default returns the most recent report for this CU dated strictly
+    before ``snap``. When ``pin`` is set it selects a specific prior report:
       * ``'prior_quarter_end'`` -> the report dated at the most recent
         calendar quarter-end before ``snap`` (falls back to the most recent
         report on/before that quarter-end when no exact match exists);
       * an explicit ``'YYYY-MM'`` or ``'YYYY-MM-DD'`` -> the matching report.
     An unresolved ``pin`` falls back to the most-recent-prior default.
     """
-    rx = re.compile(r"(\d{4}-\d{2}-\d{2})_CECL_Migration_"
-                    + re.escape(safe_cu) + rf"_{re.escape(suffix)}\.xlsx$")
-    candidates = []  # (date_str, path), dated strictly before snap
-    seen_dates = set()
-    for root, _dirs, files in os.walk(rpt_dir):
-        for f in files:
-            m = rx.search(f)
-            if not m:
-                continue
-            d = m.group(1)
-            if d >= str(snap) or d in seen_dates:
-                continue
-            seen_dates.add(d)
-            candidates.append((d, os.path.join(root, f)))
+    rx_tool = re.compile(r"(\d{4}-\d{2}-\d{2})_CECL_Migration_"
+                         + re.escape(safe_cu) + rf"_{re.escape(suffix)}\.xlsx$")
+    rx_warm = re.compile(r"^(\d{4}-\d{2})(?:-\d{2})?\s+CECL[\s_\-]+Migration[\s_\-]+WARM\b.*\.xlsx$",
+                         re.IGNORECASE)
+    rx_legacy = re.compile(r"^(\d{4}-\d{2}-\d{2})\s+CECL\s+Credit\s+Migration\s+Report\b.*\.xlsx$",
+                           re.IGNORECASE)
+    tokens = _cu_tokens(safe_cu)
+    dirs = [rpt_dir] if isinstance(rpt_dir, (str, os.PathLike)) else list(rpt_dir or [])
+    # date -> (rank, path); lower rank wins for the same date
+    best_by_date = {}
+
+    def _has_acl_sheet(path):
+        # Analyst-named files (WARM / legacy) must really carry the ACL tab;
+        # sibling deliverables like '... CECL-Migration-WARM Impaired Loans'
+        # share the naming but not the layout.
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            try:
+                return ACL_SHEET in wb.sheetnames
+            finally:
+                wb.close()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _offer(dt, rank, path):
+        if dt >= str(snap):
+            return
+        cur = best_by_date.get(dt)
+        if cur is not None and rank >= cur[0]:
+            return
+        if rank > 0 and not _has_acl_sheet(path):
+            return
+        best_by_date[dt] = (rank, path)
+
+    for d in dirs:
+        for root, _dirs, files in os.walk(d):
+            for f in files:
+                if f.startswith("~$") or f.upper().startswith("DNU"):
+                    continue
+                m = rx_tool.search(f)
+                if m:
+                    _offer(m.group(1), 0, os.path.join(root, f))
+                    continue
+                low = f.lower()
+                if "impaired" in low or not all(t in low for t in tokens):
+                    continue
+                m = rx_warm.match(f)
+                if m:
+                    _offer(_month_end(m.group(1)), 1, os.path.join(root, f))
+                    continue
+                m = rx_legacy.match(f)
+                if m:
+                    _offer(m.group(1), 2, os.path.join(root, f))
+    candidates = [(dt, rp[1]) for dt, rp in best_by_date.items()]
     chosen = _select_prior_candidate(candidates, snap, pin)
     if not chosen:
         return None, None
@@ -307,9 +413,33 @@ def _hdr_row(ws, r, labels, widths=None):
         cell.alignment = CENTER if c == 1 else RIGHT
 
 
+def _apply_vizo_brand(ws):
+    """Restyle a finished sheet to the Vizo Theme 2026 (navy headers, Arial)."""
+    import report_vizo as _rv
+    navy = PatternFill("solid", fgColor=_rv.VZ_NAVY)
+    for row in ws.iter_rows():
+        for c in row:
+            if c.fill is not None and c.fill.patternType == "solid" \
+                    and str(c.fill.fgColor.rgb or "").endswith("0D4D5E"):
+                c.fill = navy
+            if c.font is not None and c.font.name == "Calibri":
+                c.font = c.font.copy(name=_rv.VZ_FONT_BODY)
+
+
 def append_change_analysis(wb, cu, snap, config, suffix):
     """Append the Change Analysis sheet. ``suffix`` = 'TCT_Model' or
     'Vizo_Model'. Never raises — on any problem it writes a short note."""
+    try:
+        _append_change_analysis(wb, cu, snap, config, suffix)
+    finally:
+        if str(suffix).lower().startswith("vizo") and SHEET_NAME in wb.sheetnames:
+            try:
+                _apply_vizo_brand(wb[SHEET_NAME])
+            except Exception:  # noqa: BLE001 - styling must never sink the sheet
+                pass
+
+
+def _append_change_analysis(wb, cu, snap, config, suffix):
     try:
         cur = _parse_acl_sheet(wb[ACL_SHEET])
     except Exception as exc:  # noqa: BLE001
@@ -330,7 +460,7 @@ def append_change_analysis(wb, cu, snap, config, suffix):
     safe_cu = ((config or {}).get('credit_union') or cu).replace(' ', '_').replace('/', '-')
     ca_pin = ((config or {}).get('change_analysis') or {}).get('compare_to')
     prior_path, prior_snap = _find_prior_report(
-        rpt_dir, safe_cu, suffix, snap, pin=ca_pin)
+        prior_search_dirs(config, rpt_dir), safe_cu, suffix, snap, pin=ca_pin)
 
     if not cur or not prior_path:
         msg = ("No prior report is available for comparison — this is the "

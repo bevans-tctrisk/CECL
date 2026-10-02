@@ -96,67 +96,107 @@ def _load_workbook_resilient(path, **kwargs):
                 pass
 
 _VIZO_THEME_BYTES = None
+VIZO_THEME_XML = os.path.join(_BASE, 'vizo_theme.xml')   # "Vizo Theme 2026" (Oct-2026 rebrand)
 
 def _apply_vizo_theme(wb):
-    """Replace the workbook's theme with the Vizo Color Theme 1.
+    """Replace the workbook's theme with the Vizo brand theme.
 
     Without this, openpyxl writes Office's default theme so theme-color
-    references (Accent 4, etc.) render in Office colors (purple) instead of
-    the Vizo palette (teal).
+    references (Accent 4, etc.) and theme fonts render in Office defaults
+    instead of the Vizo palette / Montserrat + Arial.
     """
     global _VIZO_THEME_BYTES
     if _VIZO_THEME_BYTES is None:
         try:
-            import zipfile
-            with zipfile.ZipFile(VIZO_TEMPLATE_PATH) as z:
-                _VIZO_THEME_BYTES = z.read('xl/theme/theme1.xml')
-        except Exception:
-            _VIZO_THEME_BYTES = b''
+            with open(VIZO_THEME_XML, 'rb') as fh:
+                _VIZO_THEME_BYTES = fh.read()
+        except OSError:
+            try:  # legacy fallback: theme carried by the sample template
+                import zipfile
+                with zipfile.ZipFile(VIZO_TEMPLATE_PATH) as z:
+                    _VIZO_THEME_BYTES = z.read('xl/theme/theme1.xml')
+            except Exception:
+                _VIZO_THEME_BYTES = b''
     if _VIZO_THEME_BYTES:
         wb.loaded_theme = _VIZO_THEME_BYTES
 
 LOGO_VIZO = os.path.join(_BASE, 'logos', 'vizo_financial.png')
 LOGO_TCT  = os.path.join(_BASE, 'logos', 'tct_risk_solutions.png')
+# Monochrome TCT mark used alongside the Vizo brand (falls back to the color logo).
+LOGO_TCT_MONO = os.path.join(_BASE, 'logos', 'tct_risk_solutions_mono.png')
+if not os.path.isfile(LOGO_TCT_MONO):
+    LOGO_TCT_MONO = LOGO_TCT
 ICON_INFO_DARKRED   = os.path.join(_WORKSPACE_BASE, 'Sample Reports', 'assets', 'info_darkred.png')
 ICON_INFO_DARKGREEN = os.path.join(_WORKSPACE_BASE, 'Sample Reports', 'assets', 'info_darkgreen.png')
 
 HIDDEN_GRADES = ['Hide-F', 'Hide-G', 'Hide-H', 'Hide-I']
 
-# ── Calibri fonts (template standard) ────────────────────────────
-V26   = Font(name='Calibri', size=26)
-V26B  = Font(name='Calibri', bold=True, size=26)
-V18B  = Font(name='Calibri', bold=True, size=18)
-V14B  = Font(name='Calibri', bold=True, size=14)
-V14   = Font(name='Calibri', size=14)
-V12B  = Font(name='Calibri', bold=True, size=12)
-V12   = Font(name='Calibri', size=12)
-V11B  = Font(name='Calibri', bold=True, size=11)
-V11   = Font(name='Calibri', size=11)
-V10B  = Font(name='Calibri', bold=True, size=10)
-V10   = Font(name='Calibri', size=10)
-V8    = Font(name='Calibri', size=8)
-V8B   = Font(name='Calibri', bold=True, size=8)
+# ── Vizo brand palette ("Theme 2026", from Vizo Rebrand October 2026 .thmx) ──
+# Theme slots: accent1/dk2 navy, accent2 gold, accent3 teal, accent4 light
+# gold, accent5 mint, accent6 gray, lt2 cream.  Semantic roles used below:
+VZ_NAVY     = '011631'   # accent1 – headers, bands, Unchanged / Net
+VZ_GOLD     = '926C12'   # accent2 – Deteriorated (warm pole)
+VZ_TEAL     = '068288'   # accent3 – Improved (cool pole)
+VZ_GOLD_LT  = 'B69036'   # accent4 – base for light fills (tints)
+VZ_MINT     = '7AE2CF'   # accent5
+VZ_GRAY     = '7F7F7F'   # accent6 – Not Reported
+VZ_CREAM    = 'F2EDE7'   # lt2
+VZ_FILL_LT  = 'F0E9D7'   # accent4 tint 0.8 – alternating rows
+VZ_FILL_MD  = 'E2D3AF'   # accent4 tint 0.6 – total rows / band headers
+VZ_FONT_HEAD = 'Montserrat'   # theme major font (titles)
+VZ_FONT_BODY = 'Arial'        # theme minor font (body)
+# Migration-status roles (Vizo request, Oct 2026): navy / gold / grey / teal.
+VZ_IMPROVED     = VZ_NAVY
+VZ_DETERIORATED = VZ_GOLD
+VZ_UNCHANGED    = VZ_GRAY
+VZ_NOT_REPORTED = VZ_TEAL
+VZ_NET          = VZ_NAVY
+# Per-grade trend lines: best -> worst grade; Not Reported is a black dashed line.
+VZ_GRADE_LINE_HEX = [VZ_NAVY, VZ_TEAL, VZ_GOLD, VZ_MINT, VZ_GOLD_LT, VZ_GRAY, 'BFBFBF', 'D9D9D9']
+
+
+def grade_line_style(grade_name, idx, no_score_label='Not Reported'):
+    """(hex, dashed) for a per-grade trend line; Not Reported = black dash."""
+    g = str(grade_name or '').strip().lower()
+    if g and g in ('not reported', str(no_score_label or '').strip().lower()):
+        return '000000', True
+    return VZ_GRADE_LINE_HEX[min(idx, len(VZ_GRADE_LINE_HEX) - 1)], False
+
+# ── Fonts (theme: Montserrat headings, Arial body) ───────────────
+V26   = Font(name=VZ_FONT_HEAD, size=26)
+V26B  = Font(name=VZ_FONT_HEAD, bold=True, size=26)
+V18B  = Font(name=VZ_FONT_HEAD, bold=True, size=18)
+V14B  = Font(name=VZ_FONT_HEAD, bold=True, size=14)
+V14   = Font(name=VZ_FONT_HEAD, size=14)
+V12B  = Font(name=VZ_FONT_BODY, bold=True, size=12)
+V12   = Font(name=VZ_FONT_BODY, size=12)
+V11B  = Font(name=VZ_FONT_BODY, bold=True, size=11)
+V11   = Font(name=VZ_FONT_BODY, size=11)
+V10B  = Font(name=VZ_FONT_BODY, bold=True, size=10)
+V10   = Font(name=VZ_FONT_BODY, size=10)
+V8    = Font(name=VZ_FONT_BODY, size=8)
+V8B   = Font(name=VZ_FONT_BODY, bold=True, size=8)
 
 # ── Red fonts for hidden grades ──────────────────────────────────
-V12R  = Font(name='Calibri', size=12, color='FF0000')
-V12BR = Font(name='Calibri', bold=True, size=12, color='FF0000')
-V10R  = Font(name='Calibri', size=10, color='FF0000')
+V12R  = Font(name=VZ_FONT_BODY, size=12, color='FF0000')
+V12BR = Font(name=VZ_FONT_BODY, bold=True, size=12, color='FF0000')
+V10R  = Font(name=VZ_FONT_BODY, size=10, color='FF0000')
 
 # ── White fonts (for cells with non-white fill) ──────────────────
-V12W  = Font(name='Calibri', size=12, color='FFFFFF')
-V12BW = Font(name='Calibri', bold=True, size=12, color='FFFFFF')
-V11W  = Font(name='Calibri', size=11, color='FFFFFF')
-V11BW = Font(name='Calibri', bold=True, size=11, color='FFFFFF')
+V12W  = Font(name=VZ_FONT_BODY, size=12, color='FFFFFF')
+V12BW = Font(name=VZ_FONT_BODY, bold=True, size=12, color='FFFFFF')
+V11W  = Font(name=VZ_FONT_BODY, size=11, color='FFFFFF')
+V11BW = Font(name=VZ_FONT_BODY, bold=True, size=11, color='FFFFFF')
 
-# ── Header fills (Vizo Color Theme 1) ────────────────────────────
-HDR_FILL = PatternFill('solid', fgColor='0D4D5E')   # accent1 teal
-HDR_FONT = Font(name='Calibri', bold=True, size=12, color='FFFFFF')
-HDR11    = Font(name='Calibri', bold=True, size=11, color='FFFFFF')
+# ── Header fills (Vizo Theme 2026) ───────────────────────────────
+HDR_FILL = PatternFill('solid', fgColor=VZ_NAVY)      # accent1 navy
+HDR_FONT = Font(name=VZ_FONT_BODY, bold=True, size=12, color='FFFFFF')
+HDR11    = Font(name=VZ_FONT_BODY, bold=True, size=11, color='FFFFFF')
 
-IMP_FILL = PatternFill('solid', fgColor='829901')   # dk2 olive
-DET_FILL = PatternFill('solid', fgColor='873A3A')   # lt2 maroon tint=0.25
-ALT_FILL = PatternFill('solid', fgColor='DAEDEF')   # theme7 accent4 tint~0.8
-TOT_FILL = PatternFill('solid', fgColor='B6DBDE')   # theme7 accent4 tint~0.6
+IMP_FILL = PatternFill('solid', fgColor=VZ_IMPROVED)      # Improved
+DET_FILL = PatternFill('solid', fgColor=VZ_DETERIORATED)  # Deteriorated
+ALT_FILL = PatternFill('solid', fgColor=VZ_FILL_LT)   # accent4 tint 0.8
+TOT_FILL = PatternFill('solid', fgColor=VZ_FILL_MD)   # accent4 tint 0.6
 
 THIN = Border(
     left=Side('thin'), right=Side('thin'),
@@ -315,7 +355,7 @@ def _grade_font(label, bold=False):
 def _grade_font10(label, bold=False):
     """Return red font for hidden grades at 10pt."""
     if _is_hidden(label):
-        return Font(name='Calibri', bold=bold, size=10, color='FF0000')
+        return Font(name=VZ_FONT_BODY, bold=bold, size=10, color='FF0000')
     return V10B if bold else V10
 
 
@@ -462,6 +502,8 @@ def _ncc(pool_df, grades, config):
     for j, og in enumerate(gl):
         for i, g in enumerate(gl):
             v = _matrix_val(matrix, g, og)
+            if g == no_score or og == no_score:
+                continue  # Not Reported -> always unchanged (WARM / Risk Change sheet rule)
             if i > j:
                 if j < n_top and (i - j) < 2:
                     pass  # unchanged – small drop within top grades
@@ -479,6 +521,40 @@ def _eco_stress(config, ed_override=None):
     bk = (ed.get('bankruptcies', 0) / pop) * 100 if pop else 0
     fc = (ed.get('foreclosures', 0) / pop) * 100 if pop else 0
     return unemp + bk + fc
+
+
+def _annual_pool_total_avg(hbd):
+    """Per-pool annual average of the POOL TOTAL monthly balance, with
+    zero-total months excluded.
+
+    Returns ``{pool: {year: avg_total_balance}}``. The pooled average for the
+    Life Loss Rate is taken directly from the pool's total monthly balance
+    series (WARM 'Total' row / monthly balances) rather than by summing
+    per-grade averages, which over-states the total when grades are active in
+    different months. Months whose pool total is zero are dropped.
+    """
+    out = {}
+    for pk, pdata in (hbd or {}).items():
+        dates = pdata.get('dates', []) or []
+        n = len(dates)
+        totals = list(pdata.get('total') or [])
+        if len(totals) != n:
+            # No aligned 'total' series -> reconstruct from non-hidden grades.
+            grades_data = pdata.get('grades', {}) or {}
+            totals = [0.0] * n
+            for gk, vals in grades_data.items():
+                if str(gk).upper().startswith('HIDE'):
+                    continue
+                for i in range(min(n, len(vals))):
+                    totals[i] += vals[i] or 0
+        yr_sums, yr_cnts = {}, {}
+        for i, d in enumerate(dates):
+            t = totals[i] if i < len(totals) else 0
+            if t and t > 0:
+                yr_sums[d.year] = yr_sums.get(d.year, 0) + t
+                yr_cnts[d.year] = yr_cnts.get(d.year, 0) + 1
+        out[pk] = {y: yr_sums[y] / yr_cnts[y] for y in yr_sums}
+    return out
 
 
 def _pool_life_loss(pools, hist):
@@ -709,37 +785,41 @@ def _sheet_cover(wb, cu, snap, supplemental=False):
     ws.row_dimensions[17].height = 24.0
     ws.row_dimensions[39].height = 12.75
 
-    # ── Vizo Financial logo (top centre, rows 3-12 in column D) ──
+    # ── Vizo Financial logo (top centre, column D, rows 4-13 area) ──
+    # The 2026 wordmark is a wide, pre-trimmed PNG; keep its aspect ratio and
+    # centre it inside the template's original logo box. Uses a TwoCellAnchor
+    # because patch_drawing_onecell_to_twocell() would otherwise discard <ext>.
     if os.path.isfile(LOGO_VIZO):
-        # Trim shadow on all sides of the source logo.
-        if PILImage is not None:
-            with PILImage.open(LOGO_VIZO) as _img:
-                w, h = _img.size
-                crop_left = max(1, int(w * 0.02))
-                crop_top = max(1, int(h * 0.02))
-                crop_right = max(1, int(w * 0.05))
-                crop_bottom = max(1, int(h * 0.08))
-                crop_box = (crop_left, crop_top,
-                            max(crop_left + 1, w - crop_right),
-                            max(crop_top + 1, h - crop_bottom))
-                _cropped = _img.crop(crop_box)
-                _buf = BytesIO()
-                _cropped.save(_buf, format='PNG')
-                _buf.seek(0)
-                vizo_img = XlImage(_buf)
-        else:
-            vizo_img = XlImage(LOGO_VIZO)
-        # Template anchor: from col=3(D) colOff=169545 row=3 rowOff=9525
-        #                  to   col=3(D) colOff=1998345 row=12 rowOff=215265
+        vizo_img = XlImage(LOGO_VIZO)
+        EMU_PT = 12700
+        box_col, box_left, box_w = 3, 169545, 1998345 - 169545
+        # Template box spans row idx 3 (+9525 EMU) .. row idx 12 (+215265 EMU)
+        def _row_h(ri):  # ri = 0-based row index
+            return (ws.row_dimensions[ri + 1].height or 15.0) * EMU_PT
+        box_h = sum(_row_h(ri) for ri in range(3, 12)) - 9525 + 215265
+        iw, ih = vizo_img.width, vizo_img.height
+        img_w, img_h = box_w, box_w * ih / iw
+        if img_h > box_h:
+            img_w, img_h = box_h * iw / ih, box_h
+
+        def _row_marker(emu_from_row3_top, col_off):
+            ri, off = 3, emu_from_row3_top
+            while off >= _row_h(ri):
+                off -= _row_h(ri)
+                ri += 1
+            return AnchorMarker(col=box_col, colOff=int(col_off), row=ri, rowOff=int(off))
+
+        top = 9525 + (box_h - img_h) / 2
+        left = box_left + (box_w - img_w) / 2
         vizo_img.anchor = TwoCellAnchor(
-            _from=AnchorMarker(col=3, colOff=169545, row=3, rowOff=9525),
-            to=AnchorMarker(col=3, colOff=1998345, row=12, rowOff=215265),
+            _from=_row_marker(top, left),
+            to=_row_marker(top + img_h, left + img_w),
         )
         ws.add_image(vizo_img)
 
-    # ── TCT Risk Solutions logo (bottom, rows 40-42) ──
-    if os.path.isfile(LOGO_TCT):
-        tct_img = XlImage(LOGO_TCT)
+    # ── TCT Risk Solutions logo, monochrome (bottom, rows 40-42) ──
+    if os.path.isfile(LOGO_TCT_MONO):
+        tct_img = XlImage(LOGO_TCT_MONO)
         if supplemental:
             # Supplemental template: from col=0 row=38 to col=3 row=42
             tct_img.anchor = TwoCellAnchor(
@@ -825,10 +905,10 @@ def _sheet_report_index(wb, cu, snap, supplemental=False):
     tab_name = "Report Index" if not supplemental else "Report Index (2)"
     ws = wb.create_sheet(tab_name)
 
-    # Heading fonts matching the report's brand teal (0D4D5E) accent.
-    theme4_14b = Font(name='Calibri', bold=True, size=14, color='0D4D5E')
-    theme1_12  = Font(name='Calibri', size=12, color='000000')
-    theme4_12b = Font(name='Calibri', bold=True, size=12, color='0D4D5E')
+    # Heading fonts in the brand primary (navy) accent.
+    theme4_14b = Font(name=VZ_FONT_HEAD, bold=True, size=14, color=VZ_NAVY)
+    theme1_12  = Font(name=VZ_FONT_BODY, size=12, color='000000')
+    theme4_12b = Font(name=VZ_FONT_BODY, bold=True, size=12, color=VZ_NAVY)
 
     if not supplemental:
         # ── Column widths ──
@@ -1120,7 +1200,7 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
         c_g.number_format = ACCT
 
     # Thick dark-teal border box from D6:G10 (matches Vizo TEAL accent color)
-    _thick = Side(style='thick', color='FF0D4D5E')
+    _thick = Side(style='thick', color='FF' + VZ_NAVY)
     for r in range(6, 11):
         is_top = (r == 6)
         is_bot = (r == 10)
@@ -1140,7 +1220,7 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
     # ══════════════════════════════════════════════════════════════
     #  DATA TABLE  (red font, outside print area)
     # ══════════════════════════════════════════════════════════════
-    RED12 = Font(name='Calibri', size=12, color='FF0000')
+    RED12 = Font(name=VZ_FONT_BODY, size=12, color='FF0000')
 
     # ── Loan-type data  (cols F-I, rows 45+)  feeds Charts 0 & 3 ─
     ws.cell(row=45, column=6, value='Loan Type').font = RED12
@@ -1238,10 +1318,10 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
     # ══════════════════════════════════════════════════════════════
     ACCT_FMT = '_(* #,##0_);_(* \\(#,##0\\);_(* "-"_);_(@_)'
 
-    # Vizo Color Theme 1 hex values
-    TEAL   = '0D4D5E'   # accent1 – Improved
-    MAROON = '3D1A1A'   # lt2/bg2 – Deteriorated
-    OLIVE  = '829901'   # accent2/dk2 – Net Change
+    # Vizo Theme 2026 roles (names kept from the original template build)
+    TEAL   = VZ_IMPROVED      # Improved
+    MAROON = VZ_DETERIORATED  # Deteriorated
+    OLIVE  = VZ_NET           # Net Change
     WHITE  = 'FFFFFF'   # lt1/bg1 – data label font
 
     from openpyxl.drawing.text import RichTextProperties
@@ -1317,9 +1397,9 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
         """Build a chart Title styled as Calibri 18pt (bold)."""
         rpr = CharacterProperties(
             sz=1800, b=True,
-            latin=DrawingFont(typeface='Calibri'),
-            ea=DrawingFont(typeface='Calibri'),
-            cs=DrawingFont(typeface='Calibri'),
+            latin=DrawingFont(typeface=VZ_FONT_BODY),
+            ea=DrawingFont(typeface=VZ_FONT_BODY),
+            cs=DrawingFont(typeface=VZ_FONT_BODY),
         )
         para = Paragraph(
             pPr=ParagraphProperties(defRPr=rpr),
@@ -1727,7 +1807,7 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     for i, g in enumerate(gl):
         r = 7 + i
         # Side headers (cols A-B): header fill + white font
-        fnt_side = V12BR if _is_hidden(g) else Font(name='Calibri', bold=True, size=12, color='FFFFFF')
+        fnt_side = V12BR if _is_hidden(g) else Font(name=VZ_FONT_BODY, bold=True, size=12, color='FFFFFF')
         ws.cell(row=r, column=1, value=g).font = fnt_side
         ws.cell(row=r, column=1).fill = HDR_FILL
         ws.cell(row=r, column=1).alignment = side_left
@@ -1886,7 +1966,7 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     # ─── Percent Data rows ───
     for i, g in enumerate(gl):
         r = r_ph2 + 1 + i
-        fnt_side = V12BR if _is_hidden(g) else Font(name='Calibri', bold=True, size=12, color='FFFFFF')
+        fnt_side = V12BR if _is_hidden(g) else Font(name=VZ_FONT_BODY, bold=True, size=12, color='FFFFFF')
         ws.cell(row=r, column=1, value=g).font = fnt_side
         ws.cell(row=r, column=1).fill = HDR_FILL
         ws.cell(row=r, column=1).alignment = side_left
@@ -1901,7 +1981,7 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
             pct = v / col_total if col_total else 0
             cell = ws.cell(row=r, column=3 + j, value=pct)
             cell.number_format = PCT
-            cell.font = Font(name='Calibri', size=11, color='FF0000') if _is_hidden(g) else V11
+            cell.font = Font(name=VZ_FONT_BODY, size=11, color='FF0000') if _is_hidden(g) else V11
             if g == no_score or og == no_score:
                 pass  # Not Reported → always unchanged, no fill
             elif i > j:
@@ -1937,7 +2017,7 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     det_bal = grand_det
     net = imp_bal - det_bal
     ws.merge_cells(start_row=r_nc, start_column=2, end_row=r_nc + 1, end_column=4)
-    ws.cell(row=r_nc, column=2, value="Net Credit Change").font = Font(name='Calibri', bold=False, size=18)
+    ws.cell(row=r_nc, column=2, value="Net Credit Change").font = Font(name=VZ_FONT_HEAD, bold=False, size=18)
     ws.cell(row=r_nc, column=2).alignment = Alignment(horizontal='center', vertical='center')
     ws.row_dimensions[r_nc].height = 15.6
     ws.row_dimensions[r_nc + 1].height = 18.0
@@ -1945,9 +2025,9 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     # ─── Summary Table (Improved / Deteriorated / Unchanged / Portfolio / Net Change) ───
     unc_bal = total - imp_bal - det_bal
     r_sum = r_nc + 6
-    WHITE_BOLD12 = Font(name='Calibri', bold=True, size=12, color='FFFFFF')
-    V12_REG = Font(name='Calibri', bold=False, size=12)
-    WHITE_REG12 = Font(name='Calibri', bold=False, size=12, color='FFFFFF')
+    WHITE_BOLD12 = Font(name=VZ_FONT_BODY, bold=True, size=12, color='FFFFFF')
+    V12_REG = Font(name=VZ_FONT_BODY, bold=False, size=12)
+    WHITE_REG12 = Font(name=VZ_FONT_BODY, bold=False, size=12, color='FFFFFF')
     summary_items = [
         ("Improved",     imp_bal, imp_bal / total if total else 0, IMP_FILL),
         ("Deteriorated", det_bal, det_bal / total if total else 0, DET_FILL),
@@ -1985,7 +2065,7 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     s_dn = dc.series[0]
     s_dn.explosion = 16
     dn_pts = []
-    for dp_idx, dp_color in enumerate(['829901', '873A3A', '0D4D5E']):
+    for dp_idx, dp_color in enumerate([VZ_IMPROVED, VZ_DETERIORATED, VZ_UNCHANGED]):
         dp = DataPoint(idx=dp_idx)
         dp.graphicalProperties = GraphicalProperties()
         dp.graphicalProperties.noFill = True
@@ -2027,9 +2107,9 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     rc_bar.add_data(imp_ref, titles_from_data=True)
     rc_bar.set_categories(cats_rc)
     rc_bar.series[0].graphicalProperties.noFill = True
-    rc_bar.series[0].graphicalProperties.line = LineProperties(solidFill='873A3A', w=38100)
+    rc_bar.series[0].graphicalProperties.line = LineProperties(solidFill=VZ_DETERIORATED, w=38100)
     rc_bar.series[1].graphicalProperties.noFill = True
-    rc_bar.series[1].graphicalProperties.line = LineProperties(solidFill='829901', w=38100)
+    rc_bar.series[1].graphicalProperties.line = LineProperties(solidFill=VZ_IMPROVED, w=38100)
     from openpyxl.chart.legend import Legend
     rc_bar.legend = Legend()
     rc_bar.legend.position = 't'
@@ -2073,9 +2153,9 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     s_dq.explosion = 21
     s_dq.graphicalProperties = GraphicalProperties()
     s_dq.graphicalProperties.noFill = True
-    s_dq.graphicalProperties.line = LineProperties(solidFill='0D4D5E', w=38100)
+    s_dq.graphicalProperties.line = LineProperties(solidFill=VZ_UNCHANGED, w=38100)
     dq_pts = []
-    for dp_idx, dp_color in enumerate(['829901', '873A3A', '0D4D5E', 'FFC000']):
+    for dp_idx, dp_color in enumerate([VZ_IMPROVED, VZ_DETERIORATED, VZ_UNCHANGED, VZ_NOT_REPORTED]):
         dp = DataPoint(idx=dp_idx)
         dp.graphicalProperties = GraphicalProperties()
         dp.graphicalProperties.noFill = True
@@ -2162,9 +2242,9 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     # Outline-only bars with 4pt borders
     s_co.graphicalProperties = GraphicalProperties()
     s_co.graphicalProperties.noFill = True
-    s_co.graphicalProperties.line = LineProperties(solidFill='FFC000', w=50800)
+    s_co.graphicalProperties.line = LineProperties(solidFill=VZ_UNCHANGED, w=50800)
     co_pts = []
-    for dp_idx, dp_color in enumerate(['829901', '873A3A', '0D4D5E', 'FFC000']):
+    for dp_idx, dp_color in enumerate([VZ_IMPROVED, VZ_DETERIORATED, VZ_UNCHANGED, VZ_NOT_REPORTED]):
         dp = DataPoint(idx=dp_idx)
         dp.graphicalProperties = GraphicalProperties()
         dp.graphicalProperties.noFill = True
@@ -2328,16 +2408,17 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist):
                 annual_grade_avg[_pk][_y][_gk] = yr_sums[_y] / yr_cnts[_y]
 
     life_loss = {}
+    annual_pool_avg = _annual_pool_total_avg(hbd)
     for pool in pools:
         pool_acl = acl_months_map.get(pool, 36)
         abs_first = (snap_year * 12 + snap_month) - pool_acl + 1
         pe = (abs_first - 1) // 12
-        pa = annual_grade_avg.get(pool, {})
+        pa = annual_pool_avg.get(pool, {})
         yr_tots = []
         for y in years:
             if y < pe:
                 continue
-            yt = sum(pa.get(y, {}).values())
+            yt = pa.get(y, 0)
             if not yt:
                 yt = avg_bals.get(y, {}).get(pool, 0)
             if yt:
@@ -2923,10 +3004,10 @@ def _sheet_env_factor(wb, cu, snap, df, grades, config, hist):
     ws['A3'].font = V12B
 
     # Economic Stress Index section ── light gold fill, black text, no borders
-    ESI_FILL = PatternFill('solid', fgColor='CFDBDF')  # Teal Accent4 80% lighter
-    ESI_HDR  = Font(name='Calibri', bold=True, size=11)
-    ESI_DATA = Font(name='Calibri', size=11)
-    ESI_DATA10 = Font(name='Calibri', size=10)
+    ESI_FILL = PatternFill('solid', fgColor=VZ_FILL_LT)  # accent4 80% lighter
+    ESI_HDR  = Font(name=VZ_FONT_BODY, bold=True, size=11)
+    ESI_DATA = Font(name=VZ_FONT_BODY, size=11)
+    ESI_DATA10 = Font(name=VZ_FONT_BODY, size=10)
     _esi_align_hdr = Alignment(horizontal='left', vertical='center', wrap_text=True)
     _esi_align_val = Alignment(horizontal='right', vertical='center')
     _esi_align_lbl = Alignment(horizontal='left', vertical='center')
@@ -3048,10 +3129,10 @@ def _sheet_env_factor(wb, cu, snap, df, grades, config, hist):
     # ── Footnotes: data sources ──────────────────────────────────
     sources = ed.get('_sources', {})
     if sources:
-        fn_font = Font(name='Calibri', size=8, italic=True, color='555555')
+        fn_font = Font(name=VZ_FONT_BODY, size=8, italic=True, color='555555')
         r += 2  # skip a blank row
         ws.cell(row=r, column=1, value="Data Sources:").font = Font(
-            name='Calibri', size=8, bold=True, italic=True, color='555555')
+            name=VZ_FONT_BODY, size=8, bold=True, italic=True, color='555555')
         for field_label, source_keys in [
             ("Unemployment Rate", "unemployment_rate"),
             ("Population", "population"),
@@ -3136,16 +3217,17 @@ def _sheet_loss_factor(wb, cu, snap, df, grades, config, hist):
     # ── Pre-compute per-pool Life Loss Rate (matches WARM formula) ──
     # WARM: Life Loss Rate = Total Net Chargeoffs / Average of yearly pool totals
     warm_net_co = _imp.get('warm_net_co', {})
+    annual_pool_avg = _annual_pool_total_avg(hbd)
     pool_life_rates = {}
     pool_avg_totals = {}
     for pool in pools:
         pe = _pool_earliest_year(pool)
-        pa = annual_grade_avg.get(pool, {})
+        pa = annual_pool_avg.get(pool, {})
         yr_tots = []
         for y in years:
             if y < pe:
                 continue
-            yt = sum(pa.get(y, {}).values())
+            yt = pa.get(y, 0)
             if not yt:
                 yt = avg_bals.get(y, {}).get(pool, 0)
             if yt:
@@ -3248,11 +3330,11 @@ def _sheet_loss_factor(wb, cu, snap, df, grades, config, hist):
             r += 1
             ws.cell(row=r, column=1, value="Total").font = V12B
             ws.cell(row=r, column=1).number_format = DOLLAR
-            pool_annual = annual_grade_avg.get(pool, {})
+            pool_annual = annual_pool_avg.get(pool, {})
             for yi in range(num_years):
                 if years[yi] < pool_earliest:
                     continue
-                yr_total = sum(pool_annual.get(years[yi], {}).values())
+                yr_total = pool_annual.get(years[yi], 0)
                 if not yr_total:
                     yr_total = avg_bals.get(years[yi], {}).get(pool, 0)
                 if yr_total:
@@ -3344,12 +3426,13 @@ def _sheet_loss_factor(wb, cu, snap, df, grades, config, hist):
         r += 1
         ws.cell(row=r, column=1, value="Total").font = V12B
         ws.cell(row=r, column=1).number_format = DOLLAR
-        # Year total columns – sum grade-level annual averages
-        pool_annual = annual_grade_avg.get(pool, {})
+        # Year total columns – pool-total annual average (zero-total months
+        # excluded); not the sum of per-grade averages.
+        pool_annual = annual_pool_avg.get(pool, {})
         for yi in range(num_years):
             if years[yi] < pool_earliest:
                 continue
-            yr_total = sum(pool_annual.get(years[yi], {}).values())
+            yr_total = pool_annual.get(years[yi], 0)
             if not yr_total:
                 # Fallback to pool-level avg_balances (e.g. years backfilled
                 # from the 5300 DB overlay where per-grade detail is absent).
@@ -3378,12 +3461,12 @@ def _sheet_loss_factor(wb, cu, snap, df, grades, config, hist):
     r += 1
     gt_row = r
     ws.cell(row=r, column=1, value="Grand Total").font = V12B
-    # Yearly grand totals = sum of per-pool annual averages across all pools
+    # Yearly grand totals = sum of per-pool annual pool-total averages
     for yi in range(num_years):
         y = years[yi]
         ytot = 0.0
         for pool in pools:
-            ytot += sum(annual_grade_avg.get(pool, {}).get(y, {}).values())
+            ytot += annual_pool_avg.get(pool, {}).get(y, 0)
         if ytot:
             c = ws.cell(row=r, column=year_start_col + yi, value=ytot)
             c.number_format = ACCT
@@ -3767,7 +3850,7 @@ def _sheet_env_ranges(wb, cu, snap, hist):
     SEC_MED = PatternFill('solid', fgColor=Color(theme=7, tint=0.3999450666829432))
     SEC_DQ = PatternFill('solid', fgColor=Color(theme=7, tint=0.5999938962981048))
     SEC_LITE = PatternFill('solid', fgColor=Color(theme=7, tint=0.7999816888943144))
-    HDR_BLACK = Font(name='Calibri', bold=True, size=12, color='000000')
+    HDR_BLACK = Font(name=VZ_FONT_BODY, bold=True, size=12, color='000000')
 
     ws.merge_cells('B6:C6')
     ws['B6'] = "Net Credit Change"
@@ -4051,7 +4134,7 @@ def _sheet_hist_trends_bal(wb, cu, snap, df, grades, config, hist):
 
     if not pool_blocks:
         ws['A5'] = "No historical grade-level balance data available."
-        ws['A5'].font = Font(name='Calibri', italic=True, size=10, color='888888')
+        ws['A5'].font = Font(name=VZ_FONT_BODY, italic=True, size=10, color='888888')
         return
 
     # ── Create one line chart per pool ──
@@ -4078,13 +4161,13 @@ def _sheet_hist_trends_bal(wb, cu, snap, df, grades, config, hist):
                     pPr=ParagraphProperties(
                         defRPr=CharacterProperties(
                             sz=2000, b=False,
-                            latin=DrawingFont(typeface='Calibri'),
+                            latin=DrawingFont(typeface=VZ_FONT_BODY),
                         )
                     ),
                     r=[RegularTextRun(
                         rPr=CharacterProperties(
                             sz=2000, b=False,
-                            latin=DrawingFont(typeface='Calibri'),
+                            latin=DrawingFont(typeface=VZ_FONT_BODY),
                         ),
                         t=pb['pool'],
                     )],
@@ -4142,15 +4225,15 @@ def _sheet_hist_trends_bal(wb, cu, snap, df, grades, config, hist):
         chart.add_data(data, from_rows=True, titles_from_data=False)
         chart.set_categories(cats)
 
-        # Label each series with its grade name and apply template colors
-        # Colors match theme accent1-6 from template, cycling for >6 series
-        ACCENT_HEX = ['0D4D5E', '829901', '3D1A1A', '48A5AD', '5F5F5F', 'FFC000']
+        # Label each series with its grade name; colours follow the brand
+        # grade ramp, Not Reported is a black dashed line.
+        _no_score = (config or {}).get('no_score_label', 'Not Reported')
         for gi, s in enumerate(chart.series):
             grade_name = detail_ws.cell(pb['grade_start'] + gi, 1).value or ''
             s.tx = SeriesLabel(v=grade_name)
-            hex_color = ACCENT_HEX[gi % len(ACCENT_HEX)]
+            hex_color, dashed = grade_line_style(grade_name, gi, _no_score)
             s.graphicalProperties.line = LineProperties(
-                w=38100, cap='rnd', prstDash='solid',
+                w=38100, cap='rnd', prstDash='dash' if dashed else 'solid',
                 solidFill=hex_color, round=True,
             )
 
@@ -4216,7 +4299,7 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
 
     def _grade_font8(label):
         if _is_hidden(label):
-            return Font(name='Calibri', size=8, color='FF0000')
+            return Font(name=VZ_FONT_BODY, size=8, color='FF0000')
         return F8
 
     # Get WARM hist data (grade-level per pool per month)
@@ -4239,15 +4322,15 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
 
     # Row 1: CU name
     ws['A1'] = cu
-    ws['A1'].font = Font(name='Calibri', bold=True, size=11)
+    ws['A1'].font = Font(name=VZ_FONT_BODY, bold=True, size=11)
 
     # Row 2: subtitle
     ws['A2'] = "Loss Factor Historical Detail"
-    ws['A2'].font = Font(name='Calibri', bold=True, size=10)
+    ws['A2'].font = Font(name=VZ_FONT_BODY, bold=True, size=10)
 
     # Row 3: quarter ending
     ws['A3'] = f"For Quarter Ending {_snap_display(snap)}"
-    ws['A3'].font = Font(name='Calibri', bold=True, size=10)
+    ws['A3'].font = Font(name=VZ_FONT_BODY, bold=True, size=10)
 
     # Row 4: spacer
     ws.row_dimensions[4].height = 5.0
@@ -4257,7 +4340,7 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
         pools_fb = _ordered_pools(df, hist)
         r = 5
         for pool in pools_fb:
-            ws.cell(row=r, column=1, value=pool).font = Font(name='Calibri', bold=True, size=9)
+            ws.cell(row=r, column=1, value=pool).font = Font(name=VZ_FONT_BODY, bold=True, size=9)
             r += 1
             ws.cell(row=r, column=1, value="Current Grade").font = F8B
             ws.cell(row=r, column=2, value=snap).font = F8B
@@ -4319,7 +4402,7 @@ def _sheet_detail_hist_bal(wb, cu, snap, df, grades, config, hist):
         pool_last_total = ptotal[-1] if ptotal else 0
 
         # Pool header row
-        ws.cell(row=r, column=1, value=pool).font = Font(name='Calibri', bold=True, size=9)
+        ws.cell(row=r, column=1, value=pool).font = Font(name=VZ_FONT_BODY, bold=True, size=9)
         ws.row_dimensions[r].height = 13.5
         r += 1
 
@@ -4546,11 +4629,11 @@ def _sheet_detail_co_hist(wb, cu, snap, config, hist):
 
     # ── Title rows ──
     ws['A1'] = cu
-    ws['A1'].font = Font(name='Calibri', bold=True, size=11)
+    ws['A1'].font = Font(name=VZ_FONT_BODY, bold=True, size=11)
     ws['A2'] = "Charge off and Recoveries Historical Detail"
-    ws['A2'].font = Font(name='Calibri', bold=True, size=10)
+    ws['A2'].font = Font(name=VZ_FONT_BODY, bold=True, size=10)
     ws['A3'] = f"For Quarter Ending {_snap_display(snap)}"
-    ws['A3'].font = Font(name='Calibri', bold=True, size=10)
+    ws['A3'].font = Font(name=VZ_FONT_BODY, bold=True, size=10)
     ws.row_dimensions[4].height = 5.0
 
     def _write_section(ws, start_row, section_label, monthly_data, pools,
@@ -4561,7 +4644,7 @@ def _sheet_detail_co_hist(wb, cu, snap, config, hist):
 
         # Section header row: label + date headers
         ws.cell(row=r, column=1, value=section_label).font = Font(
-            name='Calibri', bold=True, size=9)
+            name=VZ_FONT_BODY, bold=True, size=9)
 
         # Determine max months across all pools for date columns
         max_months = 0
@@ -5628,12 +5711,12 @@ def patch_impdet_charts(xlsx_path):
                     # on bars — top grade in chart at 0% (alpha 100000), each
                     # subsequent grade +15% transparency (alpha -15000).
                     if fc == 0:
-                        _apply_graduated_transparency(bc, base_color='0D4D5E',
+                        _apply_graduated_transparency(bc, base_color=VZ_IMPROVED,
                                                      step=15000)
                     # Deteriorated chart (right column, fc==5): same graduated
                     # transparency in MAROON.
                     elif fc == 5:
-                        _apply_graduated_transparency(bc, base_color='3D1A1A',
+                        _apply_graduated_transparency(bc, base_color=VZ_DETERIORATED,
                                                      step=15000)
 
                 elif is_bar:
@@ -5804,7 +5887,7 @@ def patch_remove_chart_borders_and_axis_lines(xlsx_path):
                 for lt in rpr.findall(f'{{{_A_NS}}}latin'):
                     rpr.remove(lt)
                 latin = ET.SubElement(rpr, f'{{{_A_NS}}}latin')
-                latin.set('typeface', 'Calibri')
+                latin.set('typeface', VZ_FONT_BODY)
 
     # Identify which chart files are on the Impr Deter sheet so we can
     # use a smaller title font there.
@@ -6319,7 +6402,8 @@ def _sheet_summary_variance(wb, cu, snap, config):
 
     prior, prior_snap = None, None
     try:
-        from change_analysis import _find_prior_report, _parse_acl_sheet
+        from change_analysis import (_find_prior_report, _parse_acl_sheet,
+                                     prior_search_dirs)
         import openpyxl as _oxl
         # Resolve the reports folder exactly the way change_analysis does,
         # so this tab and the Change Analysis tab can never disagree about
@@ -6332,9 +6416,10 @@ def _sheet_summary_variance(wb, cu, snap, config):
                        'Reports'))
         safe_cu = (config.get('credit_union') or cu).replace(' ', '_').replace('/', '-')
         _pin = (config.get('change_analysis') or {}).get('compare_to')
-        path, prior_snap = _find_prior_report(rpt_dir, safe_cu, "Vizo_Model", snap, pin=_pin)
+        path, prior_snap = _find_prior_report(
+            prior_search_dirs(config, rpt_dir), safe_cu, "Vizo_Model", snap, pin=_pin)
         if path:
-            pwb = _oxl.load_workbook(path, data_only=True)
+            pwb = _oxl.load_workbook(path, data_only=True, read_only=True)
             if ACL_SHEET in pwb.sheetnames:
                 prior = _parse_acl_sheet(pwb[ACL_SHEET])["totals"]
             pwb.close()
@@ -6348,10 +6433,10 @@ def _sheet_summary_variance(wb, cu, snap, config):
     for col, width in (('A', 8.4), ('B', 42.0), ('C', 18.1), ('D', 8.4)):
         ws.column_dimensions[col].width = width
 
-    BAND = PatternFill('solid', fgColor='0D4D5E')          # accent1 teal (explicit)
-    F_BAND = Font(name='Calibri', bold=True, size=11, color='FFFFFF')
-    F_TITLE = Font(name='Calibri', bold=True, size=12)
-    F_BODY = Font(name='Calibri', size=12)
+    BAND = PatternFill('solid', fgColor=VZ_NAVY)           # accent1 navy (explicit)
+    F_BAND = Font(name=VZ_FONT_BODY, bold=True, size=11, color='FFFFFF')
+    F_TITLE = Font(name=VZ_FONT_BODY, bold=True, size=12)
+    F_BODY = Font(name=VZ_FONT_BODY, size=12)
     DATE_FMT = 'm/d/yyyy'
 
     def _to_date(value):
@@ -6461,7 +6546,7 @@ def _sheet_summary_variance(wb, cu, snap, config):
         n = ws.cell(row=last, column=2,
                     value="No prior report is available for comparison - this "
                           "is the earliest report on file for this credit union.")
-        n.font = Font(name='Calibri', size=11, italic=True)
+        n.font = Font(name=VZ_FONT_BODY, size=11, italic=True)
         n.alignment = Alignment(wrap_text=True, vertical='top')
         ws.merge_cells(start_row=last, start_column=2, end_row=last, end_column=3)
         ws.row_dimensions[last].height = 30.0

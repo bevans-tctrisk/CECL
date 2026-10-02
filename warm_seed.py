@@ -413,7 +413,12 @@ def load_seed(config: dict, snap: str | None = None,
     # 'BS CO DQ Data Enter' tab (captured at seed-build). Applied to the live
     # config so the model determines these from the WARM, not hand-config.
     _apply_bs_co_dq_to_config(config, manifest.get("bs_co_dq_pools") or {})
-    return _prepare_for_recompute(_rehydrate(warm), config)
+    out = _prepare_for_recompute(_rehydrate(warm), config)
+    # Lets the history overlay know which year the seed's CO/RC stop in, so a
+    # later quarter's raw charge-off file is not overwritten by the seed's
+    # partial-year totals.
+    out["_seed_snapshot"] = manifest.get("seed_snapshot")
+    return out
 
 
 # Seed-quarter values the engine must RECOMPUTE from the current loan balances
@@ -423,6 +428,11 @@ def load_seed(config: dict, snap: str | None = None,
 _FROZEN_KEYS = (
     "acl_pools", "acl_summary", "pooled_total_allowance", "spec_id_by_pool",
     "acl_impaired", "exec_summary_3", "pool_order", "acl_balance",
+    # Current-quarter DQ / charge-off by migration status (Risk Change pies);
+    # the seed quarter's split would otherwise show as this quarter's. The
+    # dq/co_migration_split fallbacks derive them from the current extract.
+    "dq_by_status", "dq_by_pool", "co_by_status", "co_by_pool",
+    "total_spec_id",
 )
 
 

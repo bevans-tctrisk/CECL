@@ -19,16 +19,24 @@ _FONTS_DIR = _STATIC_DIR / "fonts"
 
 # Bundled font faces embedded as @font-face so headless Chromium renders
 # identically on a workstation and a server (it does NOT pick up
-# OS-installed fonts). NOTE: Calibri is Microsoft-licensed — fine on a
-# Windows workstation, but for a redistributable multi-user server swap
-# these TTFs for "Carlito" (metric-compatible, freely redistributable)
-# and rename the family below; pagination stays identical.
+# OS-installed fonts). NOTE: Calibri and Arial are Microsoft-licensed — fine
+# on a Windows workstation, but for a redistributable multi-user server swap
+# them for "Carlito" / "Liberation Sans" (metric-compatible, freely
+# redistributable) and keep the family names below; pagination stays
+# identical. Montserrat (Vizo brand heading face) is OFL and ships in-repo.
 _FONT_FACES = [
-    # (file, weight, style)
-    ("calibri.ttf", 400, "normal"),
-    ("calibrib.ttf", 700, "normal"),
-    ("calibrii.ttf", 400, "italic"),
-    ("calibriz.ttf", 700, "italic"),
+    # (family, file, weight, style)
+    ("Calibri", "calibri.ttf", "400", "normal"),
+    ("Calibri", "calibrib.ttf", "700", "normal"),
+    ("Calibri", "calibrii.ttf", "400", "italic"),
+    ("Calibri", "calibriz.ttf", "700", "italic"),
+    ("Arial", "arial.ttf", "400", "normal"),
+    ("Arial", "arialbd.ttf", "700", "normal"),
+    ("Arial", "ariali.ttf", "400", "italic"),
+    ("Arial", "arialbi.ttf", "700", "italic"),
+    # Variable fonts: one file covers the whole weight axis.
+    ("Montserrat", "Montserrat-Variable.ttf", "100 900", "normal"),
+    ("Montserrat", "Montserrat-Italic-Variable.ttf", "100 900", "italic"),
 ]
 
 
@@ -62,14 +70,14 @@ def _embedded_font_css() -> str:
     absolute path resolves wherever it is deployed.
     """
     faces: list[str] = []
-    for fname, weight, style in _FONT_FACES:
+    for family, fname, weight, style in _FONT_FACES:
         fp = _FONTS_DIR / fname
         if not fp.exists():
             continue
         uri = fp.as_uri()  # file:///C:/.../calibri.ttf
         faces.append(
             "@font-face{"
-            "font-family:'Calibri';"
+            f"font-family:'{family}';"
             f"font-weight:{weight};font-style:{style};"
             f"src:url('{uri}') format('truetype');"
             "}"

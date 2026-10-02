@@ -121,6 +121,19 @@
       </label>
     </fieldset>
 
+    <fieldset class="radio-fieldset" style="margin-top:16px;">
+      <legend>Output folder</legend>
+      <label for="output_folder"><strong>Where to save this CU's reports</strong></label>
+      <input type="text" id="output_folder" name="output_folder"
+             class="form-input" style="width:100%; margin-top:6px;"
+             placeholder="e.g. Z:\CU Reports\Mountain CU"
+             value="{{ state.reports.get('output_folder', '') }}">
+      <div class="help">Enter the full (absolute) path to the folder where this
+        credit union's reports should be published. The folder is created
+        automatically if it doesn't exist. Leave blank to use the shared
+        <em>Reports</em> folder.</div>
+    </fieldset>
+
     <div class="btn-row">
       <a class="btn btn-secondary" href="{{ url_for('setup.step8_mgmt_adj') }}">&larr; Back</a>
       <button class="btn btn-primary" type="submit" name="action" value="next">Next: Review &rarr;</button>

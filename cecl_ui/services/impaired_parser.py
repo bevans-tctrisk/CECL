@@ -280,6 +280,12 @@ def parse_file(filepath: str | Path) -> dict[str, Any]:
             row_vals = [ws.cell(row=r, column=c).value for c in range(1, 11)]
             if not any(_norm(v) for v in row_vals[:4]):
                 continue
+            # Skip rows carrying only a section/type label (e.g. a
+            # "Delinquent Loans" banner filled down column A) with no
+            # member number and no balance — they aren't real impaired
+            # loans and would otherwise show as phantom unmatched rows.
+            if not _norm(row_vals[1]) and _to_float(row_vals[4]) is None:
+                continue
             row: dict[str, Any] = {}
             for key, raw in zip(INPUT_FIELDS, row_vals):
                 if key in ("current_balance", "other_lender_balance",
@@ -502,7 +508,17 @@ def _build_loan_index(loan_path: str | Path,
         return index
 
     sample = state.get("sample") or {}
-    has_header = bool(sample.get("has_header", True))
+    # has_header: per-entry override, else the wizard sample, else the
+    # run-time state's top-level flag (balance_check._build_state_for_run).
+    # Defaulting to True for a header-less extract makes pandas treat the
+    # first loan row as the header; an int column mapping then matches a
+    # same-valued cell in that row instead of a position -> wrong column.
+    if entry is not None and entry.get("has_header") is not None:
+        has_header = bool(entry.get("has_header"))
+    elif "has_header" in sample:
+        has_header = bool(sample.get("has_header"))
+    else:
+        has_header = bool(state.get("has_header", True))
 
     # Translate (has_header, header_row) into pandas' header= arg.
     if has_header:
@@ -515,9 +531,41 @@ def _build_loan_index(loan_path: str | Path,
         pd_header = None
 
     suffix = (p.suffix or "").lower()
+    # Resolve the target member header early so we can pick the correct
+    # tab in a multi-sheet workbook. Many CU extracts put the loan data on
+    # a later tab (e.g. "4. Sample Loan Export Data") while sheet 0 holds a
+    # cover / credit-grade table — reading sheet 0 blindly yields no member
+    # column and an empty index.
+    _cm_early = {
+        **(state.get("column_mappings") or {}),
+        **{k: v for k, v in ((entry or {}).get("column_mappings") or {}).items() if v},
+    }
+    _member_target = _cm_early.get("member_number")
+    _cfg_sheet = (entry or {}).get("loan_sheet") or state.get("loan_sheet")
+
+    def _norm_h(s: Any) -> str:
+        return " ".join(str(s).split()).strip().lower()
+
     try:
         if suffix in (".xlsx", ".xls", ".xlsm"):
-            df = pd.read_excel(p, header=pd_header, dtype=object)
+            xls = pd.ExcelFile(p)
+            sheet_names = list(xls.sheet_names)
+            pick: Any = 0
+            if _cfg_sheet and _cfg_sheet in sheet_names:
+                pick = _cfg_sheet
+            elif _member_target:
+                want = _norm_h(_member_target)
+                for sn in sheet_names:
+                    try:
+                        peek = pd.read_excel(xls, sheet_name=sn,
+                                             header=pd_header, nrows=0)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if any(_norm_h(c) == want for c in peek.columns):
+                        pick = sn
+                        break
+            df = pd.read_excel(xls, sheet_name=pick, header=pd_header,
+                               dtype=object)
         elif suffix == ".csv":
             df = pd.read_csv(p, header=pd_header,
                              dtype=object, keep_default_na=False)
@@ -561,6 +609,13 @@ def _build_loan_index(loan_path: str | Path,
     def _resolve_col(field_name: str):
         target = cm.get(field_name) or ""
         if target == "" or target is None:
+            return None
+        # Positional (0-based int) mappings win when the file has no header
+        # row -- pandas' RangeIndex column labels are ints too, so a plain
+        # ``target in df.columns`` would otherwise match on value.
+        if not has_header and isinstance(target, int) and not isinstance(target, bool):
+            if 0 <= target < len(df.columns):
+                return df.columns[target]
             return None
         # If the mapping is a header name, use it directly when has_header.
         if has_header and target in df.columns:

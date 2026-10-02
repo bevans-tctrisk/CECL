@@ -158,6 +158,17 @@
           <a class="muted" style="float:right;" href="/setup/step/reports">Edit</a>
         </td>
       </tr>
+      <tr>
+        <th style="text-align:left;">Report output folder</th>
+        <td>
+          {% if summary.report_output_folder %}
+            <code>{{ summary.report_output_folder }}</code>
+          {% else %}
+            <span class="muted">— shared Reports folder —</span>
+          {% endif %}
+          <a class="muted" style="float:right;" href="/setup/step/reports">Edit</a>
+        </td>
+      </tr>
     </tbody>
   </table>
 

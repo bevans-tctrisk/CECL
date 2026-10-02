@@ -219,8 +219,12 @@ def _find_label(ws, text: str) -> tuple[int, int] | None:
 # ── Risk Change matrices ─────────────────────────────────────────────
 
 _RISK_TAB_HINTS = ("risk change",)
-# Fill colors (last 6 hex) -> cell state.
+# Fill colors (last 6 hex) -> cell state. Current Vizo Theme 2026 hexes plus
+# the legacy Color Theme 1 hexes so older workbooks still classify.
 _FILL_STATE = {
+    "011631": "header",
+    "068288": "improved",
+    "926C12": "deteriorated",
     "0D4D5E": "header",
     "829901": "improved",
     "873A3A": "deteriorated",

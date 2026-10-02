@@ -1099,7 +1099,8 @@ def _build_state_for_run(cfg: dict[str, Any],
     source_dir = None
     if include_source_folder:
         from pathlib import Path as _SrcPath
-        _src = str(cfg.get("loan_source_folder") or "").strip()
+        _src = str(cfg.get("loan_source_folder")
+                   or cfg.get("loan_file_folder") or "").strip()
         if _src:
             try:
                 _sp = _SrcPath(_src)
@@ -1197,6 +1198,12 @@ def _build_state_for_run(cfg: dict[str, Any],
             if "pool_code_split" in ex_src:
                 file_entry["pool_code_split"] = ex_src.get(
                     "pool_code_split") or ""
+            # Loan-data tab: per-extract override else top-level cfg, so a
+            # multi-sheet workbook (e.g. "4. Sample Loan Export Data") is
+            # read from the right tab by impaired_parser._build_loan_index.
+            _ls = ex_src.get("loan_sheet") or cfg.get("loan_sheet")
+            if _ls:
+                file_entry["loan_sheet"] = _ls
             # Phase 9.24c parity — per-extract member_account override
             # (e.g. CUMA Mortgage vs Symitar ceclXX shape). Needed so
             # impaired_parser._build_loan_index can build the correct
@@ -1334,5 +1341,10 @@ def _build_state_for_run(cfg: dict[str, Any],
         "credit_grades": cfg.get("credit_grades") or [],
         "no_score_label": cfg.get("no_score_label") or "Not Reported",
         "member_account": cfg.get("member_account") or {},
+        "loan_sheet": cfg.get("loan_sheet") or "",
+        # impaired_parser._build_loan_index reads has_header from the wizard
+        # ``sample`` block; mirror the top-level flag there so header-less
+        # extracts (positional column_mappings) are read correctly.
+        "sample": {"has_header": bool(cfg.get("has_header", True))},
         "sample_uploads": {"loan_data_files": loan_files},
     }

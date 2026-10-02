@@ -36,11 +36,36 @@ db_url = get_database_url()
 engine = create_engine(db_url)
 
 
+def _resolve_renamed_dir(path):
+    """If *path* is a missing directory but exactly one sibling directory
+    starts with the same name (e.g. the client folder was renamed
+    'Portfolio Management (CM, WARM, ID)' -> '... (CM, WARM, ID)(Wizard)'),
+    return that sibling; otherwise return *path* unchanged."""
+    try:
+        if not path or os.path.exists(path):
+            return path
+        parent, name = os.path.split(path.rstrip('\\/'))
+        if not name or not os.path.isdir(parent):
+            return path
+        low = name.lower()
+        sibs = [d for d in os.listdir(parent)
+                if d.lower().startswith(low) and os.path.isdir(os.path.join(parent, d))]
+        if len(sibs) == 1:
+            print(f"    NOTE: folder '{name}' not found; using renamed sibling '{sibs[0]}'")
+            return os.path.join(parent, sibs[0])
+    except OSError:
+        pass
+    return path
+
+
 def resolve_path(path_value, base=BASE_FOLDER):
-    """Resolve configured paths: keep absolute paths, join relative paths to base."""
+    """Resolve configured paths: keep absolute paths, join relative paths to base.
+    A configured folder that no longer exists resolves to its uniquely renamed
+    sibling (see ``_resolve_renamed_dir``)."""
     if not path_value:
         return ''
-    return path_value if os.path.isabs(path_value) else os.path.join(base, path_value)
+    p = path_value if os.path.isabs(path_value) else os.path.join(base, path_value)
+    return _resolve_renamed_dir(p)
 
 
 def load_client_config(client_name):
@@ -533,8 +558,30 @@ def load_credit_pull_scores(config):
                         continue
                     if pattern_re.search(fname):
                         matching_reports.append(os.path.join(root, fname))
+            if not matching_reports and re.match(r'^\^?\d{4}', report_pattern or ''):
+                # The wizard pins the pattern to the onboarding quarter
+                # (e.g. '^2026-06 CECL-Migration...'); later quarters would
+                # silently lose every current score. Retry with any period.
+                _generic = re.compile(r'^\d{4}-\d{2}\s+CECL[\s_\-]*Migration.*\.xlsx$', re.IGNORECASE)
+                for root, _dirs, files in os.walk(folder_path):
+                    for fname in files:
+                        if not fname.startswith('~$') and _generic.search(fname):
+                            matching_reports.append(os.path.join(root, fname))
+                if matching_reports:
+                    print(f"    NOTE: fallback_report_pattern '{report_pattern}' matched no file; "
+                          f"using most recent CECL-Migration workbook instead.")
 
-            for fpath in sorted(matching_reports, key=os.path.getmtime, reverse=True):
+            def _report_order(fpath):
+                # Newest PERIOD in the filename first ('2026-06 CECL-Migration...'),
+                # so a re-saved older WARM can't outrank the latest one; mtime
+                # breaks ties / orders undated names. Skip 'DNU' copies.
+                fname = os.path.basename(fpath)
+                m = re.match(r'^(\d{4}-\d{2})', fname)
+                return (m.group(1) if m else '', os.path.getmtime(fpath))
+
+            matching_reports = [p for p in matching_reports
+                                if not os.path.basename(p).upper().startswith('DNU')]
+            for fpath in sorted(matching_reports, key=_report_order, reverse=True):
                     warm_file_path = fpath
                     if pull_as_of is None:
                         try:

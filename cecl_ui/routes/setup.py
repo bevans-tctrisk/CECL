@@ -362,6 +362,9 @@ def _default_state() -> dict[str, Any]:
             "vizo_pdf": False,
             "vizo_supp_pdf": False,
             "tct_pdf": True,
+            # Absolute folder where this CU's reports are saved; blank = the
+            # shared Reports/ folder.
+            "output_folder": "",
         },
         # sample file analysis (populated by sample step)
         "sample": None,  # type: dict | None
@@ -13942,6 +13945,11 @@ def step9_reports():
                 "info",
             )
         state["reports"].update(sel)
+        # Kept out of ``sel`` so a folder path alone never satisfies the
+        # "pick at least one report" check above.
+        state["reports"]["output_folder"] = (
+            request.form.get("output_folder") or ""
+        ).strip()
         _save_state(state)
         return redirect(url_for("setup.step10_review"))
     return render_template("setup/step9_reports.html", **_wizard_ctx("reports"))
@@ -14007,6 +14015,7 @@ def _build_review_summary(state: dict[str, Any]) -> dict[str, Any]:
         "unemployment_rate": ed.get("unemployment_rate", 0),
         "pool_overlay": overlay,
         "selected_reports": selected_reports,
+        "report_output_folder": (reports.get("output_folder") or "").strip(),
         "balance_titles_total": bt_total,
         "balance_titles_mapped": bt_mapped,
         "balance_titles_ignored": bt_ignored,

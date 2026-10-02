@@ -131,6 +131,178 @@ def _col_to_idx(letter: str) -> int:
     return max(0, idx - 1)
 
 
+def _merge_monthly_balance_supplements(
+    cfg: dict, upload_dir: Path,
+) -> tuple[str, str] | None:
+    """Fold quarterly *supplement* balance workbooks into the staged
+    ``monthly_balance.saved_path`` matrix.
+
+    Some CUs deliver each quarter's per-pool balances as a small workbook
+    in the SAME layout as the original Historical Balance Sheets file
+    (same sheet, date header row, pool labels in the same column) but
+    holding only that quarter's three month columns and under a different
+    filename (e.g. ``United Community Q3 2026 Balance Sheet.xlsx``).
+    ``_refresh_staged_monthly_balance`` only matches on the canonical
+    filename, and even if it did, copying a 3-column file over the staged
+    copy would discard the history. This helper instead detects any staged
+    workbook whose layout matches the staged matrix (configured sheet
+    present, datetime header cells, >=50% pool-label overlap) and appends /
+    overwrites its month columns in the staged copy.
+
+    Only ``source: single`` layouts are handled. Idempotent (no-op when
+    every cell already matches). Best-effort: never raises.
+    """
+    mb = (cfg or {}).get("monthly_balance") or {}
+    if str(mb.get("source") or "single") != "single":
+        return None
+    saved_path = str(mb.get("saved_path") or "").strip()
+    if not saved_path or not Path(saved_path).is_file():
+        return None
+
+    import openpyxl
+    from datetime import datetime as _dt
+
+    sheet = str(mb.get("sheet") or "").strip()
+    hdr_row = int(mb.get("header_row") or 1)
+    pool_ci = _col_to_idx(mb.get("pool_name_col") or "B") + 1
+    date_ci = _col_to_idx(mb.get("first_date_col") or "C") + 1
+
+    def _norm(name: str) -> str:
+        return re.sub(r"[\s_\-]+", "_", str(name).strip().lower())
+
+    def _label(v) -> str:
+        return re.sub(r"\s+", " ", str(v or "").strip().upper())
+
+    def _month(v):
+        if isinstance(v, _dt) or isinstance(v, date):
+            return (v.year, v.month)
+        return None
+
+    def _pick_sheet(wb):
+        if sheet:
+            return wb[sheet] if sheet in wb.sheetnames else None
+        return wb.active
+
+    canonical = _norm(str(mb.get("filename") or "") or Path(saved_path).name)
+
+    try:
+        wb_dst = openpyxl.load_workbook(saved_path)
+    except Exception:  # noqa: BLE001
+        return None
+    ws_dst = _pick_sheet(wb_dst)
+    if ws_dst is None:
+        return None
+    dst_rows: dict[str, int] = {}
+    for r in range(hdr_row + 1, ws_dst.max_row + 1):
+        lab = _label(ws_dst.cell(row=r, column=pool_ci).value)
+        if lab and lab not in dst_rows:
+            dst_rows[lab] = r
+    if not dst_rows:
+        return None
+    dst_months: dict[tuple[int, int], int] = {}
+    for c in range(date_ci, ws_dst.max_column + 1):
+        mk = _month(ws_dst.cell(row=hdr_row, column=c).value)
+        if mk and mk not in dst_months:
+            dst_months[mk] = c
+    next_col = max([ws_dst.max_column] + list(dst_months.values())) + 1
+
+    merged_files: list[str] = []
+    new_months: set[tuple[int, int]] = set()
+    changed = 0
+    try:
+        entries = sorted(upload_dir.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if (not entry.is_file()
+                or entry.suffix.lower() not in (".xlsx", ".xlsm")
+                or entry.name.startswith("~$")
+                or _norm(entry.name) == canonical):
+            continue
+        try:
+            wb_src = openpyxl.load_workbook(entry, read_only=True, data_only=True)
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            ws_src = _pick_sheet(wb_src)
+            if ws_src is None:
+                continue
+            rows = list(ws_src.iter_rows(min_row=1, values_only=True))
+        except Exception:  # noqa: BLE001
+            continue
+        finally:
+            wb_src.close()
+        if len(rows) <= hdr_row:
+            continue
+        hdr = rows[hdr_row - 1]
+        src_months = [(ci, _month(v)) for ci, v in enumerate(hdr)
+                      if ci + 1 >= date_ci and _month(v)]
+        if not src_months:
+            continue
+        src_rows: dict[str, tuple] = {}
+        for row in rows[hdr_row:]:
+            if len(row) < pool_ci:
+                continue
+            lab = _label(row[pool_ci - 1])
+            if lab and lab not in src_rows:
+                src_rows[lab] = row
+        if not src_rows:
+            continue
+        overlap = [lab for lab in src_rows if lab in dst_rows]
+        if len(overlap) * 2 < len(src_rows):
+            continue
+        file_changed = 0
+        for ci, mk in src_months:
+            col = dst_months.get(mk)
+            if col is None:
+                col = next_col
+                next_col += 1
+                dst_months[mk] = col
+                ws_dst.cell(row=hdr_row, column=col).value = _dt(
+                    mk[0], mk[1], calendar.monthrange(mk[0], mk[1])[1])
+                ws_dst.cell(row=hdr_row, column=col).number_format = (
+                    ws_dst.cell(row=hdr_row, column=date_ci).number_format)
+                new_months.add(mk)
+                file_changed += 1
+            for lab in overlap:
+                row = src_rows[lab]
+                val = row[ci] if ci < len(row) else None
+                if val is None or isinstance(val, str) and not val.strip():
+                    continue
+                cell = ws_dst.cell(row=dst_rows[lab], column=col)
+                try:
+                    same = (cell.value is not None
+                            and abs(float(cell.value) - float(val)) < 0.005)
+                except (TypeError, ValueError):
+                    same = cell.value == val
+                if not same:
+                    cell.value = val
+                    file_changed += 1
+        if file_changed:
+            changed += file_changed
+            merged_files.append(entry.name)
+
+    if not changed:
+        return None
+    try:
+        wb_dst.save(saved_path)
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f"Found supplemental monthly balance file(s) "
+            f"{', '.join(merged_files)} but could not update the staged "
+            f"copy: {exc}",
+            "warning",
+        )
+    months_txt = ", ".join(f"{y}-{m:02d}" for y, m in sorted(new_months))
+    return (
+        f"Merged monthly balance column(s) from {', '.join(merged_files)} "
+        f"into the staged matrix"
+        + (f" (new month(s): {months_txt})" if months_txt else "")
+        + " — Balance Adjustment Review will use the latest data.",
+        "success",
+    )
+
+
 def _autofill_monthly_balance_from_extract(
     cfg: dict, upload_dir: Path, snapshot: str,
 ) -> str | None:
@@ -1218,6 +1390,18 @@ def new_quarter(short_name: str):
                 f"Monthly-balance auto-refresh skipped: {_mb_exc}",
                 "warning",
             )
+        # Quarterly supplement workbooks (same layout, only this quarter's
+        # month columns, different filename) are merged column-wise into
+        # the staged matrix rather than replacing it.
+        try:
+            _ms_msg = _merge_monthly_balance_supplements(cfg, upload_dir)
+            if _ms_msg:
+                flash(_ms_msg[0], _ms_msg[1])
+        except Exception as _ms_exc:  # noqa: BLE001
+            flash(
+                f"Monthly-balance supplement merge skipped: {_ms_exc}",
+                "warning",
+            )
 
     # 2a-1) Monthly-balance auto-fill from the loan extract. For CUs whose
     # per-pool monthly balances are derived from the loan system (matrix
@@ -1281,6 +1465,21 @@ def new_quarter(short_name: str):
         try:
             src_dir = Path(folder_raw)
             old_lff = str(Path(cfg.get("loan_file_folder")))
+            # A quarter folder named for a DIFFERENT period than the one
+            # being run (e.g. '...\2026-06' while running 2026-09) would
+            # import last quarter's loans under this quarter's snapshot
+            # date. Refuse rather than silently mislabel the data.
+            _fm = re.fullmatch(r"(\d{4})-(\d{2})", src_dir.name.strip())
+            if _fm and period and f"{_fm.group(1)}-{_fm.group(2)}" != period[:7]:
+                flash(
+                    f"Folder '{src_dir.name}' is a different quarter than the "
+                    f"one being run ({period[:7]}). Loan source folder NOT "
+                    "repointed and files not imported — pick this quarter's "
+                    "folder (or clear the folder field to use the configured "
+                    "source).",
+                    "error",
+                )
+                return redirect(url_for("run.new_quarter", short_name=short_name))
             if src_dir.is_dir() and str(src_dir) != old_lff:
                 cfg["loan_file_folder"] = str(src_dir)
                 if str(Path(cfg.get("data_directory") or "")) == old_lff:

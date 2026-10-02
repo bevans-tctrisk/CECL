@@ -24,15 +24,19 @@ from openpyxl.utils import range_boundaries, get_column_letter
 from .chart_chassis import PALETTE, SEMANTIC  # noqa: E402
 
 
-#: The brand hexes as they appear in the workbook, mapped onto their
-#: re-stepped equivalents. A chart that carries explicit point colours from
-#: Excel would otherwise smuggle the failing originals onto the page --
-#: 0D4D5E reads gray, and 829901/FFC000 are 1.5 dE apart under deuteranopia.
+#: The brand hexes as they appear in the workbook, mapped onto the chassis
+#: categorical palette so a chart carrying explicit Excel point colours lands
+#: on the same slots as a data-driven one. Legacy (pre-Oct-2026) hexes are
+#: kept so older workbooks re-render in the current brand.
 _BRAND_REMAP = {
-    "#0D4D5E": PALETTE[0], "#48A5AD": PALETTE[0],   # teal
-    "#873A3A": PALETTE[1], "#3D1A1A": PALETTE[1],   # maroon
-    "#FFC000": PALETTE[2],                          # amber
-    "#829901": PALETTE[3],                          # olive
+    "#068288": PALETTE[0], "#7AE2CF": PALETTE[0],   # teal / mint
+    "#926C12": PALETTE[1], "#B69036": PALETTE[1],   # gold
+    "#7F7F7F": PALETTE[2],                          # gray
+    "#011631": PALETTE[3],                          # navy
+    # legacy Vizo Color Theme 1
+    "#0D4D5E": PALETTE[3], "#48A5AD": PALETTE[0],
+    "#873A3A": PALETTE[1], "#3D1A1A": PALETTE[1],
+    "#FFC000": PALETTE[2], "#829901": PALETTE[0],
 }
 
 
@@ -499,9 +503,11 @@ def _svg_pie(values: list[float], cats: list[str], title: str | None,
     return _wrap("".join(parts), title)
 
 
-#: Distinct line colours for per-grade trend charts (up to 8 grades).
-_LINE_PALETTE = ["#0E7E9E", "#B4453F", "#6E8A00", "#E0A400",
-                 "#5F5F5F", "#8E5FA8", "#00857C", "#C77DA0"]
+#: Distinct line colours for per-grade trend charts (up to 8 grades) when a
+#: series carries no explicit colour. Vizo brand ramp: navy -> teal -> gold ->
+#: mint -> light gold -> grey -> light grey -> lighter grey.
+_LINE_PALETTE = ["#011631", "#068288", "#926C12", "#7AE2CF",
+                 "#B69036", "#7F7F7F", "#BFBFBF", "#D9D9D9"]
 
 
 def _svg_line(series: list[dict], cats: list[str], title: str | None,
@@ -567,11 +573,12 @@ def _svg_line(series: list[dict], cats: list[str], title: str | None,
     # Series polylines.
     for si, s in enumerate(series):
         color = s.get("color") or _LINE_PALETTE[si % len(_LINE_PALETTE)]
+        dash = ' stroke-dasharray="5 3"' if s.get("dash") else ""
         pts = [f"{_x(i):.1f},{_y(v):.1f}"
                for i, v in enumerate(s["values"]) if v is not None]
         if pts:
             parts.append(
-                f'<polyline fill="none" stroke="{color}" stroke-width="1.5" '
+                f'<polyline fill="none" stroke="{color}" stroke-width="1.5"{dash} '
                 f'stroke-linejoin="round" points="{" ".join(pts)}"/>')
     # Horizontal legend just under the title.
     parts.append(_legend(
@@ -650,7 +657,7 @@ def render_ncc_doughnut(imp: float, det: float, unc: float,
     if theme == "tct":
         c_imp, c_det, c_unc = "#2D897A", "#C0453C", "#004783"
     else:
-        c_imp, c_det, c_unc = "#6E8A00", "#B4453F", "#0D4D5E"
+        c_imp, c_det, c_unc = "#011631", "#926C12", "#7F7F7F"
     segs = [(max(0.0, imp), c_imp, 11.0),
             (max(0.0, det), c_det, 11.0),
             (max(0.0, unc), c_unc, 0.0)]

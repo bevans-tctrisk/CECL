@@ -103,7 +103,8 @@ def build_cover(client_name: str, snapshot_date: str, config: dict,
         # the PDF cover shows the Vizo mark without the baked-in drop shadow.
         _noshadow = (_os.path.splitext(_vizo)[0] + "_noshadow.png") if _vizo else ""
         top = _logo_data_uri(_noshadow if _os.path.exists(_noshadow) else _vizo)
-        bottom = _logo_data_uri(getattr(_rv, "LOGO_TCT", ""))
+        bottom = _logo_data_uri(getattr(_rv, "LOGO_TCT_MONO", "")
+                                or getattr(_rv, "LOGO_TCT", ""))
     except Exception:  # noqa: BLE001 - logos are optional; cover still renders
         top = bottom = None
 
@@ -464,23 +465,22 @@ def build_impr_deter(client_name: str, snapshot_date: str, config: dict,
 
 # ── Charts (rendered from data via cecl_report_web.charts) ───────────
 # Migration-status slice colours, matching report_vizo's DQ pie / CO bar /
-# Net-Credit-Change doughnut (olive / maroon / teal / gold).
+# Net-Credit-Change doughnut. Roles per Vizo (Oct 2026): Improved navy,
+# Deteriorated gold, Unchanged grey, Not Reported teal.
 # Single semantic migration palette, shared by every chart AND the matrix/table
-# CSS (.rc-matrix .improved/.deteriorated) so "Improved" is olive everywhere,
-# "Deteriorated" maroon, "Unchanged"/"Net" neutral teal, "Not Reported" gold.
-_C_IMPROVED = "829901"
-_C_DETERIORATED = "873A3A"
-_C_UNCHANGED = "0D4D5E"
-_C_NOT_REPORTED = "FFC000"
-_C_NET = "829901"
+# CSS (.rc-matrix .improved/.deteriorated).
+_C_IMPROVED = "011631"
+_C_DETERIORATED = "926C12"
+_C_UNCHANGED = "7F7F7F"
+_C_NOT_REPORTED = "068288"
+_C_NET = "011631"
 _MIG_LABELS = ("Improved", "Deteriorated", "Unchanged", "Not Reported")
 _MIG_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED, _C_NOT_REPORTED)
 _NCC_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED)
-# Risk Change chart colours matched to the on-page matrix EXACTLY: cell green
-# (#6E8A00) / red (#B4453F), header teal (#0D4D5E) for Unchanged, amber for Not
-# Reported. Used RAW (prefer_colors) so Unchanged keeps the header teal.
-_RC_MIG_COLORS = ("6E8A00", "B4453F", "0D4D5E", "E0A400")
-_RC_NCC_COLORS = ("6E8A00", "B4453F", "0D4D5E")
+# Risk Change chart colours matched to the on-page matrix EXACTLY. Used RAW
+# (prefer_colors) so Unchanged keeps the matrix grey.
+_RC_MIG_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED, _C_NOT_REPORTED)
+_RC_NCC_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED)
 
 # TCT brand chart palette from the website foundation colours: improved teal-
 # green #2d897a (logo swoosh), deteriorated reserved red #C0453C, unchanged/net
@@ -528,6 +528,7 @@ def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
                 "name": s.get("name"), "values": s.get("values") or [],
                 "cats": list(cs.categories),
                 "color": (s.get("colors") or [None])[0],
+                "dash": bool(s.get("dash")),
             } for s in cs.series],
         }
     bar_dir = "bar" if cs.kind in ("bar_h", "diverging_bar") else "col"
@@ -1231,6 +1232,8 @@ def build_exec_summary_tct(client_name: str, snapshot_date: str, config: dict,
     for j, og in enumerate(gl):
         for i, cg in enumerate(gl):
             v = _rt._matrix_val(matrix, cg, og)
+            if cg == no_score or og == no_score:
+                continue  # Not Reported -> always unchanged
             if i > j:
                 if not (j < n_top and (i - j) < 2):
                     if og in grade_det:
@@ -1707,8 +1710,24 @@ def build_loss_factor(client_name: str, snapshot_date: str, config: dict,
             total_net = net_co_match
         else:
             total_net = 0
+            # Same window-start trim as report_tct._sheet_acl_reserve so the
+            # displayed rate equals the one driving the allowance.
+            _co_m = h.get("co_monthly", {}) or {}
+            _rc_m = h.get("rc_monthly", {}) or {}
+            _abs_first = (snap_year * 12 + snap_month) - acl_months_map.get(pool, 36) + 1
+            _em = _abs_first - pe * 12
+            _has_m = any(((_co_m.get((pe, m), {}) or {}).get(pool)
+                          or (_rc_m.get((pe, m), {}) or {}).get(pool))
+                         for m in range(1, 13))
             for y in years:
                 if y < pe:
+                    continue
+                if _has_m and y == pe and _em > 1:
+                    co_y = sum((_co_m.get((y, m), {}) or {}).get(pool, 0) or 0
+                               for m in range(_em, 13))
+                    rc_y = sum((_rc_m.get((y, m), {}) or {}).get(pool, 0) or 0
+                               for m in range(_em, 13))
+                    total_net += abs(co_y) - abs(rc_y)
                     continue
                 total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
                     - abs(rc_data.get(y, {}).get(pool, 0) or 0)
@@ -1885,13 +1904,23 @@ def _load_prior_acl(cu: str, snapshot_date: str, config: dict,
     rpt_dir = (cfg.get("report_dir") or cfg.get("output_dir")
                or os.path.join(os.environ.get("CECL_WORKSPACE_ROOT")
                                or os.getcwd(), "Reports"))
-    # 1) Prefer the sidecar.
+    try:
+        from change_analysis import prior_search_dirs
+        search_dirs = prior_search_dirs(cfg, rpt_dir) or [rpt_dir]
+    except Exception:  # noqa: BLE001
+        search_dirs = [rpt_dir]
+    # 1) Prefer the sidecar (most recent across all search folders) -- unless
+    # a LATER prior workbook exists somewhere (e.g. June retained only in the
+    # client delivery tree while Reports/ still holds a March sidecar).
+    best = None
     try:
         from . import acl_store
-        shape, prior_snap = acl_store.load_prior_snapshot(
-            rpt_dir, cu, snapshot_date, pin=_pin, model_name=model_name)
-        if shape and shape.get("totals"):
-            return shape, prior_snap
+        for d in search_dirs:
+            shape, prior_snap = acl_store.load_prior_snapshot(
+                d, cu, snapshot_date, pin=_pin, model_name=model_name)
+            if shape and shape.get("totals") and prior_snap \
+                    and (best is None or prior_snap > best[1]):
+                best = (shape, prior_snap)
     except Exception as exc:  # noqa: BLE001
         print(f"  prior ACL sidecar unavailable: {exc}")
     # 2) Fall back to the prior workbook.
@@ -1900,27 +1929,25 @@ def _load_prior_acl(cu: str, snapshot_date: str, config: dict,
         from change_analysis import _find_prior_report, _parse_acl_sheet
         from report_vizo import ACL_SHEET
         safe_cu = cu.replace(" ", "_").replace("/", "-")
-        path, prior_snap = _find_prior_report(rpt_dir, safe_cu, model_name,
+        path, prior_snap = _find_prior_report(search_dirs, safe_cu, model_name,
                                               snapshot_date, pin=_pin)
+        if best and (not path or str(prior_snap) <= str(best[1])):
+            return best
         if not path:
             return None, None
-        # openpyxl parses pivot-table caches on load, which is pathologically
-        # slow on the WARM/prior workbooks' large pivots (utah: many hours). We
-        # only need the ACL sheet's cell values, so skip pivot-cache parsing.
-        import openpyxl.reader.workbook as _wbmod
-        _orig_pc = _wbmod.WorkbookParser.pivot_caches
-        _wbmod.WorkbookParser.pivot_caches = property(lambda self: {})
-        try:
-            pwb = openpyxl.load_workbook(path, data_only=True)
-        finally:
-            _wbmod.WorkbookParser.pivot_caches = _orig_pc
+        # Read-only mode skips pivot-cache parsing (pathologically slow on
+        # the WARM/prior workbooks' large pivots, and openpyxl's full loader
+        # trips on WARM cache-id gaps). The ACL sheet read only needs values.
+        pwb = openpyxl.load_workbook(path, data_only=True, read_only=True)
         prior = (_parse_acl_sheet(pwb[ACL_SHEET])
                  if ACL_SHEET in pwb.sheetnames else None)
         pwb.close()
+        if not prior and best:
+            return best
         return prior, prior_snap
     except Exception as exc:  # noqa: BLE001 - never break the PDF path
         print(f"  prior ACL unavailable: {exc}")
-        return None, None
+        return best or (None, None)
 
 
 _NO_PRIOR_NOTE = ("No prior report is available for comparison - this is the "
@@ -2214,11 +2241,6 @@ def build_supplemental_appendix(client_name: str, config: dict) -> NarrativePage
         ])
 
 
-#: Distinct line colours for per-grade trend charts (mirrors charts._LINE_PALETTE
-#: so a grade keeps the same colour across every pool chart).
-_GRADE_LINE_COLORS = ["#0E7E9E", "#B4453F", "#6E8A00", "#E0A400",
-                      "#5F5F5F", "#8E5FA8", "#00857C", "#C77DA0"]
-
 #: TCT brand grade-line ramp from the website foundation palette (best grade
 #: navy -> teal-green -> turquoise -> light blue -> indigo; worst grade reserved
 #: red; Not Reported neutral gray).
@@ -2226,8 +2248,14 @@ _TCT_GRADE_LINE_COLORS = ["#004783", "#2D897A", "#2BDBD4", "#84C4F3",
                           "#2A2594", "#C0453C", "#9AA7B4", "#6E8A00"]
 
 
-def _grade_line_colors(variant: str) -> list:
-    return _TCT_GRADE_LINE_COLORS if variant == "tct" else _GRADE_LINE_COLORS
+def _grade_line_style(variant: str, grade: str, idx: int, no_score: str) -> tuple:
+    """(``#hex``, dashed) for a per-grade trend line. Vizo follows
+    report_vizo.grade_line_style (brand ramp, Not Reported = black dash)."""
+    if variant == "tct":
+        return _TCT_GRADE_LINE_COLORS[idx % len(_TCT_GRADE_LINE_COLORS)], False
+    import report_vizo as _rv
+    hx, dashed = _rv.grade_line_style(grade, idx, no_score)
+    return "#" + hx, dashed
 
 
 def _hist_trends_specs(client_name, snapshot_date, config, hist, df,
@@ -2236,7 +2264,6 @@ def _hist_trends_specs(client_name, snapshot_date, config, hist, df,
     window) for each risk-rated pool.  Mirrors report_vizo._sheet_hist_trends."""
     import report_vizo as _rv
 
-    line_colors = _grade_line_colors(variant)
     cfg = config or {}
     no_score = cfg.get("no_score_label", "Not Reported")
     gl = [g for g in _rv._all_grades(grades, no_score) if not _rv._is_hidden(g)]
@@ -2269,10 +2296,12 @@ def _hist_trends_specs(client_name, snapshot_date, config, hist, df,
             vals = pgrades.get(g)
             if not vals or not any((x or 0) > 0 for x in vals):
                 continue
+            hx, dashed = _grade_line_style(variant, g, gi, no_score)
             series.append({
                 "name": g,
                 "values": [float(x or 0) for x in vals],
-                "colors": [line_colors[gi % len(line_colors)]],
+                "colors": [hx],
+                "dash": dashed,
             })
         if not series:
             continue
@@ -2377,7 +2406,8 @@ def build_detail_hist_balances(client_name: str, snapshot_date: str, config: dic
             if last_chunk and is_rr:
                 tcells.append(TableCell(1.0, "pct2", bold=True))
             rows.append(tcells)
-            title = pool if nchunks == 1 else f"{pool}  (months {lo + 1}\u2013{hi})"
+            title = pool if nchunks == 1 else (
+                f"{pool}  ({date_lbls[0]} \u2013 {date_lbls[-1]})")
             sections.append(TableSection(columns=cols, rows=rows, title=title))
 
     if not sections:
@@ -2419,6 +2449,19 @@ def build_detail_chargeoff_hist(client_name: str, snapshot_date: str, config: di
     if not all_dates:
         return None
 
+    # Mirror report_tct._sheet_detail_chargeoff_hist: the table spans the
+    # LONGEST pool life-of-loan window (e.g. 84 months for real estate), and
+    # each pool shows values only inside its own window (36 for consumer).
+    # Without this the PDF paged through every month of balance history
+    # (back to 2016) with mostly-empty tables.
+    acl_months = _imp.get("acl_months", {}) or {}
+    pool_window = {p: min(int(acl_months.get(p, 36) or 36), len(all_dates))
+                   for p in pools}
+    max_months = max(pool_window.values(), default=len(all_dates))
+    if 0 < max_months < len(all_dates):
+        all_dates = all_dates[-max_months:]
+    first_idx = {p: len(all_dates) - pool_window[p] for p in pools}
+
     net: dict = {}
     for ym in set(list(co.keys()) + list(rc.keys())):
         cp = co.get(ym, {})
@@ -2431,10 +2474,15 @@ def build_detail_chargeoff_hist(client_name: str, snapshot_date: str, config: di
     nchunks = max(1, (nd + per - 1) // per)
     sections: list = []
 
+    def _val(data: dict, pool: str, di: int) -> float:
+        if di < first_idx.get(pool, 0):
+            return 0
+        d = all_dates[di]
+        return data.get((d.year, d.month), {}).get(pool, 0) or 0
+
     def _add(label: str, data: dict) -> None:
         active = [p for p in pools
-                  if any((data.get((d.year, d.month), {}).get(p, 0) or 0)
-                         for d in all_dates)]
+                  if any(_val(data, p, di) for di in range(nd))]
         if not active:
             return
         for ci in range(nchunks):
@@ -2445,17 +2493,17 @@ def build_detail_chargeoff_hist(client_name: str, snapshot_date: str, config: di
             rows: list = []
             for pool in active:
                 cells = [TableCell(pool, "text", align="left")]
-                for d in chunk:
-                    v = data.get((d.year, d.month), {}).get(pool, 0) or 0
+                for di in range(lo, hi):
+                    v = _val(data, pool, di)
                     cells.append(TableCell(v, "currency") if v else TableCell(None))
                 rows.append(cells)
             tcells = [TableCell(f"Total {label}", "text", bold=True, align="left")]
-            for d in chunk:
-                s = sum(data.get((d.year, d.month), {}).get(p, 0) or 0
-                        for p in active)
+            for di in range(lo, hi):
+                s = sum(_val(data, p, di) for p in active)
                 tcells.append(TableCell(s, "currency", bold=True) if s else TableCell(None))
             rows.append(tcells)
-            title = label if nchunks == 1 else f"{label}  (months {lo + 1}\u2013{hi})"
+            title = label if nchunks == 1 else (
+                f"{label}  ({date_lbls[0]} \u2013 {date_lbls[-1]})")
             sections.append(TableSection(columns=cols, rows=rows, title=title))
 
     _add("Charge offs", co)

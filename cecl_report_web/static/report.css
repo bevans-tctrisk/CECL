@@ -2,10 +2,16 @@
    Goal: match the openpyxl output's typography and layout closely, and
    print cleanly to PDF via headless Chromium.
 
-   Fonts: the Excel reports use Calibri. Calibri is present on Windows.
-   For a future Linux server, install "Carlito" (a metric-compatible,
-   open substitute) so pagination/line-breaks stay identical. The stack
-   below falls back Calibri -> Carlito -> generic sans. */
+   Fonts: the Vizo reports follow the Vizo "Theme 2026" brand (Montserrat
+   headings, Arial body); the TCT reports use Calibri. Headless Chromium
+   only sees the TTFs embedded by render.py (@font-face), so the stacks
+   below fall back to metric-compatible / generic sans if a face is missing
+   (Carlito for Calibri, Liberation Sans for Arial). */
+
+:root {
+  --font-body: Arial, "Liberation Sans", "Segoe UI", sans-serif;
+  --font-head: "Montserrat", Arial, "Liberation Sans", "Segoe UI", sans-serif;
+}
 
 /* Page size and orientation come from the Chromium pdf() call (format +
    landscape) so wide tabs can go landscape. Declaring `size` here would
@@ -21,10 +27,18 @@
 html, body {
   margin: 0;
   padding: 0;
-  font-family: "Calibri", "Carlito", "Segoe UI", Arial, sans-serif;
+  font-family: var(--font-body);
   color: #000;
   -webkit-print-color-adjust: exact;
   print-color-adjust: exact;
+}
+
+/* Brand heading face on page/cover titles and section headings. */
+.cover-title, .cover-subtitle, .cover-cu,
+.rpt-cu, .rpt-subhead,
+.tbl-section-title, .narrative-page .narr-heading,
+.summary-variance-page .sv-title, .ncc-title {
+  font-family: var(--font-head);
 }
 
 /* One printed page. Each report tab becomes a .page that starts on a
@@ -46,7 +60,7 @@ tfoot { display: table-footer-group; }
 
 /* ---- Generic table page (ACL Summary, Mgmt Adj, Impaired, ...) ---- */
 .table-page .tbl-section-title {
-  font-size: 11pt; font-weight: 700; color: #0D4D5E;
+  font-size: 11pt; font-weight: 700; color: #011631;
   margin: 7pt 0 2pt;
 }
 .table-page .tbl-notes {
@@ -118,7 +132,7 @@ tfoot { display: table-footer-group; }
 .summary-variance-page .sv-band {
   display: flex; justify-content: space-between; align-items: center;
   width: 5.6in; margin: 12pt auto 0; padding: 5pt 12pt;
-  background: #0D4D5E; color: #fff; font-weight: 700; font-size: 13pt;
+  background: #011631; color: #fff; font-weight: 700; font-size: 13pt;
 }
 .summary-variance-page .sv-band-section { justify-content: center; margin-top: 22pt; }
 .summary-variance-page .sv-measures {
@@ -138,9 +152,9 @@ tfoot { display: table-footer-group; }
   font-size: 9pt;
 }
 .data-table th {
-  background: #0D4D5E; color: #fff; font-weight: 700;
+  background: #011631; color: #fff; font-weight: 700;
   padding: 2.5pt 6pt; text-align: center; vertical-align: middle;
-  border: 0.5pt solid #0D4D5E;
+  border: 0.5pt solid #011631;
 }
 .data-table td {
   padding: 1.2pt 6pt;
@@ -152,7 +166,7 @@ tfoot { display: table-footer-group; }
 
 /* ---- Narrative (Introduction, Executive Summary, ...) ---- */
 .narrative-page .narr-heading {
-  font-size: 12pt; font-weight: 700; color: #0D4D5E; margin: 14pt 0 4pt;
+  font-size: 12pt; font-weight: 700; color: #011631; margin: 14pt 0 4pt;
 }
 .narrative-page .narr-page-heading {
   font-size: 12pt; font-weight: 700; text-align: center; margin: 6pt 0 12pt;
@@ -176,7 +190,7 @@ tfoot { display: table-footer-group; }
   align-items: center;
   min-height: 9.5in;
 }
-.cover-logo-top { width: 1.85in; height: auto; margin: 0.3in 0 0; }
+.cover-logo-top { width: 2.6in; height: auto; margin: 0.5in 0 0; }
 .cover-title {
   font-size: 26pt;
   font-weight: 400;
@@ -244,7 +258,7 @@ tfoot { display: table-footer-group; }
 /* CECL Adjustment box: teal-bordered block, label left / value right. */
 .cecl-box {
   border-collapse: collapse;
-  border: 2px solid #0D4D5E;
+  border: 2px solid #011631;
   margin: 0.12in auto 0.28in;   /* centered on the page like the reference */
   width: 6.0in;
 }
@@ -278,9 +292,21 @@ tfoot { display: table-footer-group; }
 
 /* ---- Risk Change migration matrices ----
    Each Risk Change page (Total + one per risk-rated pool) carries both the $
-   and % matrices plus three charts; kept compact so the whole tab fits on a
-   single landscape page, matching the workbook's fit-to-one-page tabs. */
-.risk-change { font-size: 7.3pt; }
+   and % matrices plus four charts; kept compact so the whole tab fits on a
+   single landscape page, matching the workbook's fit-to-one-page tabs.
+   The section is a fixed-height flex column (landscape Letter 8.5in minus
+   the 2 x 0.4in @page margins, less slack) and the chart grid absorbs
+   whatever height the matrices leave, so the second chart row can never
+   be pushed onto a page of its own. */
+.risk-change {
+  font-size: 7.3pt;
+  height: 7.55in;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.risk-change .rpt-header,
+.risk-change .rc-matrix,
+.risk-change .rc-summary { flex: 0 0 auto; }
 .risk-change .rpt-header { margin-bottom: 0.04in; }
 .risk-change .rpt-cu { font-size: 12pt; }
 .risk-change .rpt-subhead { font-size: 10pt; }
@@ -296,9 +322,9 @@ tfoot { display: table-footer-group; }
   padding: 0.1pt 4pt;
   white-space: nowrap;
 }
-/* Header cells: dark teal, white, bold, centered (matches #0D4D5E). */
+/* Header cells: brand navy, white, bold, centered (matches #011631). */
 .rc-matrix .hd {
-  background: #0D4D5E;
+  background: #011631;
   color: #ffffff;
   font-weight: 700;
   text-align: center;
@@ -310,8 +336,8 @@ tfoot { display: table-footer-group; }
   font-variant-numeric: tabular-nums;
 }
 /* Migration states read straight from the workbook fills. */
-.rc-matrix .improved     { background: #6E8A00; color: #ffffff; }
-.rc-matrix .deteriorated { background: #B4453F; color: #ffffff; }
+.rc-matrix .improved     { background: #011631; color: #ffffff; }
+.rc-matrix .deteriorated { background: #926C12; color: #ffffff; }
 .rc-matrix .total.b { font-weight: 700; }
 
 .rc-summary {
@@ -320,7 +346,7 @@ tfoot { display: table-footer-group; }
   width: 100%;
 }
 .rc-summary .hd {
-  background: #0D4D5E; color: #fff; font-weight: 700;
+  background: #011631; color: #fff; font-weight: 700;
   text-align: left; padding: 2pt 8pt;
   width: 1%; white-space: nowrap;   /* title hugs its text, not a column */
 }
@@ -328,33 +354,36 @@ tfoot { display: table-footer-group; }
   text-align: right; font-variant-numeric: tabular-nums; padding: 2pt 5pt;
 }
 
-/* Four charts in a 2x2 grid beneath the matrices, sized to finish the page. */
+/* Four charts in a 2x2 grid beneath the matrices, sized to the remaining
+   page height (SVGs carry a viewBox, so they scale with the cell). */
 .rc-charts {
-  display: grid; grid-template-columns: 1fr 1fr;
+  flex: 1 1 auto; min-height: 0;
+  display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
   gap: 0.04in 0.4in; justify-items: center; align-items: center;
   margin-top: 0.04in;
 }
 .rc-chart-cell {
-  flex: 0 1 auto; display: flex; justify-content: center; break-inside: avoid;
+  display: flex; justify-content: center; align-items: center;
+  height: 100%; min-height: 0; max-width: 100%; break-inside: avoid;
 }
 .rc-chart-cell svg.chart {
-  height: 1.9in; width: auto; max-width: 100%;
+  height: 100%; max-height: 1.9in; width: auto; max-width: 100%;
 }
 
 /* Net Credit Change: summary table beside an exploded doughnut. */
-.ncc-combo { display: flex; flex-direction: column; align-items: center; break-inside: avoid; }
+.ncc-combo { display: flex; flex-direction: column; align-items: center; break-inside: avoid; max-height: 100%; }
 .ncc-title { font-size: 12pt; font-weight: 600; margin-bottom: 3pt; text-align: center; }
 .ncc-body { display: flex; align-items: center; gap: 0.2in; }
-.ncc-combo svg.chart { height: 1.6in; width: auto; }
+.ncc-combo svg.chart { height: 1.6in; max-height: 100%; width: auto; }
 .ncc-table { border-collapse: collapse; font-size: 10.5pt; }
 .ncc-table td { padding: 3pt 8pt; white-space: nowrap; }
 .ncc-table td.lbl { text-align: left; }
 .ncc-table td.bal, .ncc-table td.pct {
   text-align: right; font-variant-numeric: tabular-nums;
 }
-.ncc-table tr.imp td.bal, .ncc-table tr.imp td.pct { background: #6E8A00; color: #fff; }
-.ncc-table tr.det td.bal, .ncc-table tr.det td.pct { background: #B4453F; color: #fff; }
-.ncc-table tr.unc td.bal, .ncc-table tr.unc td.pct { background: #0D4D5E; color: #fff; }
+.ncc-table tr.imp td.bal, .ncc-table tr.imp td.pct { background: #011631; color: #fff; }
+.ncc-table tr.det td.bal, .ncc-table tr.det td.pct { background: #926C12; color: #fff; }
+.ncc-table tr.unc td.bal, .ncc-table tr.unc td.pct { background: #7F7F7F; color: #fff; }
 
 /* ---- ACL Env by Pool (allowance calculation) -- portrait, compact ---- */
 .acl-env { font-size: 8pt; }
@@ -371,7 +400,7 @@ tfoot { display: table-footer-group; }
   white-space: nowrap;
 }
 .acl-table .hd {
-  background: #0D4D5E;
+  background: #011631;
   color: #ffffff;
   font-weight: 700;
   text-align: center;
@@ -470,6 +499,10 @@ tfoot { display: table-footer-group; }
    #84c4f3 · indigo #2a2594. Deteriorated uses a reserved controlled
    red #C0453C (the brand has no red; red is kept for the risk cue).
    ============================================================ */
+.theme-tct {
+  --font-body: "Calibri", "Carlito", "Segoe UI", Arial, sans-serif;
+  --font-head: "Calibri", "Carlito", "Segoe UI", Arial, sans-serif;
+}
 .theme-tct .tbl-section-title,
 .theme-tct .narrative-page .narr-heading { color: #004783; }
 

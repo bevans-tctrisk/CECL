@@ -251,6 +251,40 @@ def _dist_factor(idx):
     return facs[min(idx, len(facs) - 1)] / 100.0
 
 
+def _annual_pool_total_avg(hbd):
+    """Per-pool annual average of the POOL TOTAL monthly balance, with
+    zero-total months excluded.
+
+    Returns ``{pool: {year: avg_total_balance}}``. The pooled average for the
+    Life Loss Rate is taken directly from the pool's total monthly balance
+    series (WARM 'Total' row / monthly balances) rather than by summing
+    per-grade averages, which over-states the total when grades are active in
+    different months. Months whose pool total is zero are dropped.
+    """
+    out = {}
+    for pk, pdata in (hbd or {}).items():
+        dates = pdata.get('dates', []) or []
+        n = len(dates)
+        totals = list(pdata.get('total') or [])
+        if len(totals) != n:
+            # No aligned 'total' series -> reconstruct from non-hidden grades.
+            grades_data = pdata.get('grades', {}) or {}
+            totals = [0.0] * n
+            for gk, vals in grades_data.items():
+                if str(gk).upper().startswith('HIDE'):
+                    continue
+                for i in range(min(n, len(vals))):
+                    totals[i] += vals[i] or 0
+        yr_sums, yr_cnts = {}, {}
+        for i, d in enumerate(dates):
+            t = totals[i] if i < len(totals) else 0
+            if t and t > 0:
+                yr_sums[d.year] = yr_sums.get(d.year, 0) + t
+                yr_cnts[d.year] = yr_cnts.get(d.year, 0) + 1
+        out[pk] = {y: yr_sums[y] / yr_cnts[y] for y in yr_sums}
+    return out
+
+
 def _pool_life_loss(pools, hist):
     """Compute life loss rate per pool from historical data."""
     co = hist.get('chargeoffs', {}) if hist else {}
@@ -549,21 +583,78 @@ def _apply_raw_code_aggregates(hist, config, snap, df, grades):
             for p, v in sub.items():
                 d[k][p] = v
 
-    _replace_nested(imp.get('warm_co'), 'warm_co')
-    _replace_nested(imp.get('warm_rc'), 'warm_rc')
-    _replace_nested(imp.get('warm_co_monthly'), 'warm_co_monthly')
-    _replace_nested(imp.get('warm_rc_monthly'), 'warm_rc_monthly')
-    _replace_nested(hist.get('chargeoffs'), 'warm_co')
-    _replace_nested(hist.get('recoveries'), 'warm_rc')
-    for fk in ('warm_co_totals', 'warm_rc_totals', 'warm_net_co'):
-        d = imp.get(fk)
-        if isinstance(d, dict):
-            for p in pools:
-                d[p] = agg[fk].get(p, 0.0)
+    # When the CU's charge-off/recovery FILE is authoritative it already
+    # code-splits these pools (and assigns each code to its own pool), so the
+    # WARM-derived CO/Rc re-derivation and the donor subtraction are skipped —
+    # only the balance (hist_bal_data) re-derivation is still needed.
+    _co_file_wins = bool(config.get('co_recovery_file_wins_over_warm'))
+    if not _co_file_wins:
+        _replace_nested(imp.get('warm_co'), 'warm_co')
+        _replace_nested(imp.get('warm_rc'), 'warm_rc')
+        _replace_nested(imp.get('warm_co_monthly'), 'warm_co_monthly')
+        _replace_nested(imp.get('warm_rc_monthly'), 'warm_rc_monthly')
+        _replace_nested(hist.get('chargeoffs'), 'warm_co')
+        _replace_nested(hist.get('recoveries'), 'warm_rc')
+        for fk in ('warm_co_totals', 'warm_rc_totals', 'warm_net_co'):
+            d = imp.get(fk)
+            if isinstance(d, dict):
+                for p in pools:
+                    d[p] = agg[fk].get(p, 0.0)
+    # Balance (hist_bal_data) re-derivation is skipped when the CU's monthly-
+    # balance file is authoritative — that file already carries the correct
+    # broken-out per-pool monthly balances, so the raw-code (quarterly) grid
+    # must not overwrite them.
     hb = imp.get('hist_bal_data')
-    if isinstance(hb, dict):
+    if isinstance(hb, dict) and not config.get('monthly_balance_authoritative'):
         for p in pools:
             hb[p] = agg['hist_bal_data'][p]
+
+    # Some broken-out codes were bundled by the vendor WARM into a DONOR pool
+    # (e.g. code 20 lives in "Used Vehicle" in the WARM but is broken out here
+    # as "LendPro Used"). The donor pool keeps its WARM CO/Rc (it isn't
+    # re-derived), so subtract the re-derived pool's amounts from the donor to
+    # avoid double-counting the same charge-offs / recoveries.
+    donors = {} if _co_file_wins else (config.get('pool_loan_code_co_donor') or {})
+
+    def _reduce_mag(cur, amt):
+        # Reduce ``cur`` toward zero by ``abs(amt)``, keeping ``cur``'s sign.
+        # warm_co is stored positive but warm_rc is stored negative, while the
+        # aggregator yields positive magnitudes — so a plain subtract would
+        # inflate the (negative) recovery totals.
+        cur = cur or 0
+        return cur - abs(amt) if cur >= 0 else cur + abs(amt)
+
+    def _sub_nested(d, agg_key, pool, donor):
+        if not isinstance(d, dict):
+            return
+        for k, sub in (agg.get(agg_key) or {}).items():
+            amt = sub.get(pool)
+            if amt and isinstance(d.get(k), dict) and donor in d[k]:
+                d[k][donor] = _reduce_mag(d[k].get(donor), amt)
+
+    for pool, donor in donors.items():
+        if pool not in pools or not donor:
+            continue
+        # Guard against double-application: compose_tct mutates the shared
+        # hist, then compose_mgmt_adj_napkin deep-copies it and re-runs this
+        # aggregation — the donor subtraction is not idempotent, so a marker
+        # prevents subtracting the same codes from the donor twice.
+        _applied = imp.setdefault('_co_donor_applied', [])
+        _tag = f"{pool}|{donor}"
+        if _tag in _applied:
+            continue
+        _applied.append(_tag)
+        _sub_nested(imp.get('warm_co'), 'warm_co', pool, donor)
+        _sub_nested(imp.get('warm_rc'), 'warm_rc', pool, donor)
+        _sub_nested(imp.get('warm_co_monthly'), 'warm_co_monthly', pool, donor)
+        _sub_nested(imp.get('warm_rc_monthly'), 'warm_rc_monthly', pool, donor)
+        _sub_nested(hist.get('chargeoffs'), 'warm_co', pool, donor)
+        _sub_nested(hist.get('recoveries'), 'warm_rc', pool, donor)
+        for fk in ('warm_co_totals', 'warm_rc_totals', 'warm_net_co'):
+            d = imp.get(fk)
+            if isinstance(d, dict) and donor in d:
+                d[donor] = _reduce_mag(d.get(donor), agg[fk].get(pool, 0.0))
+
     n = len(pools)
     tot_co = sum(agg['warm_co_totals'].values())
     print(f"    pool_loan_codes: re-derived CO/Rc/balances for {n} pool(s) "
@@ -805,6 +896,8 @@ def _ncc(df, grades, config):
     for j, og in enumerate(gl):
         for i, g in enumerate(gl):
             v = _matrix_val(matrix, g, og)
+            if g == no_score or og == no_score:
+                continue  # Not Reported -> always unchanged (WARM / Risk Change sheet rule)
             if i > j:
                 if j < n_top and (i - j) < 2:
                     pass  # unchanged – small drop within top grades
@@ -1299,6 +1392,8 @@ def _sheet_exec_summary(wb, cu, snap, df, grades, config):
     for j, og in enumerate(gl):
         for i, cg in enumerate(gl):
             v = _matrix_val(matrix, cg, og)
+            if cg == no_score or og == no_score:
+                continue  # Not Reported -> always unchanged
             if i > j:
                 if j < n_top and (i - j) < 2:
                     pass
@@ -3045,6 +3140,9 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     """
     ws = wb.create_sheet("ACL Env by Pool Mgmt Adj")
     no_score = config.get('no_score_label', 'Not Reported')
+    # Pools/grades whose Allowance Factor turns negative after the management
+    # adjustment — surfaced as a warning at the bottom of the sheet.
+    _neg_factor_rows = []
     mgmt_adj_by_pool = config.get('mgmt_adj_by_pool', {})
     # Per-pool opt-in to the firm-wide default mgmt adj (wizard Step 16)
     # plus the firm-wide default value itself (Admin page).
@@ -3118,18 +3216,24 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                 annual_grade_avg[_pk].setdefault(_y, {})
                 annual_grade_avg[_pk][_y][_gk] = yr_sums[_y] / yr_cnts[_y]
 
+    # Pooled average balance for the Life Loss Rate: average the POOL TOTAL
+    # monthly balance directly (do NOT sum per-grade averages, which over-states
+    # the total when grades have different active-month counts). Zero-total
+    # months are excluded.
+    annual_pool_avg = _annual_pool_total_avg(hbd)
+
     life_loss = {}
     for pool in pools:
         pool_acl = acl_months_map.get(pool, 36)
         abs_first = (snap_year * 12 + snap_month) - pool_acl + 1
         pe = (abs_first - 1) // 12
         earliest_month = abs_first - pe * 12
-        pa = annual_grade_avg.get(pool, {})
+        pa = annual_pool_avg.get(pool, {})
         yr_tots = []
         for y in years:
             if y < pe:
                 continue
-            yt = sum(pa.get(y, {}).values())
+            yt = pa.get(y, 0)
             if not yt:
                 yt = avg_bals.get(y, {}).get(pool, 0)
             if yt:
@@ -3141,10 +3245,21 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
             total_net = net_co_match
         else:
             total_net = 0
+            # Trim the window-start year to the window-start month whenever
+            # monthly detail exists for it (same rule the Net CO tab's
+            # _windowed_year_val applies), so the loss-rate numerator equals
+            # the displayed 'ACL Net Charge offs'. Seed-driven CUs carry the
+            # prior quarter's already-windowed annual total, which otherwise
+            # leaks pre-window months into the rate.
+            _has_monthly_start = any(
+                ((co_monthly.get((pe, m), {}) or {}).get(pool)
+                 or (rc_monthly.get((pe, m), {}) or {}).get(pool))
+                for m in range(1, 13))
             for y in years:
                 if y < pe:
                     continue
-                if _trim_start_year and y == pe and earliest_month > 1:
+                if ((_trim_start_year or _has_monthly_start)
+                        and y == pe and earliest_month > 1):
                     co_y = sum((co_monthly.get((y, m), {}) or {}).get(pool, 0) or 0
                                for m in range(earliest_month, 13))
                     rc_y = sum((rc_monthly.get((y, m), {}) or {}).get(pool, 0) or 0
@@ -3428,6 +3543,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                         base_rate=base_rate,
                     )
                     factor = base_rate + mgmt_adj
+                    if factor < 0:
+                        _neg_factor_rows.append((pool, g, factor))
                     allow_before = calc_bal * factor
                 elif has_db_data:
                     _pd = _bal_detail.get(pool, {})
@@ -3457,6 +3574,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                         base_rate=base_rate,
                     )
                     factor = base_rate + mgmt_adj
+                    if factor < 0:
+                        _neg_factor_rows.append((pool, g, factor))
                     allow_before = calc_bal * factor
                 else:
                     balance = specific_id = calc_bal = 0
@@ -3596,6 +3715,12 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                 admin_default_mgmt_adj,
                 base_rate=nrr_base_rate,
             )
+            # ACL Base Loss Rate can never be negative: a net-recovery pool
+            # (recoveries > charge-offs over the window) floors at 0. Floored
+            # AFTER mgmt-adj resolution so the pool is still treated as having
+            # loss history rather than missing data (which would pull in the
+            # firm-wide default adjustment).
+            nrr_base_rate = max(0.0, nrr_base_rate or 0.0)
             nrr_factor = nrr_base_rate + nrr_mgmt_adj
             # Recompute allow_before so it reflects the resolver's
             # mgmt_adj instead of the WARM workbook's baked-in value.
@@ -3610,6 +3735,8 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
                 if nrr_calc_bal:
                     nrr_base_rate = nrr_allow_before / nrr_calc_bal
                     nrr_factor = nrr_base_rate
+            if nrr_factor < 0:
+                _neg_factor_rows.append((pool, 'Total', nrr_factor))
             nrr_env_allow = nrr_allow_before * env_factor
             nrr_total_allow = nrr_allow_before + nrr_env_allow
             grand_allowance += nrr_total_allow
@@ -3748,6 +3875,7 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
         'total_spec_allow': total_spec_allow,
         'total_allow_needed': total_allow_needed,
         'acl_balance': acl_bal, 'adjustment': adjustment,
+        'neg_factor_pools': [(p, g, f) for p, g, f in _neg_factor_rows],
     }
     _imp_stash['_acl_impaired_computed'] = dict(acl_impaired)
     _imp_stash['_acl_oac_computed'] = list(oac_rows)
@@ -3783,6 +3911,28 @@ def _sheet_acl_reserve(wb, cu, snap, df, grades, config, hist, env_results, spec
     ws.cell(row=r, column=1, value=_adj_label).font = FNT_A12B
     ws.cell(row=r, column=11, value=adjustment).number_format = ACCT
     ws.cell(row=r, column=11).font = FNT_A12B
+
+    # Warn when the management adjustment drives a pool's Allowance Factor
+    # below zero (the base loss rate is already floored at 0, so a negative
+    # factor can only come from a negative management adjustment). A negative
+    # factor produces a negative allowance for that pool.
+    if _neg_factor_rows:
+        _warn_font = Font(name='Arial', bold=True, size=11, color='C00000')
+        r += 2
+        ws.cell(row=r, column=1,
+                value="WARNING: Management adjustment produces a NEGATIVE "
+                      "Allowance Factor for the following pool(s):").font = _warn_font
+        for _wp, _wg, _wf in _neg_factor_rows:
+            r += 1
+            _wlbl = _wp if _wg in ('Total', None) else f"{_wp} - {_wg}"
+            c = ws.cell(row=r, column=1, value=f"    {_wlbl}")
+            c.font = Font(name='Arial', size=11, color='C00000')
+            c = ws.cell(row=r, column=7, value=_wf)
+            c.number_format = PCT4
+            c.font = Font(name='Arial', size=11, color='C00000')
+        print(f"  ACL WARNING: {len(_neg_factor_rows)} pool/grade row(s) have a "
+              f"negative Allowance Factor after the management adjustment: "
+              f"{', '.join((p if g in ('Total', None) else f'{p}/{g}') for p, g, _ in _neg_factor_rows)}")
 
     # ─── Page Setup ───
     rows_per_first_page = 77
@@ -4280,20 +4430,31 @@ def _sheet_display_hist_bal(wb, cu, snap, df, grades, config, hist):
         abs_first = (snap_year * 12 + snap_month) - pool_acl + 1
         return (abs_first - 1) // 12
 
+    def _pool_earliest_month(pool):
+        pool_acl = acl_months_map.get(pool, 36)
+        abs_first = (snap_year * 12 + snap_month) - pool_acl + 1
+        return abs_first - ((abs_first - 1) // 12) * 12
+
+    _co_m = hist.get('co_monthly', {}) if hist else {}
+    _rc_m = hist.get('rc_monthly', {}) if hist else {}
+
     # ── Pre-compute per-pool Life Loss Rate (matches WARM formula) ──
     # WARM: Life Loss Rate = Total Net Chargeoffs / Average of yearly pool totals
     # Prefer WARM's own net CO totals when available (from Display CO-Recov -DQ)
     warm_net_co = _imp.get('warm_net_co', {})
+    # Pooled average balance uses the POOL TOTAL monthly balance (zero-total
+    # months excluded) — not the sum of per-grade averages.
+    annual_pool_avg = _annual_pool_total_avg(hbd)
     pool_life_rates = {}
     pool_avg_totals = {}
     for pool in pools:
         pe = _pool_earliest_year(pool)
-        pa = annual_grade_avg.get(pool, {})
+        pa = annual_pool_avg.get(pool, {})
         yr_tots = []
         for y in years:
             if y < pe:
                 continue
-            yt = sum(pa.get(y, {}).values())
+            yt = pa.get(y, 0)
             if not yt:
                 yt = avg_bals.get(y, {}).get(pool, 0)
             if yt:
@@ -4307,8 +4468,21 @@ def _sheet_display_hist_bal(wb, cu, snap, df, grades, config, hist):
             total_net = net_co_match
         else:
             total_net = 0
+            # Same window-start trim as _sheet_acl_reserve so this displayed
+            # rate equals the one driving the allowance.
+            _em = _pool_earliest_month(pool)
+            _has_m = any(((_co_m.get((pe, m), {}) or {}).get(pool)
+                          or (_rc_m.get((pe, m), {}) or {}).get(pool))
+                         for m in range(1, 13))
             for y in years:
                 if y < pe:
+                    continue
+                if _has_m and y == pe and _em > 1:
+                    co_y = sum((_co_m.get((y, m), {}) or {}).get(pool, 0) or 0
+                               for m in range(_em, 13))
+                    rc_y = sum((_rc_m.get((y, m), {}) or {}).get(pool, 0) or 0
+                               for m in range(_em, 13))
+                    total_net += abs(co_y) - abs(rc_y)
                     continue
                 total_net += abs(co_data.get(y, {}).get(pool, 0) or 0) \
                              - abs(rc_data.get(y, {}).get(pool, 0) or 0)
@@ -4460,11 +4634,11 @@ def _sheet_display_hist_bal(wb, cu, snap, df, grades, config, hist):
         # Pool total row
         r += 1
         ws.cell(row=r, column=1, value="Total").font = FNT_A12B
-        pool_annual = annual_grade_avg.get(pool, {})
+        pool_annual_tot = annual_pool_avg.get(pool, {})
         for yi in range(num_years):
             if years[yi] < pool_earliest:
                 continue
-            yr_total = sum(pool_annual.get(years[yi], {}).values())
+            yr_total = pool_annual_tot.get(years[yi], 0)
             if yr_total:
                 c = ws.cell(row=r, column=year_start + yi, value=yr_total)
                 c.number_format = ACCT_FMT

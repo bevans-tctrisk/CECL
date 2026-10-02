@@ -243,10 +243,18 @@ def build_yaml_from_wizard(state: dict[str, Any]) -> dict[str, Any]:
             != (state.get("no_score_label") or "Not Reported").strip()
         ],
         "no_score_label": state.get("no_score_label", "Not Reported"),
-        "reports": state["reports"],
+        "reports": {
+            k: v for k, v in (state["reports"] or {}).items()
+            if k != "output_folder"
+        },
         "economic_data": state["economic_data"],
         "mgmt_adj": state.get("mgmt_adj") or {"ltv_baseline": 0.9, "probability_factor": 0.35},
     })
+    # Per-CU report output folder (absolute path). Emitted as a top-level key
+    # so the report engine reads it directly; blank falls back to Reports/.
+    _out_dir = ((state.get("reports") or {}).get("output_folder") or "").strip()
+    if _out_dir:
+        cfg["report_output_dir"] = _out_dir
     # Headerless positional extracts address columns by 0-based integer
     # position; drop any leftover named/placeholder mappings (default-state
     # strings like 'DQ_DAYS'/'OPEN_DATE') that can't resolve to a position so

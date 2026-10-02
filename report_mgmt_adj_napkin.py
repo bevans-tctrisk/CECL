@@ -149,6 +149,35 @@ def _snap_display(snap: str) -> str:
 
 
 # ── Per-pool baseline computation ─────────────────────────────────
+def _annual_pool_total_avg(hbd):
+    """Per-pool annual average of the POOL TOTAL monthly balance, with
+    zero-total months excluded. Returns ``{pool: {year: avg_total_balance}}``.
+    Mirrors report_tct/report_vizo so the napkin ties to the report.
+    """
+    out = {}
+    for pk, pdata in (hbd or {}).items():
+        dates = pdata.get('dates', []) or []
+        n = len(dates)
+        totals = list(pdata.get('total') or [])
+        if len(totals) != n:
+            # No aligned 'total' series -> reconstruct from non-hidden grades.
+            grades_data = pdata.get('grades', {}) or {}
+            totals = [0.0] * n
+            for gk, vals in grades_data.items():
+                if str(gk).upper().startswith('HIDE'):
+                    continue
+                for i in range(min(n, len(vals))):
+                    totals[i] += vals[i] or 0
+        yr_sums, yr_cnts = {}, {}
+        for i, d in enumerate(dates):
+            t = totals[i] if i < len(totals) else 0
+            if t and t > 0:
+                yr_sums[d.year] = yr_sums.get(d.year, 0) + t
+                yr_cnts[d.year] = yr_cnts.get(d.year, 0) + 1
+        out[pk] = {y: yr_sums[y] / yr_cnts[y] for y in yr_sums}
+    return out
+
+
 def _pool_life_loss_acl(pools, hist, config):
     """Match _sheet_acl_reserve's life_loss computation (annual-grade-avg
     style with per-pool ACL months window). Falls back to avg_balances
@@ -184,6 +213,7 @@ def _pool_life_loss_acl(pools, hist, config):
                 annual_grade_avg[pk][y][gk] = yr_sums[y] / yr_cnts[y]
 
     out = {}
+    annual_pool_avg = _annual_pool_total_avg(hbd)
     for pool in pools:
         pool_acl = acl_months_map.get(pool, 36)
         if snap_year and snap_month:
@@ -191,12 +221,12 @@ def _pool_life_loss_acl(pools, hist, config):
             pe = (abs_first - 1) // 12
         else:
             pe = 0
-        pa = annual_grade_avg.get(pool, {})
+        pa = annual_pool_avg.get(pool, {})
         yr_tots = []
         for y in years:
             if y < pe:
                 continue
-            yt = sum(pa.get(y, {}).values())
+            yt = pa.get(y, 0)
             if not yt:
                 yt = avg_bals.get(y, {}).get(pool, 0)
             if yt:
@@ -423,11 +453,11 @@ def _write_total_row(ws, row, first_grade_row, last_grade_row,
         f_formula = f"=SUM(F{first_grade_row}:F{last_grade_row})"
         l_formula = f"=SUM(L{first_grade_row}:L{last_grade_row})"
     else:
-        # NRR: total balance × loss rate (no grade rows contribute).
-        # ACL Base Loss Rate floored at 0 to match the Display Hist Bal and
-        # ACL Env by Pool Mgmt Adj tabs (max(0, pool_ll)).
-        f_formula = f"=MAX(0,C{row})*B{row}"
-        l_formula = f"=(I{row}+MAX(0,C{row}))*B{row}"
+        # NRR: total balance × loss rate (no grade rows contribute). The
+        # caller floors the base rate (C) at 0 for NRR pools, matching the
+        # ACL Env by Pool Mgmt Adj tab's max(0, nrr_base_rate).
+        f_formula = f"=C{row}*B{row}"
+        l_formula = f"=(I{row}+C{row})*B{row}"
 
     fcell = ws.cell(row=row, column=6, value=f_formula)
     fcell.font = FNT_BOLD
@@ -676,7 +706,12 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
                  if k.strip().lower() == pool.strip().lower()),
                 None,
             )
-            nrr_base = (_wp.get('total', {}) or {}).get('base_rate', 0) if _wp else 0
+            # Match the ACL tab: use the WARM blended base rate when the
+            # pool has one; otherwise fall back to the computed life-loss
+            # (e.g. Neg Shares, whose net CO exceeds its balance).
+            nrr_base = (_wp.get('total', {}) or {}).get('base_rate') if _wp else None
+            if nrr_base is None:
+                nrr_base = pool_ll
             _bro = (config.get('base_loss_rate_by_pool_grade') or {})
             _bro_pool = _bro.get(pool.strip().lower()) or _bro.get(pool)
             if _bro_pool and 'Total' in _bro_pool:
@@ -688,6 +723,12 @@ def compose_mgmt_adj_napkin(client_name, snapshot_date, df, config, grades, hist
             pool, pool_use_default, mgmt_adj_by_pool,
             admin_default, base_rate=pool_c,
         )
+        # ACL Base Loss Rate can never be negative: floor the NRR pool base
+        # rate at 0 (after mgmt-adj resolution, so admin-default logic sees
+        # the true rate) to match report_tct._sheet_acl_reserve. A net-recovery
+        # pool then reserves off the management adjustment alone.
+        if not is_rr:
+            pool_c = max(0.0, pool_c or 0.0)
 
         # Grade-row balances (only meaningful for risk-rated pools).
         # Non-risk-rated pools render as a single Total row with no

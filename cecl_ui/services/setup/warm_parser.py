@@ -600,7 +600,7 @@ def parse_acl_reserve_rates(ws) -> dict:
         if cur is None or a == "Current Grade":
             continue
         if a == "Total":
-            out[cur]["blended"] = _num(r[6]) if len(r) > 6 else None  # col G = E+F
+            out[cur]["blended"] = _num(r[4]) if len(r) > 4 else None  # col E = base (Total row)
             out[cur]["env_factor"] = _num(r[8]) if len(r) > 8 else None
             out[cur]["allow_before"] = _num(r[7]) if len(r) > 7 else None
             total_bal = _num(r[1]) if len(r) > 1 else None
@@ -618,14 +618,12 @@ def parse_acl_reserve_rates(ws) -> dict:
         gbal = _num(r[1]) if len(r) > 1 else None
         out[cur]["_grade_bal"] += abs(gbal or 0)
         base = _num(r[4]) if len(r) > 4 else None   # col E = ACL base loss rate
-        factor = _num(r[6]) if len(r) > 6 else None  # col G = allowance factor (E+F)
-        # The override pins the FULL allowance factor (base + mgmt adj) so the
-        # report reproduces the WARM even when the mgmt-adj carry-forward is
-        # unavailable. ``max_base`` tracks the true base rate (col E) so the
-        # analyst-mgmt-adj-only pools are still detected for warm_allowance_pools.
-        if factor is not None:
-            out[cur]["grades"][a] = factor
+        # Pin the TRUE base rate (col E). The report engine adds the mgmt adj
+        # (col F, carried forward from the WARM) on top to form the allowance
+        # factor, so pinning col G (= E + F) double-counted the mgmt adj every
+        # quarter after onboarding (Franklin Sept-2026: +$300K phantom ACL).
         if base is not None:
+            out[cur]["grades"][a] = base
             out[cur]["max_base"] = max(out[cur].get("max_base", 0.0), abs(base))
     return out
 

@@ -929,14 +929,16 @@ def _split_suffix_for_row(member_only, full_account, ma_cfg, raw_suffix):
     return ''
 
 
-def _load_extract_enrichment(config, workspace_root, snap=None):
+def _load_extract_enrichment(config, workspace_root, snap=None, all_rows=None):
     """Read configured loan extract files to populate the All Loans tab
     fields that don't live in monthly_loan_data (loan_type, open_date,
     interest_rate, days_delinquent, original_loan_amount,
     total_available_credit) plus the per-loan Member# / Suffix split.
 
     Returns a dict keyed by full_account_str (str) -> dict of fields.
-    Falls back to {} when no extracts can be located.
+    Falls back to {} when no extracts can be located. When ``all_rows`` is a
+    list, every parsed row dict is appended to it as well (undeduplicated),
+    for callers that must disambiguate loans sharing one account key.
     """
     enrich = {}
     data_dir = config.get('data_directory', '')
@@ -1110,6 +1112,8 @@ def _load_extract_enrichment(config, workspace_root, snap=None):
             if prev is None or len([k for k in row_out if row_out.get(k) not in (None, '')]) > \
                               len([k for k in prev if prev.get(k) not in (None, '')]):
                 enrich[full_str] = row_out
+            if all_rows is not None:
+                all_rows.append(row_out)
             n_added += 1
         print(f"    Loaded {n_added} row(s) from extract '{ex.get('label')}'")
 

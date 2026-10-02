@@ -166,9 +166,11 @@ def _strip_bogus_dq_mappings(config):
 
 
 def load_days_delinquent_by_account(config, snapshot_date, workspace_root):
-    """``{full_account_string: days_delinquent}`` read from the loan extract(s).
+    """``({full_account_string: days_delinquent},
+    {(full_account_string, balance): days_delinquent})`` read from the loan
+    extract(s).
 
-    Returns ``{}`` when no extract can be located or none of them map
+    Returns ``({}, {})`` when no extract can be located or none of them map
     ``days_delinquent``.  Reuses the impdet enrichment loader so the file
     resolution, header normalisation and member/account derivation are
     identical to the Improved/Deteriorated report's.
@@ -184,7 +186,7 @@ def load_days_delinquent_by_account(config, snapshot_date, workspace_root):
         from generate_impdet_report import _load_extract_enrichment
     except Exception as exc:  # noqa: BLE001
         print(f"    DQ migration split: enrichment loader unavailable ({exc}).")
-        return {}
+        return {}, {}
 
     # Only worth reading the extracts when at least one of them maps
     # days_delinquent; otherwise we would pay the I/O for nothing.
@@ -197,13 +199,15 @@ def load_days_delinquent_by_account(config, snapshot_date, workspace_root):
         mapped = bool((safe_cfg.get('column_mappings') or {}).get('days_delinquent'))
     if not mapped:
         print("    DQ migration split: no extract maps 'days_delinquent'; skipping.")
-        return {}
+        return {}, {}
 
     try:
-        enrich = _load_extract_enrichment(safe_cfg, workspace_root, snapshot_date)
+        rows = []
+        enrich = _load_extract_enrichment(safe_cfg, workspace_root, snapshot_date,
+                                          all_rows=rows)
     except Exception as exc:  # noqa: BLE001
         print(f"    DQ migration split: extract read failed ({exc}).")
-        return {}
+        return {}, {}
 
     out = {}
     for acct, row in (enrich or {}).items():
@@ -211,7 +215,19 @@ def load_days_delinquent_by_account(config, snapshot_date, workspace_root):
         if days is None:
             continue
         out[str(acct).strip()] = days
-    return out
+    # Account keys can be member-only (suffix_length 0 / no suffix in the DB
+    # key), so a member with several loans collapses to one entry above.
+    # Key every row by account + balance too; the caller tries that first.
+    by_bal = {}
+    for row in rows:
+        days = _coerce_days(row.get('days_delinquent'))
+        bal = _coerce_days(row.get('current_balance'))
+        if days is None or bal is None:
+            continue
+        key = (str(row.get('member_suffix') or '').strip(), round(float(bal), 2))
+        # Ambiguous (same account AND balance) -> keep the worse delinquency.
+        by_bal[key] = max(days, by_bal.get(key, days))
+    return out, by_bal
 
 
 def derive_dq_by_migration(config, snapshot_date, loan_df, grades,
@@ -262,8 +278,10 @@ def derive_dq_by_migration(config, snapshot_date, loan_df, grades,
     if days_by_account is None:
         root = workspace_root or os.environ.get('CECL_WORKSPACE_ROOT') \
             or os.path.dirname(os.path.abspath(__file__))
-        days_by_account = load_days_delinquent_by_account(
+        days_by_account, days_by_acct_bal = load_days_delinquent_by_account(
             config, snapshot_date, root)
+    else:
+        days_by_acct_bal = {}
     if not days_by_account:
         return {}, {}
 
@@ -293,7 +311,15 @@ def derive_dq_by_migration(config, snapshot_date, loan_df, grades,
         pool_key = str(pool).strip() if pool is not None else ''
         if pool_key and pool_key.lower() != 'nan':
             by_pool.setdefault(pool_key, _blank())
-        days = days_by_account.get(str(acct).strip())
+        acct_key = str(acct).strip()
+        days = None
+        if days_by_acct_bal:
+            try:
+                days = days_by_acct_bal.get((acct_key, round(float(bal), 2)))
+            except (TypeError, ValueError):
+                days = None
+        if days is None:
+            days = days_by_account.get(acct_key)
         if days is None:
             continue
         matched += 1

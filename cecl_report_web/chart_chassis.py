@@ -66,29 +66,13 @@ renders identically to today's negative-signed workbook cells, by declaring
 
 NOTE ON COLOUR
 --------------
-The Vizo brand hexes used by the Excel charts (teal ``0D4D5E``, maroon
-``873A3A``/``3D1A1A``, olive ``829901``, amber ``FFC000``) do NOT pass a
-categorical palette validation: the teal is below the chroma floor (0.066,
-reads gray) and outside the lightness band, and olive/amber are
-indistinguishable under deuteranopia (dE 1.5).
-
-The steps below are the same four hues re-stepped to pass. Validated with the
-dataviz skill's ``validate_palette.js`` on surface #ffffff-ish, order
-teal / maroon / amber / olive:
-
-    lightness band  PASS   chroma floor    PASS
-    CVD separation  PASS (worst adjacent olive<->amber dE 12.3 protan)
-    normal-vision   PASS (worst adjacent dE 19.6)
-    contrast        WARN  amber #E0A400 at 2.16:1 -> "relief" required, i.e.
-                    amber-coded marks MUST carry a visible direct label or
-                    appear in the table view. A6/A7 (the four-slice DQ pie
-                    and charge-off bar) are the only archetypes that reach
-                    the amber slot, and both label every slice, so the
-                    relief obligation is met -- but re-run the validator if
-                    that changes.
-
-Teal/maroon is also a legitimate *diverging* pair for A2: cool vs warm poles
-reading as opposite, with a neutral gray zero rule as the midpoint.
+Palette is the Vizo "Theme 2026" brand scheme (Oct-2026 rebrand): navy
+``011631`` (accent1), gold ``926C12`` (accent2), teal ``068288`` (accent3),
+light gold ``B69036``, mint ``7AE2CF``, gray ``7F7F7F``. Migration roles per
+Vizo: Improved navy, Deteriorated gold (cool/warm diverging pair), Unchanged
+grey, Not Reported teal; Net uses the navy primary. Gray-coded marks are
+low-contrast and MUST carry a direct label or appear in the table view --
+A6/A7 (four-slice DQ pie, charge-off bar) label every slice.
 """
 
 from __future__ import annotations
@@ -102,21 +86,20 @@ from typing import Any, Callable, Iterable, Sequence
 #: Categorical slots, in assignment order. Never cycle past the end --
 #: fold a 5th category into "Other" (none of the seven archetypes needs one).
 PALETTE = [
-    "#0E7E9E",  # 1 teal    (brand 0D4D5E, re-stepped for chroma/lightness)
-    "#B4453F",  # 2 maroon  (brand 873A3A)
-    "#E0A400",  # 3 amber   (brand FFC000) -- contrast WARN, needs labels
-    "#6E8A00",  # 4 olive   (brand 829901)
+    "#068288",  # 1 teal   (accent3)
+    "#926C12",  # 2 gold   (accent2)
+    "#7F7F7F",  # 3 gray   (accent6) -- low contrast, needs labels
+    "#011631",  # 4 navy   (accent1)
 ]
 
 #: Semantic assignment for the migration-direction bar/column charts, using the
-#: EXACT Excel Impr Deter chart hexes: Improved teal 0D4D5E, Deteriorated dark
-#: maroon 3D1A1A, Net olive 829901. (The DQ/CO pies and Net Credit Change
-#: doughnut carry their own explicit point colours and are unaffected.)
+#: EXACT Excel Impr Deter chart hexes (report_vizo VZ_IMPROVED / VZ_DETERIORATED /
+#: VZ_NET): Improved navy, Deteriorated gold, Net navy, Unchanged grey.
 SEMANTIC = {
-    "improved": "#0D4D5E",
-    "deteriorated": "#3D1A1A",
-    "net": "#829901",
-    "unchanged": "#9A9A93",
+    "improved": "#011631",
+    "deteriorated": "#926C12",
+    "net": "#011631",
+    "unchanged": "#7F7F7F",
 }
 
 #: TCT brand variant of the migration-direction palette, from the website

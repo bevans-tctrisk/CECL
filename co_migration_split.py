@@ -60,12 +60,13 @@ import re
 
 STATUS_LABELS = ("Improved", "Deteriorated", "Unchanged", "Not Reported")
 
-# A charge-off whose score we cannot recover lands in ``Not Reported`` -- the
-# WARM's own bucket for "this loan had no credit score".  When that bucket
-# swallows more than this share of the charge-off dollars the chart carries no
-# information, so the derivation refuses and the caller leaves the block empty
-# for the report's empty-state to handle.
-MAX_NOT_REPORTED_SHARE = 0.75
+# A charge-off with NO recoverable score lands in ``Not Reported`` -- the
+# WARM's own bucket for "this loan had no credit score". Product call,
+# 2026-10-02: that bucket is itself the answer ("we have no score history for
+# these charge-offs"), so the chart is populated whenever the pool has
+# charge-offs instead of being withheld. Set a share in (0, 1) to reinstate
+# the old refusal; 1.0 disables it.
+MAX_NOT_REPORTED_SHARE = 1.0
 
 # A charge-off whose original score was never supplied is classified
 # ``Unchanged`` under the WARM's ``original = current`` gap-fill convention --
@@ -178,7 +179,7 @@ def _parse_co_file_loans(filepath, parse_cfg):
 
     empty = pd.DataFrame(columns=["account", "code", "amount", "date",
                                   "orig_score", "curr_score"])
-    df = gr._read_data_file(filepath)
+    df = gr._read_data_file(filepath, parse_cfg.get("sheet"))
     if df is None or df.empty:
         return empty
 
@@ -457,6 +458,12 @@ def load_chargeoff_loans(config):
                 return pool_map[i]
         except (ValueError, TypeError):
             pass
+        # 'NN / Label' codes (Ontario-style cumulative file): try the code part.
+        if " / " in s:
+            head = s.split(" / ", 1)[0].strip()
+            for cand in (head, head.upper(), head.lower()):
+                if cand in pool_map:
+                    return pool_map[cand]
         upper = s.upper()
         for v in set(pool_map.values()):
             if str(v).upper() == upper:
@@ -691,7 +698,53 @@ def merge_warm_history(history, config, resolve=None, verbose=True):
     return history, meta
 
 
-def recover_scores(account, co_date, history, alias=None):
+def build_member_index(history, config):
+    """``{member_digits: [(snapshot, cur, orig), ...]}`` merged across a
+    member's loans, for charge-off feeds that identify the loan only by
+    member number (or by a non-numeric suffix that cannot be rebuilt into
+    the extract's account string -- Ontario's ``Loan Suffix`` is 'O'/'C').
+    Bureau scores are pulled per MEMBER, so a member's loans share a score;
+    the merged series is ordered oldest-first and de-duplicated per snapshot
+    (highest current score wins, as in ``load_score_history``).
+
+    Member digits follow the CU's ``member_account`` block: ``fixed_suffix``
+    strips the trailing ``suffix_length`` digits; ``delimiter`` / ``split``
+    keep the part before the delimiter.  Returns ``{}`` when the block does
+    not describe a member/suffix account (no safe member key).
+    """
+    ma = (config or {}).get("member_account") or {}
+    mode = (ma.get("mode") or "fixed_suffix").lower()
+    try:
+        n = int(ma.get("suffix_length", 3) if ma.get("suffix_length") is not None else 3)
+    except (TypeError, ValueError):
+        n = 3
+    delim = ma.get("delimiter") or "-"
+
+    def _mk(acct):
+        s = str(acct or "").strip()
+        if mode in ("delimiter", "split") and delim in s:
+            return normalize_account(s.split(delim, 1)[0])
+        d = normalize_account(s)
+        if mode == "fixed_suffix" and n > 0 and len(d) > n:
+            return d[:-n]
+        return ""
+
+    if mode == "fixed_suffix" and n <= 0:
+        return {}
+    merged = {}
+    for acct, rows in history.items():
+        key = _mk(acct)
+        if not key:
+            continue
+        bucket = merged.setdefault(key, {})
+        for snap, cur, orig in rows:
+            prev = bucket.get(snap)
+            if prev is None or cur > prev[1]:
+                bucket[snap] = (snap, cur, orig)
+    return {k: [v[s] for s in sorted(v)] for k, v in merged.items()}
+
+
+def recover_scores(account, co_date, history, alias=None, member_index=None):
     """Recover ``(original_score, score_at_chargeoff, provenance)`` for a loan.
 
     The loan's row in ``monthly_loan_data`` disappears the month the core stops
@@ -736,6 +789,10 @@ def recover_scores(account, co_date, history, alias=None):
         literal = alias.get(normalize_account(account))
         if literal is not None:
             rows = history.get(literal)
+    if rows is None and member_index:
+        # Feed carries the member number only (or a suffix the extract does
+        # not use): fall back to the member's merged score series.
+        rows = member_index.get(normalize_account(account))
     if not rows:
         return 0, 0, "no_history"
 
@@ -829,6 +886,7 @@ def derive_co_by_migration(config, snapshot_date, grades, no_score=None,
         diag["warm"] = warm_meta
     diag["history_accounts"] = len(history)
     alias = build_alias_index(history)
+    member_index = build_member_index(history, config)
 
     fico_labels, brr_labels, brr_pool_lcs = _label_sets(config, grades, no_score)
     fico_idx = {g: i for i, g in enumerate(fico_labels)}
@@ -863,7 +921,8 @@ def derive_co_by_migration(config, snapshot_date, grades, no_score=None,
         o_ok = o_file is not None and o_file == o_file and float(o_file) > 0
         c_ok = c_file is not None and c_file == c_file and float(c_file) > 0
         orig_l, co_l, lb = recover_scores(
-            acct, None if pd.isna(co_date) else co_date, history, alias)
+            acct, None if pd.isna(co_date) else co_date, history, alias,
+            member_index)
 
         if c_ok:
             co_score, src_c = int(c_file), "co_file"
@@ -873,6 +932,15 @@ def derive_co_by_migration(config, snapshot_date, grades, no_score=None,
             orig_score, src_o = int(o_file), "co_file"
         else:
             orig_score, src_o = orig_l, lb
+
+        # Exactly one side known: the WARM convention (and the Risk Change
+        # matrix for live loans) treats a score that was never refreshed as
+        # original = current, i.e. ``Unchanged`` -- not ``Not Reported``,
+        # which is reserved for loans with no score at all.
+        if (co_score > 0) != (orig_score > 0):
+            known = co_score if co_score > 0 else orig_score
+            co_score = orig_score = known
+            src_c = src_o = "gap_fill"
 
         if co_score <= 0 or orig_score <= 0:
             prov = lb if lb in ("no_history", "no_prior", "unscored") else "partial"
@@ -930,7 +998,7 @@ def derive_co_by_migration(config, snapshot_date, grades, no_score=None,
     measured_share = amt_measured / total
     diag["not_reported_share"] = nr_share
     diag["measured_share"] = measured_share
-    if nr_share > MAX_NOT_REPORTED_SHARE:
+    if MAX_NOT_REPORTED_SHARE < 1.0 and nr_share > MAX_NOT_REPORTED_SHARE:
         diag["status"] = "refused_low_coverage"
         if verbose:
             print(f"    *** CO migration split REFUSED: only "

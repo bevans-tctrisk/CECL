@@ -5,10 +5,18 @@ embeds fonts via `@font-face` (see `render.py`). The font files must be
 present in this folder at render time.
 
 ## Local / workstation (current)
-The renderer expects the Calibri family (matching the Excel reports):
-`calibri.ttf`, `calibrib.ttf`, `calibrii.ttf`, `calibriz.ttf`. On Windows
-these are copied from `C:\Windows\Fonts`. **Calibri is Microsoft-licensed
-and is intentionally NOT committed to the repo** (see `.gitignore`).
+The renderer expects:
+- **Calibri** family (TCT reports): `calibri.ttf`, `calibrib.ttf`,
+  `calibrii.ttf`, `calibriz.ttf`.
+- **Arial** family (Vizo body text, "Theme 2026" minor font): `arial.ttf`,
+  `arialbd.ttf`, `ariali.ttf`, `arialbi.ttf`.
+- **Montserrat** (Vizo headings, "Theme 2026" major font):
+  `Montserrat-Variable.ttf`, `Montserrat-Italic-Variable.ttf` (SIL OFL,
+  from google/fonts; committed, see `Montserrat-OFL.txt`).
+
+On Windows the Calibri/Arial files are copied from `C:\Windows\Fonts`.
+**They are Microsoft-licensed and intentionally NOT committed** (see
+`.gitignore`).
 
 ## Shared server / redistribution (planned)
 For a multi-user server, replace Calibri with **Carlito** — a

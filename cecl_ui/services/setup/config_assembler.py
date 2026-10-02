@@ -189,9 +189,10 @@ def derive_reserve_config(acl_rates: dict) -> dict:
         mgmt-adjustment driven (base rate ~0 but non-zero allowance); the
         firm-wide model can't reproduce the WARM's methodology, so use the
         WARM's computed allowance verbatim (needs the WARM as report baseline).
-      * ``base_loss_rate_by_pool_grade`` — per-grade full allowance factor
-        (base + mgmt adj, col G) for risk-rated pools, plus a 'Total' blended
-        rate for balance-only NRR pools.
+      * ``base_loss_rate_by_pool_grade`` — per-grade ACL BASE loss rate
+        (col E, before mgmt adj) for risk-rated pools, plus a 'Total' blended
+        base rate for balance-only NRR pools. The engine layers the carried-
+        forward mgmt adj on top, so these must NOT be the col-G factor.
     Shared by ``build_config_from_warm`` and the reserve-config resolver.
     """
     out: dict = {}

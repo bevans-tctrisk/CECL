@@ -105,6 +105,11 @@ def adopt_config_to_completed(
     state = dict(cfg)
     state["short_name"] = short_name
     state["model"] = "migration"
+    # The per-CU report folder is stored top-level as ``report_output_dir`` in
+    # the YAML but lives at ``reports.output_folder`` in wizard state; map it
+    # back so it survives an edit round-trip instead of being silently dropped.
+    if isinstance(state.get("reports"), dict) and state.get("report_output_dir"):
+        state["reports"]["output_folder"] = str(state["report_output_dir"]).strip()
     # Translate YAML-config schema (``pools`` / ``monthly_balance`` /
     # ``acl`` / ``historical_file_formats``) into wizard-state schema
     # (``pool_settings`` / ``monthly_bal`` / ``acl_balance`` / ``co_columns``)

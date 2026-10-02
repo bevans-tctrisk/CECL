@@ -10,7 +10,6 @@ so the caller falls back to the workbook for those.
 
 from __future__ import annotations
 
-import glob
 import json
 import os
 import re
@@ -58,18 +57,22 @@ def load_prior_snapshot(rpt_dir: str | Path, cu: str, snapshot: str, pin=None,
     way change_analysis selects the prior report; defaults to most-recent."""
     safe = _safe_cu(cu)
     suffix = _suffix(model_name)
-    pattern = os.path.join(str(rpt_dir), f"*_CECL_Migration_{safe}_{suffix}")
     rx = re.compile(r"(\d{4}-\d{2}-\d{2})_CECL_Migration_"
                     + re.escape(safe) + r"_" + re.escape(suffix) + r"$")
     candidates = []  # (date_str, path), dated strictly before snapshot
-    for path in glob.glob(pattern):
-        m = rx.search(os.path.basename(path))
-        if not m:
-            continue
-        d = m.group(1)
-        if d >= snapshot:
-            continue
-        candidates.append((d, path))
+    seen = set()
+    # Recursive: sidecars may sit beside archived reports in subfolders
+    # (e.g. Reports/_warm_baselines, Reports/older reports).
+    for root, _dirs, files in os.walk(str(rpt_dir)):
+        for name in files:
+            m = rx.search(name)
+            if not m:
+                continue
+            d = m.group(1)
+            if d >= snapshot or d in seen:
+                continue
+            seen.add(d)
+            candidates.append((d, os.path.join(root, name)))
     chosen = None
     try:
         from change_analysis import _select_prior_candidate
