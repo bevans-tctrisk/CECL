@@ -627,7 +627,9 @@ def _to_chassis_spec(spec: dict) -> dict | None:
     }
     if bar_dir == "bar" and grouping == "stacked":
         return {**common, "kind": "diverging_stacked_bar",
-                "value_format": "pct1", "width": 620, "title_size": 22,
+                "value_format": "pct1",
+                "width": spec.get("width") or 620,
+                "title_size": spec.get("title_size") or 22,
                 "options": spec.get("options") or {}}
     if bar_dir == "col" and grouping == "clustered" and len(series) > 1:
         opts = spec.get("options") or {}
@@ -638,10 +640,15 @@ def _to_chassis_spec(spec: dict) -> dict | None:
             cser.append({"name": s.get("name"),
                          "values": s.get("values") or [],
                          "color": col, "filled": True})
-        return {"title": spec.get("title"), "categories": cats,
-                "series": cser, "kind": "clustered_column",
-                "value_format": "currency", "width": 560, "height": 300,
-                "options": opts}
+        out = {"title": spec.get("title"), "categories": cats,
+               "series": cser, "kind": "clustered_column",
+               "value_format": "currency",
+               "width": spec.get("width") or 560,
+               "height": spec.get("height") or 300,
+               "options": opts}
+        if spec.get("title_size"):
+            out["title_size"] = spec["title_size"]
+        return out
     return None
 
 

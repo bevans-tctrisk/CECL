@@ -150,7 +150,7 @@ VZ_IMPROVED     = VZ_NAVY
 VZ_DETERIORATED = VZ_GOLD
 VZ_UNCHANGED    = VZ_GRAY
 VZ_NOT_REPORTED = VZ_TEAL
-VZ_NET          = VZ_NAVY
+VZ_NET          = VZ_TEAL   # Net Change bars (Vizo, 2026-10-02)
 # Per-grade trend lines: best -> worst grade; Not Reported is a black dashed line.
 VZ_GRADE_LINE_HEX = [VZ_NAVY, VZ_TEAL, VZ_GOLD, VZ_MINT, VZ_GOLD_LT, VZ_GRAY, 'BFBFBF', 'D9D9D9']
 
@@ -1685,6 +1685,12 @@ def _sheet_impdet(wb, cu, snap, df, grades, config, hist=None):
 def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hist=None):
     """Risk Change matrix sheet – used for both total and per-pool."""
     no_score = config.get('no_score_label', 'Not Reported')
+    # Matrix header cells (grade / score-range columns, tier row) carry no
+    # fill and black lettering so the navy/gold migration fills stand alone
+    # (Vizo, 2026-10-02).
+    MHDR_FILL = PatternFill(fill_type=None)
+    MHDR_FONT = Font(name=VZ_FONT_BODY, bold=True, size=12, color='000000')
+    UNC_FILL = PatternFill('solid', fgColor=VZ_UNCHANGED)
     # BRR detection: when this per-pool sheet is for a BRR-flagged pool,
     # replace the FICO labels with the analyst-defined Business Risk Rating
     # labels so rows/columns reflect the rating bands instead of FICO bands.
@@ -1769,36 +1775,36 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     ws.merge_cells(start_row=5, start_column=3, end_row=5, end_column=ncol - 1)
     ws.merge_cells(start_row=5, start_column=ncol, end_row=6, end_column=ncol)
     c5ab = ws.cell(row=5, column=1)
-    c5ab.fill = HDR_FILL
-    c5ab.font = HDR_FONT
-    ws.cell(row=5, column=2).fill = HDR_FILL
+    c5ab.fill = MHDR_FILL
+    c5ab.font = MHDR_FONT
+    ws.cell(row=5, column=2).fill = MHDR_FILL
     c5og = ws.cell(row=5, column=3, value="Original Grade")
-    c5og.font = HDR_FONT
-    c5og.fill = HDR_FILL
+    c5og.font = MHDR_FONT
+    c5og.fill = MHDR_FILL
     c5og.alignment = hdr_center
     c5og.number_format = DOLLAR
     for ci in range(4, ncol):
-        ws.cell(row=5, column=ci).fill = HDR_FILL
+        ws.cell(row=5, column=ci).fill = MHDR_FILL
     c5gt = ws.cell(row=5, column=ncol, value="Grand Total")
-    c5gt.font = HDR_FONT
-    c5gt.fill = HDR_FILL
+    c5gt.font = MHDR_FONT
+    c5gt.fill = MHDR_FILL
     c5gt.alignment = hdr_center
     c5gt.number_format = DOLLAR
 
     # Row 6: A6:B6 merged "$ Current Grade", C6-M6 grade labels
     ws.merge_cells(start_row=6, start_column=1, end_row=6, end_column=2)
     c6ab = ws.cell(row=6, column=1, value="$ Current Grade")
-    c6ab.font = HDR_FONT
-    c6ab.fill = HDR_FILL
+    c6ab.font = MHDR_FONT
+    c6ab.fill = MHDR_FILL
     c6ab.alignment = hdr_center
     c6ab.number_format = DOLLAR
-    ws.cell(row=6, column=2).fill = HDR_FILL
+    ws.cell(row=6, column=2).fill = MHDR_FILL
     for j, g in enumerate(gl):
         cell = ws.cell(row=6, column=3 + j, value=g)
-        cell.font = HDR_FONT
-        cell.fill = HDR_FILL
+        cell.font = MHDR_FONT
+        cell.fill = MHDR_FILL
         cell.alignment = hdr_center
-    ws.cell(row=6, column=ncol).fill = HDR_FILL  # part of N5:N6 merge
+    ws.cell(row=6, column=ncol).fill = MHDR_FILL  # part of N5:N6 merge
 
     # ─── Dollar Data rows ───
     # WARM rule: top N original grades require 2+ grade drop for deterioration;
@@ -1807,12 +1813,12 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     for i, g in enumerate(gl):
         r = 7 + i
         # Side headers (cols A-B): header fill + white font
-        fnt_side = V12BR if _is_hidden(g) else Font(name=VZ_FONT_BODY, bold=True, size=12, color='FFFFFF')
+        fnt_side = V12BR if _is_hidden(g) else MHDR_FONT  # plain header column (no fill)
         ws.cell(row=r, column=1, value=g).font = fnt_side
-        ws.cell(row=r, column=1).fill = HDR_FILL
+        ws.cell(row=r, column=1).fill = MHDR_FILL
         ws.cell(row=r, column=1).alignment = side_left
         ws.cell(row=r, column=2, value=rng.get(g, '')).font = fnt_side
-        ws.cell(row=r, column=2).fill = HDR_FILL
+        ws.cell(row=r, column=2).fill = MHDR_FILL
         ws.cell(row=r, column=2).alignment = side_left
 
         rtotal = 0
@@ -1877,17 +1883,17 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     for c, lbl in [(pcol_start, "Deteriorated"), (pcol_start + 1, "Improved"),
                    (pcol_start + 2, "Unchanged")]:
         cell = ws.cell(row=6, column=c, value=lbl)
-        cell.font = HDR_FONT
-        cell.fill = HDR_FILL
+        cell.font = MHDR_FONT
+        cell.fill = MHDR_FILL
         cell.alignment = hdr_center
         ws.column_dimensions[get_column_letter(c)].width = 17.0
 
     # ─── Grand Total row ───
     r_gt = 7 + len(gl)
-    ws.cell(row=r_gt, column=1, value="Grand Total").font = HDR_FONT
-    ws.cell(row=r_gt, column=1).fill = HDR_FILL
-    ws.cell(row=r_gt, column=2).fill = HDR_FILL
-    ws.cell(row=r_gt, column=2).font = HDR_FONT
+    ws.cell(row=r_gt, column=1, value="Grand Total").font = MHDR_FONT
+    ws.cell(row=r_gt, column=1).fill = MHDR_FILL
+    ws.cell(row=r_gt, column=2).fill = MHDR_FILL
+    ws.cell(row=r_gt, column=2).font = MHDR_FONT
     for j, og in enumerate(gl):
         ct = sum(_matrix_val(matrix, g2, og) for g2 in gl)
         c = ws.cell(row=r_gt, column=3 + j, value=ct)
@@ -1905,9 +1911,9 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
         bal_adj = next((v for k, v in _bal_adj_map.items() if k.strip().lower() == _pool_lc), 0.0)
     else:
         bal_adj = _imp.get('total_balance_adjustment', 0.0)
-    ws.cell(row=r_ba, column=1, value="Balance Adjustment").font = HDR_FONT
-    ws.cell(row=r_ba, column=1).fill = HDR_FILL
-    ws.cell(row=r_ba, column=2).fill = HDR_FILL
+    ws.cell(row=r_ba, column=1, value="Balance Adjustment").font = MHDR_FONT
+    ws.cell(row=r_ba, column=1).fill = MHDR_FILL
+    ws.cell(row=r_ba, column=2).fill = MHDR_FILL
     ws.cell(row=r_ba, column=ncol, value=bal_adj).number_format = ACCT
     ws.cell(row=r_ba, column=ncol).font = V12
 
@@ -1918,9 +1924,9 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
         tip = _imp.get('total_in_portfolio', total_in_portfolio)
         if tip:
             total_in_portfolio = tip
-    ws.cell(row=r_tp, column=1, value="Total in Portfolio").font = HDR_FONT
-    ws.cell(row=r_tp, column=1).fill = HDR_FILL
-    ws.cell(row=r_tp, column=2).fill = HDR_FILL
+    ws.cell(row=r_tp, column=1, value="Total in Portfolio").font = MHDR_FONT
+    ws.cell(row=r_tp, column=1).fill = MHDR_FILL
+    ws.cell(row=r_tp, column=2).fill = MHDR_FILL
     ws.cell(row=r_tp, column=ncol, value=total_in_portfolio).number_format = ACCT
     ws.cell(row=r_tp, column=ncol).font = V12B
 
@@ -1932,46 +1938,46 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     ws.merge_cells(start_row=r_ph1, start_column=1, end_row=r_ph1, end_column=2)
     ws.merge_cells(start_row=r_ph1, start_column=3, end_row=r_ph1, end_column=ncol - 1)
     ws.merge_cells(start_row=r_ph1, start_column=ncol, end_row=r_ph2, end_column=ncol)
-    ws.cell(row=r_ph1, column=1).fill = HDR_FILL
-    ws.cell(row=r_ph1, column=1).font = HDR_FONT
-    ws.cell(row=r_ph1, column=2).fill = HDR_FILL
+    ws.cell(row=r_ph1, column=1).fill = MHDR_FILL
+    ws.cell(row=r_ph1, column=1).font = MHDR_FONT
+    ws.cell(row=r_ph1, column=2).fill = MHDR_FILL
     c_pog = ws.cell(row=r_ph1, column=3, value="Original Grade")
-    c_pog.font = HDR_FONT
-    c_pog.fill = HDR_FILL
+    c_pog.font = MHDR_FONT
+    c_pog.fill = MHDR_FILL
     c_pog.alignment = hdr_center
     c_pog.number_format = DOLLAR
     for ci in range(4, ncol):
-        ws.cell(row=r_ph1, column=ci).fill = HDR_FILL
+        ws.cell(row=r_ph1, column=ci).fill = MHDR_FILL
     c_pgt = ws.cell(row=r_ph1, column=ncol, value="Grand Total")
-    c_pgt.font = HDR_FONT
-    c_pgt.fill = HDR_FILL
+    c_pgt.font = MHDR_FONT
+    c_pgt.fill = MHDR_FILL
     c_pgt.alignment = hdr_center
     c_pgt.number_format = DOLLAR
 
     # Row ph2: A:B merged "% Current Grade", grade labels
     ws.merge_cells(start_row=r_ph2, start_column=1, end_row=r_ph2, end_column=2)
     c_pcg = ws.cell(row=r_ph2, column=1, value="% Current Grade")
-    c_pcg.font = HDR_FONT
-    c_pcg.fill = HDR_FILL
+    c_pcg.font = MHDR_FONT
+    c_pcg.fill = MHDR_FILL
     c_pcg.alignment = hdr_center
     c_pcg.number_format = DOLLAR
-    ws.cell(row=r_ph2, column=2).fill = HDR_FILL
+    ws.cell(row=r_ph2, column=2).fill = MHDR_FILL
     for j, g in enumerate(gl):
         cell = ws.cell(row=r_ph2, column=3 + j, value=g)
-        cell.font = HDR_FONT
-        cell.fill = HDR_FILL
+        cell.font = MHDR_FONT
+        cell.fill = MHDR_FILL
         cell.alignment = hdr_center
-    ws.cell(row=r_ph2, column=ncol).fill = HDR_FILL  # part of merge
+    ws.cell(row=r_ph2, column=ncol).fill = MHDR_FILL  # part of merge
 
     # ─── Percent Data rows ───
     for i, g in enumerate(gl):
         r = r_ph2 + 1 + i
-        fnt_side = V12BR if _is_hidden(g) else Font(name=VZ_FONT_BODY, bold=True, size=12, color='FFFFFF')
+        fnt_side = V12BR if _is_hidden(g) else MHDR_FONT  # plain header column (no fill)
         ws.cell(row=r, column=1, value=g).font = fnt_side
-        ws.cell(row=r, column=1).fill = HDR_FILL
+        ws.cell(row=r, column=1).fill = MHDR_FILL
         ws.cell(row=r, column=1).alignment = side_left
         ws.cell(row=r, column=2, value=rng.get(g, '')).font = fnt_side
-        ws.cell(row=r, column=2).fill = HDR_FILL
+        ws.cell(row=r, column=2).fill = MHDR_FILL
         ws.cell(row=r, column=2).alignment = side_left
 
         rtotal = 0
@@ -2000,10 +2006,10 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
 
     # Percent Grand Total row
     r_pgt = r_ph2 + 1 + len(gl)
-    ws.cell(row=r_pgt, column=1, value="Grand Total").font = HDR_FONT
-    ws.cell(row=r_pgt, column=1).fill = HDR_FILL
-    ws.cell(row=r_pgt, column=2).fill = HDR_FILL
-    ws.cell(row=r_pgt, column=2).font = HDR_FONT
+    ws.cell(row=r_pgt, column=1, value="Grand Total").font = MHDR_FONT
+    ws.cell(row=r_pgt, column=1).fill = MHDR_FILL
+    ws.cell(row=r_pgt, column=2).fill = MHDR_FILL
+    ws.cell(row=r_pgt, column=2).font = MHDR_FONT
     for j in range(len(gl)):
         c = ws.cell(row=r_pgt, column=3 + j, value=1.0)
         c.number_format = '0%'
@@ -2031,7 +2037,7 @@ def _sheet_risk_change(wb, cu, snap, data_df, grades, config, pool_name=None, hi
     summary_items = [
         ("Improved",     imp_bal, imp_bal / total if total else 0, IMP_FILL),
         ("Deteriorated", det_bal, det_bal / total if total else 0, DET_FILL),
-        ("Unchanged",    unc_bal, unc_bal / total if total else 0, HDR_FILL),
+        ("Unchanged",    unc_bal, unc_bal / total if total else 0, UNC_FILL),
         ("Portfolio",    total,   1.0,                             None),
         ("Net Change",   net,     net / total if total else 0,     None),
     ]

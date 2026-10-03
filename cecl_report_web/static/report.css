@@ -322,10 +322,11 @@ tfoot { display: table-footer-group; }
   padding: 0.1pt 4pt;
   white-space: nowrap;
 }
-/* Header cells: brand navy, white, bold, centered (matches #011631). */
+/* Header cells (grade / score-range columns, tier row): plain, black, bold --
+   Vizo request 2026-10-02 so the navy/gold migration fills stand alone. */
 .rc-matrix .hd {
-  background: #011631;
-  color: #ffffff;
+  background: none;
+  color: #000;
   font-weight: 700;
   text-align: center;
   white-space: normal;
@@ -346,7 +347,7 @@ tfoot { display: table-footer-group; }
   width: 100%;
 }
 .rc-summary .hd {
-  background: #011631; color: #fff; font-weight: 700;
+  background: none; color: #000; font-weight: 700;
   text-align: left; padding: 2pt 8pt;
   width: 1%; white-space: nowrap;   /* title hugs its text, not a column */
 }
@@ -372,10 +373,10 @@ tfoot { display: table-footer-group; }
 
 /* Net Credit Change: summary table beside an exploded doughnut. */
 .ncc-combo { display: flex; flex-direction: column; align-items: center; break-inside: avoid; max-height: 100%; }
-.ncc-title { font-size: 12pt; font-weight: 600; margin-bottom: 3pt; text-align: center; }
+.ncc-title { font-size: 11pt; font-weight: 600; margin-bottom: 3pt; text-align: center; }
 .ncc-body { display: flex; align-items: center; gap: 0.2in; }
 .ncc-combo svg.chart { height: 1.6in; max-height: 100%; width: auto; }
-.ncc-table { border-collapse: collapse; font-size: 10.5pt; }
+.ncc-table { border-collapse: collapse; font-size: 10pt; }
 .ncc-table td { padding: 3pt 8pt; white-space: nowrap; }
 .ncc-table td.lbl { text-align: left; }
 .ncc-table td.bal, .ncc-table td.pct {
@@ -526,7 +527,9 @@ tfoot { display: table-footer-group; }
 /* Risk-change matrix: navy header band; teal-green improved /
    controlled-red deteriorated cells (retire olive + maroon). */
 .theme-tct .rc-matrix .hd,
-.theme-tct .rc-summary .hd { background: #004783; }
+.theme-tct .rc-summary .hd { background: #004783; color: #fff; }
+.theme-tct .ncc-title { font-size: 12pt; }
+.theme-tct .ncc-table { font-size: 10.5pt; }
 .theme-tct .rc-matrix .improved     { background: #2D897A; }
 .theme-tct .rc-matrix .deteriorated { background: #C0453C; }
 
