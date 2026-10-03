@@ -473,7 +473,7 @@ _C_IMPROVED = "011631"
 _C_DETERIORATED = "926C12"
 _C_UNCHANGED = "7F7F7F"
 _C_NOT_REPORTED = "068288"
-_C_NET = "011631"
+_C_NET = "068288"   # Net Change bars: teal (Vizo, 2026-10-02)
 _MIG_LABELS = ("Improved", "Deteriorated", "Unchanged", "Not Reported")
 _MIG_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED, _C_NOT_REPORTED)
 _NCC_COLORS = (_C_IMPROVED, _C_DETERIORATED, _C_UNCHANGED)
@@ -533,7 +533,7 @@ def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
         }
     bar_dir = "bar" if cs.kind in ("bar_h", "diverging_bar") else "col"
     grouping = "stacked" if cs.kind == "diverging_bar" else "clustered"
-    return {
+    out = {
         "type": "BarChart", "bar_dir": bar_dir, "grouping": grouping,
         "title": cs.title, "options": opts,
         "series": [{
@@ -544,6 +544,11 @@ def _chartspec_to_render_dict(cs: ChartSpec) -> dict:
             "label_fmt": lbl_fmt, "show_labels": True,
         } for s in cs.series],
     }
+    # Intrinsic SVG size / title size, when a page needs a specific scale.
+    for k in ("width", "height", "title_size"):
+        if opts.get(k):
+            out[k] = opts[k]
+    return out
 
 
 def render_chart_specs(specs: list[ChartSpec]) -> list[str]:
@@ -683,6 +688,10 @@ def risk_change_by_grade_chart(df: Any, grades: Any, config: dict,
         imp_by.append(imp)
     if not cats:
         return []
+    # Vizo: sized/scaled so the title and labels read at the same point size
+    # as the Net Credit Change table beside it (title 11pt, body ~10pt).
+    _sz = ({} if variant == "tct" else
+           {"width": 430, "height": 205, "font_scale": 1.25})
     return [ChartSpec(
         kind="column", title="Risk Change by Grade", categories=cats,
         series=[{"name": "Deteriorated", "values": det_by, "colors": [c_det]},
@@ -690,7 +699,7 @@ def risk_change_by_grade_chart(df: Any, grades: Any, config: dict,
         value_format="currency",
         options={"outline": True, "center_title": True,
                  "no_value_axis": True, "value_labels": "never",
-                 "outline_width": 3.2})]
+                 "outline_width": 3.2, **_sz})]
 
 
 def build_ncc_combo(df: Any, grades: Any, config: dict,
@@ -785,20 +794,25 @@ def impr_deter_charts(df: Any, grades: Any, config: dict,
             series=[{"name": "Deteriorated", "values": det_pct_g[:-1], "colors": [c_det]}],
             value_format="pct", options=_o))
     if names:
-        # Negate so Improved (teal) plots LEFT of the zero baseline and
-        # Deteriorated (maroon) RIGHT; labels still show magnitude via abs().
+        # Vizo (2026-10-02): no vertical gridlines / percentage scale on the
+        # pool bars; Net Change is one colour so it carries no legend.
+        _bar_o = dict(_o) if variant == "tct" else {**_o, "no_value_axis": True}
+        _net_o = (dict(_o) if variant == "tct"
+                  else {**_o, "no_value_axis": True, "no_legend": True})
+        # Negate so Improved plots LEFT of the zero baseline and
+        # Deteriorated RIGHT; labels still show magnitude via abs().
         specs.append(ChartSpec(
             kind="diverging_bar", title="Improved / Deteriorated Loans",
             categories=names,
             series=[{"name": "Improved", "values": [-v for v in p_imp], "colors": [c_imp]},
                     {"name": "Deteriorated", "values": [-v for v in p_det], "colors": [c_det]}],
-            value_format="pct", options=_o))
+            value_format="pct", options=_bar_o))
         # Net Change as a diverging bar: positive (net improvement) plots LEFT,
         # negative (net deterioration) RIGHT -- negate to flip onto that side.
         specs.append(ChartSpec(
             kind="diverging_bar", title="Net Change", categories=names,
             series=[{"name": "Net", "values": [-v for v in p_net], "colors": [c_net]}],
-            value_format="pct", options=_o))
+            value_format="pct", options=_net_o))
     return specs
 
 

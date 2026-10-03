@@ -98,7 +98,7 @@ PALETTE = [
 SEMANTIC = {
     "improved": "#011631",
     "deteriorated": "#926C12",
-    "net": "#011631",
+    "net": "#068288",
     "unchanged": "#7F7F7F",
 }
 
@@ -876,13 +876,15 @@ def render_diverging_stacked_bar(spec: dict) -> str:
     side_pad = max_lbl + 8
 
     row_h = float(opts.get("row_height", 22))
-    legend_items = [(str(s.get("name") or f"Series {i+1}"), _color(series, i))
+    no_axis = bool(opts.get("no_value_axis"))
+    no_legend = bool(opts.get("no_legend"))
+    legend_items = [(str(s.get("name") or f"Series {i+1}"), _color(series, i, theme))
                     for i, s in enumerate(series)]
     head_svg, head_y = header(Frame(w, 0), spec.get("title"), spec.get("subtitle"),
                               x=w / 2, anchor="middle",
                               title_size=spec.get("title_size") or TITLE_SIZE)
-    top = max(head_y, 4) + LEGEND_SIZE + 10
-    bottom = TICK_SIZE + 16
+    top = max(head_y, 4) + (6 if no_legend else LEGEND_SIZE + 10)
+    bottom = 8 if no_axis else TICK_SIZE + 16
     h = float(spec.get("height") or (top + n * row_h + bottom))
 
     frame = Frame(w, h, top=top, left=cat_w + side_pad, right=side_pad + 4,
@@ -895,11 +897,12 @@ def render_diverging_stacked_bar(spec: dict) -> str:
                     svg_rect(0, 0, w, h, fill=THEME["surface"]), head_svg]
 
     # legend, top-left of the plot
-    p.append(legend(legend_items, frame.x0, top - 6,
-                    filled=series[0].get("filled", True) if series else True))
+    if not no_legend:
+        p.append(legend(legend_items, frame.x0, top - 6,
+                        filled=series[0].get("filled", True) if series else True))
 
     # gridlines + value ticks (magnitudes; sign lives in the legend)
-    for t in ticks:
+    for t in ([] if no_axis else ticks):
         tx = x(t)
         is_zero = abs(t) < 1e-12
         p.append(svg_line(tx, frame.y0 - 2, tx, frame.y1,
@@ -990,6 +993,11 @@ def render_clustered_column(spec: dict) -> str:
     theme = opts.get("theme")
     w = float(spec.get("width") or 560)
     h = float(spec.get("height") or 300)
+    # Scales the chrome text (title / legend / category labels) together, for
+    # charts that must sit beside HTML text of a known point size.
+    fs = float(opts.get("font_scale") or 1.0)
+    legend_size = LEGEND_SIZE * fs
+    cat_size = LABEL_SIZE * fs
 
     cols = [effective_values(s, n) for s in series]
     flat = [v for c in cols for v in c]
@@ -1006,8 +1014,9 @@ def render_clustered_column(spec: dict) -> str:
     center = bool(opts.get("center_title"))
     head_svg, head_y = header(Frame(w, 0), spec.get("title"), spec.get("subtitle"),
                               x=(w / 2 if center else None),
-                              anchor=("middle" if center else "start"))
-    top = max(head_y, 4) + LEGEND_SIZE + 12
+                              anchor=("middle" if center else "start"),
+                              title_size=spec.get("title_size") or TITLE_SIZE * fs)
+    top = max(head_y, 4) + legend_size + 12
     left = (10.0 if no_axis else
             max_tick_width(ticks, tick_formatter(
                 spec.get("value_format") or "currency", ticks)) + 12
@@ -1018,7 +1027,7 @@ def render_clustered_column(spec: dict) -> str:
     # needs the plot width, which needs this margin -- so measure with a
     # provisional frame, then rebuild.
     prov = BandScale(n, left, w - right)
-    bottom = category_axis_height(cats, prov.step) + 6
+    bottom = category_axis_height(cats, prov.step, size=cat_size) + 6
     frame = Frame(w, h, top=top, left=left, right=right, bottom=bottom)
 
     yscale = LinearScale(d0, d1, frame.y1, frame.y0)   # inverted: +y is up
@@ -1030,10 +1039,11 @@ def render_clustered_column(spec: dict) -> str:
                     svg_rect(0, 0, w, h, fill=THEME["surface"]), head_svg]
     legend_x = frame.x0
     if center:
-        lw = sum(LEGEND_SIZE * 0.9 + 4 + text_width(lbl, LEGEND_SIZE) + 16
+        lw = sum(legend_size * 0.9 + 4 + text_width(lbl, legend_size) + 16
                  for lbl, _c in legend_items) - 16
         legend_x = max(frame.x0, (w - lw) / 2)
-    p.append(legend(legend_items, legend_x, top - 8, filled=not outline))
+    p.append(legend(legend_items, legend_x, top - 8, filled=not outline,
+                    size=legend_size))
     if not no_axis:
         p.append(y_axis(frame, yscale, ticks, tfmt,
                         axis_title=spec.get("axis_title")))
@@ -1069,7 +1079,7 @@ def render_clustered_column(spec: dict) -> str:
                                       size=label_size, anchor="middle",
                                       fill=THEME["ink_secondary"],
                                       extra=' style="font-variant-numeric:tabular-nums"'))
-    p.append(x_category_axis(frame, band, cats, rule=not no_axis))
+    p.append(x_category_axis(frame, band, cats, rule=not no_axis, size=cat_size))
     p.append(svg_close())
     return "".join(p)
 
